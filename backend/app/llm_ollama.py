@@ -1,26 +1,28 @@
-from fastapi import HTTPException
-import subprocess
+import os
+import requests
 
-def run_ollama(model: str, prompt: str, timeout: int = 120) -> str:
-    """Запуск `ollama run <model> <prompt>` и возврат ответа модели.
-    С таймаутом и аккуратной обработкой ошибок.
+OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b-instruct")  # поменяй при желании
+
+def generate(messages):
     """
-    try:
-        result = subprocess.run(
-            ["ollama", "run", model, prompt],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except FileNotFoundError:
-        raise HTTPException(status_code=500, detail="Ollama не найден в PATH.")
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Ollama timeout.")
-
-    if result.returncode != 0:
-        err = (result.stderr or "Unknown error").strip()
-        raise HTTPException(status_code=502, detail=f"Ollama error: {err}")
-
-    return (result.stdout or "").strip()
+    messages: список dict [{"role":"system"/"user"/"assistant","content":"..."}]
+    Возвращает: текст ответа ассистента (str)
+    """
+    url = f"{OLLAMA_BASE}/api/chat"
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": messages,
+        "stream": False
+    }
+    r = requests.post(url, json=payload, timeout=120)
+    r.raise_for_status()
+    data = r.json()
+    # формат Ollama chat
+    if "message" in data and "content" in data["message"]:
+        return data["message"]["content"]
+    # на случай другого формата
+    if "choices" in data and data["choices"]:
+        return data["choices"][0].get("message", {}).get("content", "")
+    return ""
 

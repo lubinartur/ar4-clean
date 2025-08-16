@@ -1,47 +1,52 @@
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
-import os
+from fastapi import FastAPI
+from backend.app.memory.schemas import IngestReq, SearchReq, ProfilePatch, ChatReq
+from backend.app.chat import build_context, on_user_message, on_assistant_message, add_fact
+from backend.app.memory.manager import MemoryManager
+from backend.app.llm_ollama import generate
 
-from backend.app.llm_ollama import run_ollama
+app = FastAPI(title="AIR4 API — Phase 2")
 
-# Загружаем .env
-load_dotenv()
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral")
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+# создаём общий MemoryManager
+_mm = MemoryManager()
 
-app = FastAPI(title="AIR4 API", version="0.0.1")
+# передаём его в модуль chat
+from backend.app import chat as chatmod
+chatmod.set_memory_manager(_mm)
 
-# CORS — на время разработки всё открыто
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
-@app.get("/")
-def root():
-    return {"message": "AIR4 API is running locally"}
+@app.post("/memory/ingest")
+def ingest(req: IngestReq):
+    doc_id = _mm.ingest(req.text, req.meta)
+    return {"ok": True, "id": doc_id}
 
-@app.get("/health")
-def health():
-    return {"status": "ok", "ollama_model": OLLAMA_MODEL, "ollama_host": OLLAMA_HOST}
+
+@app.post("/memory/search")
+def search(req: SearchReq):
+    hits = _mm.retrieve(req.query, k=req.k)
+    return {"ok": True, "results": hits}
+
+
+@app.post("/memory/upsert-profile")
+def upsert(req: ProfilePatch):
+    profile = _mm.upsert_profile(req.patch)
+    return {"ok": True, "profile": profile}
+
 
 @app.post("/chat")
-async def chat(request: Request):
-    data = await request.json()
-    message = data.get("message", "").strip()
-    if not message:
-        raise HTTPException(status_code=400, detail="Empty 'message'")
-    system = (
-        "Ты — локальный оффлайн-ассистент AIR4. Отвечай кратко (1–3 строки) и по делу. "
-        "По умолчанию трактуй финансовые термины в финансовом контексте. "
-        "DTI = debt-to-income ratio (отношение ежемесячных долговых платежей к ежемесячному доходу, в %). "
-        "Если аббревиатура многозначна — сначала предложи финансовую трактовку или задай уточнение."
-    )
-    prompt = f"{system}\n\nВопрос: {message}\nОтвет:"
-    answer = run_ollama(OLLAMA_MODEL, prompt)
-    return {"response": answer}
+def chat(req: ChatReq):
+    on_user_message(req.message)
+    ctx = build_context(req.message, top_k=req.top_k, with_short_summary=req.with_short_summary)
+
+    messages = [
+        {"role": "system", "content": ctx},
+        {"role": "user", "content": req.message},
+    ]
+
+    answer = generate(messages)
+    on_assistant_message(answer)
+
+    if len(answer) > 250:
+        add_fact(answer[:600], {"source": "auto_summary"})
+
+    return {"ok": True, "answer": answer}
 
