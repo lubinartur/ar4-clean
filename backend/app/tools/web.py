@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import os, json, time, hashlib
 import urllib.parse
 from typing import List, Dict, Any, Optional
 
@@ -12,6 +13,33 @@ from duckduckgo_search import DDGS
 
 UA = "AIR4Bot/1.0 (+local)"
 TIMEOUT = 20
+CACHE_DIR = os.path.join("storage", "web_cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+def _cache_key(url: str) -> str:
+    return hashlib.sha1(url.encode("utf-8")).hexdigest() + ".json"
+
+def _cache_path(url: str) -> str:
+    return os.path.join(CACHE_DIR, _cache_key(url))
+
+def _cache_get(url: str, ttl_sec: int) -> dict | None:
+    path = _cache_path(url)
+    if not os.path.exists(path):
+        return None
+    try:
+        if (time.time() - os.path.getmtime(path)) > ttl_sec:
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def _cache_set(url: str, payload: dict) -> None:
+    try:
+        with open(_cache_path(url), "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+    except Exception:
+        pass
 
 
 def _clean(s: str) -> str:
@@ -305,11 +333,27 @@ def _search_docs_python_org(query: str, max_results: int = 5) -> List[Dict[str, 
     return results
 
 
-def web_fetch(url: str, max_chars: int = 20000, timeout: int = TIMEOUT) -> Dict[str, Any]:
+def web_fetch(
+    url: str,
+    max_chars: int = 20000,
+    timeout: int = TIMEOUT,
+    use_cache: bool = True,
+    ttl_sec: int = 60 * 60 * 24 * 3  # 3 дня
+) -> Dict[str, Any]:
     """
     Забирает страницу и выжимает читаемый текст (Readability -> BeautifulSoup).
-    Возвращает: {title, url, text}
+    Кэширует результат на диске (storage/web_cache) на ttl_sec.
+    Возвращает: {title, url, text, cached: bool}
     """
+    if use_cache:
+        hit = _cache_get(url, ttl_sec=ttl_sec)
+        if hit:
+            # ограничим text на всякий (если max_chars уменьшили)
+            txt = hit.get("text", "")
+            if len(txt) > max_chars:
+                txt = txt[:max_chars]
+            return {"title": hit.get("title", ""), "url": url, "text": txt, "cached": True}
+
     headers = {"User-Agent": UA}
     with httpx.Client(follow_redirects=True, headers=headers, timeout=timeout) as client:
         resp = client.get(url)
@@ -338,7 +382,11 @@ def web_fetch(url: str, max_chars: int = 20000, timeout: int = TIMEOUT) -> Dict[
     if len(text) > max_chars:
         text = text[:max_chars]
 
-    return {"title": title, "url": url, "text": text}
+    # записываем в кэш
+    if use_cache:
+        _cache_set(url, {"title": title, "text": text})
+
+    return {"title": title, "url": url, "text": text, "cached": False}
 
 def docs_search(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
     """Прямой поиск по https://docs.python.org/3/search.html?q=..."""
