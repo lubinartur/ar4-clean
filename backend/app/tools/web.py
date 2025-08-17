@@ -65,13 +65,12 @@ def web_search(
     timelimit: Optional[str] = None,  # "d","w","m","y"
 ) -> List[Dict[str, Any]]:
     """
-    Каскадный поиск (переставлен порядок, чтобы избежать 429 от DDG):
-    1) Fast-path: docs.python.org (индекс Sphinx)
-    2) Fast-path: pypi.org (JSON API + HTML)
-    3) SearXNG JSON (несколько инстансов)  ← СНАЧАЛА
-       + пара альтернативных переформулировок для общих запросов
-    4) duckduckgo_search.DDGS().text(...)
-    5) HTML DuckDuckGo (lite/html)
+    Каскадный поиск (SearXNG -> DDG -> HTML):
+      1) Fast-path: docs.python.org (индекс Sphinx)
+      2) Fast-path: pypi.org (JSON API + HTML)
+      3) SearXNG JSON (несколько инстансов, из .env при наличии)
+      4) duckduckgo_search.DDGS().text(...)
+      5) HTML DuckDuckGo (lite/html)
     + пост-фильтр по 'site:domain'
     """
     results: List[Dict[str, Any]] = []
@@ -100,14 +99,18 @@ def web_search(
         # если пусто — идём дальше по каскаду
 
     # 3) SearXNG JSON (в первую очередь)
-    searx_instances = [
-        "https://searx.be/search",
-        "https://searxng.site/search",
-        "https://search.bus-hit.me/search",
-        "https://search.ononoki.org/search",
-        "https://searx.tiekoetter.com/search",
-        "https://search.stinpriza.org/search",
-    ]
+    searx_env = os.getenv("SEARX_INSTANCES", "")
+    if searx_env.strip():
+        searx_instances = [u.strip() for u in searx_env.split(",") if u.strip()]
+    else:
+        searx_instances = [
+            "https://searx.be/search",
+            "https://searxng.site/search",
+            "https://search.bus-hit.me/search",
+            "https://search.ononoki.org/search",
+            "https://searx.tiekoetter.com/search",
+            "https://search.stinpriza.org/search",
+        ]
     params_base = {
         "q": query,
         "format": "json",
@@ -143,7 +146,7 @@ def web_search(
 
     # сначала пробуем как есть
     results = _searx_query(query)
-    # если совсем пусто и нет site-фильтра — попробуем парочку «разумных» переформулировок
+    # если пусто и нет site-фильтра — попробуем альтернативы
     if not results and not allowed:
         for alt in [
             f"site:readthedocs.io {query}",
@@ -155,7 +158,7 @@ def web_search(
     if results:
         return results[:max_results]
 
-    # 4) библиотека DDGS (может дать 429; это ок — пойдём дальше)
+    # 4) библиотека DDGS
     try:
         oversample = max_results * 4 if allowed else max_results
         with DDGS() as ddgs:
@@ -194,7 +197,7 @@ def web_search(
         url = base_url + "?" + urllib.parse.urlencode(params)
         resp = client.get(url)
         if resp.status_code == 429:
-            return []  # отдаём пусто — оставим каскад идти дальше
+            return []
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "lxml")
         link_selectors = [
@@ -341,8 +344,8 @@ def _search_docs_python_org(query: str, max_results: int = 5) -> List[Dict[str, 
 def _search_pypi(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
     """
     Поиск по PyPI:
-    1) Если запрос — одно слово (имя пакета), пробуем JSON API: /pypi/<name>/json.
-    2) Фоллбек: HTML-страница поиска.
+      1) Если запрос — одно слово (имя пакета), пробуем JSON API: /pypi/<name>/json.
+      2) Фоллбек: HTML-страница поиска.
     """
     headers = {"User-Agent": UA}
     q = (query or "").strip()
@@ -408,7 +411,7 @@ def web_fetch(
     max_chars: int = 20000,
     timeout: int = TIMEOUT,
     use_cache: bool = True,
-    ttl_sec: int = 60 * 60 * 24 * 3  # 3 дня
+    ttl_sec: int = int(os.getenv("WEB_CACHE_TTL_SEC", str(60 * 60 * 24 * 3)))  # из .env или 3 дня
 ) -> Dict[str, Any]:
     """
     Забирает страницу и выжимает читаемый текст (Readability -> BeautifulSoup).
