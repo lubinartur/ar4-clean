@@ -1,52 +1,148 @@
-from fastapi import FastAPI
-from backend.app.memory.schemas import IngestReq, SearchReq, ProfilePatch, ChatReq
-from backend.app.chat import build_context, on_user_message, on_assistant_message, add_fact
-from backend.app.memory.manager import MemoryManager
-from backend.app.llm_ollama import generate
+# backend/app/main.py
+from fastapi import FastAPI, Body
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import List, Dict, Optional
 
-app = FastAPI(title="AIR4 API — Phase 2")
+from .summarizer import AutoSummarizer
+from . import llm_client
 
-# создаём общий MemoryManager
-_mm = MemoryManager()
+app = FastAPI()
 
-# передаём его в модуль chat
-from backend.app import chat as chatmod
-chatmod.set_memory_manager(_mm)
+# --- инициализация автосаммари ---
+summarizer = AutoSummarizer()  # без llm_call — будет fallback
 
+# === модели ===
+class ChatRequest(BaseModel):
+    message: str
+    session_id: str
+    user_id: Optional[str] = "default"
+    end_session: Optional[bool] = False
+    web_query: Optional[str] = None  # <- для авто-подмешивания веб-контекста
 
-@app.post("/memory/ingest")
-def ingest(req: IngestReq):
-    doc_id = _mm.ingest(req.text, req.meta)
-    return {"ok": True, "id": doc_id}
+class ChatResponse(BaseModel):
+    reply: str
+    injected_summaries: List[str] = []
+    summary: Optional[str] = None
 
+# === вспомогательное ===
+def _recent_texts(user_id: str, k: int = 2) -> List[str]:
+    rows = summarizer.recent(user_id=user_id, limit=k)
+    return [text for (text, md) in rows]
 
-@app.post("/memory/search")
-def search(req: SearchReq):
-    hits = _mm.retrieve(req.query, k=req.k)
-    return {"ok": True, "results": hits}
+def _messages_from_req(req: ChatRequest, injected: List[str]) -> List[Dict]:
+    msgs: List[Dict] = []
+    if injected:
+        sys_block = "Короткая память:\n" + "\n\n".join(f"— {t}" for t in injected)
+        msgs.append({
+            "role": "system",
+            "content": sys_block,
+            "metadata": {"session_id": req.session_id}
+        })
+    msgs.append({
+        "role": "user",
+        "content": req.message,
+        "metadata": {"session_id": req.session_id}
+    })
+    return msgs
 
+# === эндпоинт /chat ===
+@app.post("/chat", response_model=ChatResponse)
+def chat(req: ChatRequest):
+    injected = _recent_texts(req.user_id or "default", k=2)
 
-@app.post("/memory/upsert-profile")
-def upsert(req: ProfilePatch):
-    profile = _mm.upsert_profile(req.patch)
-    return {"ok": True, "profile": profile}
+    # при наличии web_query — подтягиваем веб-контекст и внедряем в system
+    if req.web_query:
+        try:
+            from .tools.web import web_search, web_fetch
+            hits = web_search(req.web_query, max_results=2)
+            chunks: List[str] = []
+            for h in hits:
+                try:
+                    page = web_fetch(h["url"], max_chars=3000)
+                    chunks.append(f"# {page['title']}\n{page['url']}\n\n{page['text'][:1200]}")
+                except Exception:
+                    pass
+            if chunks:
+                injected.insert(0, "Веб-контекст:\n" + "\n\n---\n\n".join(chunks))
+        except Exception:
+            pass
 
+    messages = _messages_from_req(req, injected)
 
-@app.post("/chat")
-def chat(req: ChatReq):
-    on_user_message(req.message)
-    ctx = build_context(req.message, top_k=req.top_k, with_short_summary=req.with_short_summary)
+    # аккуратный системный промт — строгость формата и опора на веб-контекст
+    sys_prompt = (
+        "Ты — техлид проекта AIR4 на macOS.\n"
+        "Если в системном сообщении есть блок 'Веб-контекст', считай его единственным источником истины: "
+        "опирайся ТОЛЬКО на него, не выдумывай и не добавляй неподтверждённые детали.\n"
+        "Отвечай строго в формате:\n"
+        "1) Цель (1–2 строки)\n"
+        "2) Шаги с готовыми командами (zsh) и/или коротким корректным кодом\n"
+        "3) Проверка (коротко)\n"
+        "4) Что сохранить (коротко)\n"
+        "Правила: будь точным, не придумывай инструментов/флагов; для Python показывай рабочие минимальные примеры. "
+        "Пример для asyncio.run:\n"
+        "  import asyncio\n"
+        "  async def main(): ...\n"
+        "  if __name__ == '__main__':\n"
+        "      asyncio.run(main())\n"
+        "Ограничения: нельзя вызывать внутри уже работающего цикла событий; "
+        "в Jupyter/REPL использовать await или asyncio.Runner."
+    )
 
-    messages = [
-        {"role": "system", "content": ctx},
-        {"role": "user", "content": req.message},
-    ]
+    try:
+        reply = llm_client.chat_complete([
+            {"role": "system", "content": sys_prompt},
+            *messages
+        ])
+    except Exception:
+        reply = f"(LLM не настроен) Я получил: {req.message}"
 
-    answer = generate(messages)
-    on_assistant_message(answer)
+    saved_summary: Optional[str] = None
+    if req.end_session:
+        saved = summarizer.summarize_session(messages, user_id=req.user_id, session_id=req.session_id)
+        saved_summary = saved["summary"]
 
-    if len(answer) > 250:
-        add_fact(answer[:600], {"source": "auto_summary"})
+    return ChatResponse(reply=reply, injected_summaries=injected, summary=saved_summary)
 
-    return {"ok": True, "answer": answer}
+# === health ===
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+# === TOOLS REGISTRY ===
+def _run_tool(name: str, params: dict):
+    # ленивые импорты
+    if name == "read_text":
+        from .tools.files import read_text
+        return read_text(**(params or {}))
+    if name == "read_pdf":
+        from .tools.files import read_pdf
+        return read_pdf(**(params or {}))
+    if name == "csv_head":
+        from .tools.data import csv_head
+        return csv_head(**(params or {}))
+    if name == "web_search":
+        from .tools.web import web_search
+        return web_search(**(params or {}))
+    if name == "web_fetch":
+        from .tools.web import web_fetch
+        return web_fetch(**(params or {}))
+    if name == "docs_search":
+        from .tools.web import docs_search
+        return docs_search(**(params or {}))
+    if name == "http_get":
+        from .tools.web import http_get
+        return http_get(**(params or {}))
+    raise ValueError(f"Unknown tool: {name}")
+
+@app.post("/tools")
+def tools(payload: dict = Body(...)):
+    name = payload.get("name")
+    params = payload.get("params") or {}
+    try:
+        result = _run_tool(name, params)
+        return {"ok": True, "tool": name, "result": result}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"ok": False, "tool": name, "error": str(e)})
 
