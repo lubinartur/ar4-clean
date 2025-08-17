@@ -56,6 +56,32 @@ def _domain_matches(url: str, allowed: set[str]) -> bool:
         return False
     return any(netloc == d or netloc.endswith("." + d) for d in allowed)
 
+def _http_get(url: str, *, params=None, headers=None, timeout=TIMEOUT, tries: int = 3, backoff: float = 0.6):
+    """
+    GET с ретраями по сетевым ошибкам, 429 и 5xx.
+    backoff: 0.6 -> 1.2 -> 1.8 ... сек
+    """
+    last_exc = None
+    for attempt in range(1, tries + 1):
+        try:
+            with httpx.Client(follow_redirects=True, headers=headers or {"User-Agent": UA}, timeout=timeout) as client:
+                resp = client.get(url, params=params)
+            if resp.status_code in (429, 502, 503, 504):
+                time.sleep(backoff * attempt)
+                continue
+            resp.raise_for_status()
+            return resp
+        except httpx.RequestError as e:
+            last_exc = e
+            time.sleep(backoff * attempt)
+        except httpx.HTTPStatusError as e:
+            if 400 <= e.response.status_code < 500 and e.response.status_code != 429:
+                raise
+            last_exc = e
+            time.sleep(backoff * attempt)
+    if last_exc:
+        raise last_exc
+
 # ---------- Поиск ----------
 def web_search(
     query: str,
@@ -123,23 +149,20 @@ def web_search(
         out: List[Dict[str, Any]] = []
         for endpoint in searx_instances:
             try:
-                with httpx.Client(follow_redirects=True, headers={"User-Agent": UA}, timeout=TIMEOUT) as client:
-                    resp = client.get(endpoint, params={**params_base, "q": q})
-                    if not resp.is_success:
+                resp = _http_get(endpoint, params={**params_base, "q": q}, headers={"User-Agent": UA})
+                data = resp.json()
+                items = data.get("results", []) or []
+                for it in items:
+                    url = it.get("url")
+                    title = _clean(it.get("title"))
+                    snippet = _clean(it.get("content") or it.get("snippet") or "")
+                    if not url or not title:
                         continue
-                    data = resp.json()
-                    items = data.get("results", []) or []
-                    for it in items:
-                        url = it.get("url")
-                        title = _clean(it.get("title"))
-                        snippet = _clean(it.get("content") or it.get("snippet") or "")
-                        if not url or not title:
-                            continue
-                        if not _domain_matches(url, allowed):
-                            continue
-                        out.append({"title": title, "url": url, "snippet": snippet})
-                        if len(out) >= max_results:
-                            return out
+                    if not _domain_matches(url, allowed):
+                        continue
+                    out.append({"title": title, "url": url, "snippet": snippet})
+                    if len(out) >= max_results:
+                        return out
             except Exception:
                 continue
         return out
@@ -266,78 +289,76 @@ def _search_docs_python_org(query: str, max_results: int = 5) -> List[Dict[str, 
 
     results: List[Dict[str, Any]] = []
 
-    with httpx.Client(follow_redirects=True, headers=headers, timeout=TIMEOUT) as client:
-        for ver in versions:
-            try:
-                url = f"https://docs.python.org/{ver}/searchindex.js"
-                r = client.get(url)
-                r.raise_for_status()
-                text = r.text
+    for ver in versions:
+        try:
+            url = f"https://docs.python.org/{ver}/searchindex.js"
+            r = _http_get(url, headers=headers)
+            text = r.text
 
-                m = re.search(r"Search\.setIndex\((\{.*\})\);?\s*$", text, re.S)
-                if not m:
-                    continue
-                data = _json.loads(m.group(1))
-
-                docnames = data.get("docnames", [])
-                titles = data.get("titles", [])
-                terms = data.get("terms", {})
-
-                sets = []
-                for tok in tokens:
-                    if tok in terms:
-                        idxs = set(_flatten_idxs(terms[tok]))
-                        if idxs:
-                            sets.append(idxs)
-                    else:
-                        cand = set()
-                        for k, v in terms.items():
-                            if tok in k:
-                                cand.update(_flatten_idxs(v))
-                        if cand:
-                            sets.append(cand)
-
-                if sets:
-                    docs = set.intersection(*sets) if len(sets) > 1 else sets[0]
-                else:
-                    docs = {i for i, name in enumerate(docnames) if all(t in name.lower() for t in tokens)}
-
-                def _score(i: int) -> int:
-                    name = (docnames[i] if i < len(docnames) else "").lower()
-                    title_i = (titles[i] if i < len(titles) else "").lower()
-                    score = 0
-                    for t in tokens:
-                        if t in title_i:
-                            score += 3
-                        if t in name:
-                            score += 2
-                    if "asyncio" in title_i or "asyncio" in name:
-                        score += 3
-                    return score
-
-                if any(t == "asyncio" for t in tokens):
-                    pref = [i for i in docs if (
-                        "asyncio" in (titles[i] if i < len(titles) else "").lower()
-                        or "asyncio" in (docnames[i] if i < len(docnames) else "").lower()
-                    )]
-                    docs = pref or list(docs)
-
-                docs = sorted(docs, key=_score, reverse=True)
-
-                for i in docs:
-                    if i < 0 or i >= len(docnames):
-                        continue
-                    name = docnames[i]
-                    title = (titles[i] if i < len(titles) else "") or name
-                    results.append({
-                        "title": title,
-                        "url": f"https://docs.python.org/{ver}/{name}.html",
-                        "snippet": ""
-                    })
-                    if len(results) >= max_results:
-                        return results
-            except Exception:
+            m = re.search(r"Search\.setIndex\((\{.*\})\);?\s*$", text, re.S)
+            if not m:
                 continue
+            data = _json.loads(m.group(1))
+
+            docnames = data.get("docnames", [])
+            titles = data.get("titles", [])
+            terms = data.get("terms", {})
+
+            sets = []
+            for tok in tokens:
+                if tok in terms:
+                    idxs = set(_flatten_idxs(terms[tok]))
+                    if idxs:
+                        sets.append(idxs)
+                else:
+                    cand = set()
+                    for k, v in terms.items():
+                        if tok in k:
+                            cand.update(_flatten_idxs(v))
+                    if cand:
+                        sets.append(cand)
+
+            if sets:
+                docs = set.intersection(*sets) if len(sets) > 1 else sets[0]
+            else:
+                docs = {i for i, name in enumerate(docnames) if all(t in name.lower() for t in tokens)}
+
+            def _score(i: int) -> int:
+                name = (docnames[i] if i < len(docnames) else "").lower()
+                title_i = (titles[i] if i < len(titles) else "").lower()
+                score = 0
+                for t in tokens:
+                    if t in title_i:
+                        score += 3
+                    if t in name:
+                        score += 2
+                if "asyncio" in title_i or "asyncio" in name:
+                    score += 3
+                return score
+
+            if any(t == "asyncio" for t in tokens):
+                pref = [i for i in docs if (
+                    "asyncio" in (titles[i] if i < len(titles) else "").lower()
+                    or "asyncio" in (docnames[i] if i < len(docnames) else "").lower()
+                )]
+                docs = pref or list(docs)
+
+            docs = sorted(docs, key=_score, reverse=True)
+
+            for i in docs:
+                if i < 0 or i >= len(docnames):
+                    continue
+                name = docnames[i]
+                title = (titles[i] if i < len(titles) else "") or name
+                results.append({
+                    "title": title,
+                    "url": f"https://docs.python.org/{ver}/{name}.html",
+                    "snippet": ""
+                })
+                if len(results) >= max_results:
+                    return results
+        except Exception:
+            continue
 
     return results
 
@@ -354,40 +375,38 @@ def _search_pypi(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
     # 1) точное имя пакета -> JSON API
     if re.match(r"^[A-Za-z0-9_.\-]+$", q):
         try:
-            with httpx.Client(follow_redirects=True, headers=headers, timeout=TIMEOUT) as client:
-                r = client.get(f"https://pypi.org/pypi/{q}/json")
-                if r.status_code == 200:
-                    data = r.json()
-                    info = data.get("info", {}) or {}
-                    name = info.get("name") or q
-                    summary = _clean(info.get("summary") or "")
-                    url = f"https://pypi.org/project/{name}/"
-                    results.append({"title": name, "url": url, "snippet": summary})
-                    return results[:max_results]
+            r = _http_get(f"https://pypi.org/pypi/{q}/json", headers=headers)
+            if r.status_code == 200:
+                data = r.json()
+                info = data.get("info", {}) or {}
+                name = info.get("name") or q
+                summary = _clean(info.get("summary") or "")
+                url = f"https://pypi.org/project/{name}/"
+                results.append({"title": name, "url": url, "snippet": summary})
+                return results[:max_results]
         except Exception:
             pass  # молча падаем на фоллбек
 
     # 2) HTML фоллбек
     try:
         params = {"q": q}
-        with httpx.Client(follow_redirects=True, headers=headers, timeout=TIMEOUT) as client:
-            resp = client.get("https://pypi.org/search/", params=params)
-            if resp.is_success and ("package-snippet" in resp.text or "/project/" in resp.text):
-                soup = BeautifulSoup(resp.text, "lxml")
-                for a in soup.select("a.package-snippet, a[href^='/project/']"):
-                    href = a.get("href")
-                    if not href:
-                        continue
-                    url = "https://pypi.org" + href if href.startswith("/") else href
-                    title_tag = a.select_one("h3.package-snippet__title") or a
-                    name = title_tag.select_one(".package-snippet__name").get_text(strip=True) if title_tag.select_one(".package-snippet__name") else _clean(title_tag.get_text())
-                    version = title_tag.select_one(".package-snippet__version").get_text(strip=True) if title_tag.select_one(".package-snippet__version") else ""
-                    title = f"{name} {version}".strip()
-                    desc = a.select_one("p.package-snippet__description")
-                    snippet = _clean(desc.get_text()) if desc else ""
-                    results.append({"title": title, "url": url, "snippet": snippet})
-                    if len(results) >= max_results:
-                        break
+        resp = _http_get("https://pypi.org/search/", params=params, headers=headers)
+        if resp.is_success and ("package-snippet" in resp.text or "/project/" in resp.text):
+            soup = BeautifulSoup(resp.text, "lxml")
+            for a in soup.select("a.package-snippet, a[href^='/project/']"):
+                href = a.get("href")
+                if not href:
+                    continue
+                url = "https://pypi.org" + href if href.startswith("/") else href
+                title_tag = a.select_one("h3.package-snippet__title") or a
+                name = title_tag.select_one(".package-snippet__name").get_text(strip=True) if title_tag.select_one(".package-snippet__name") else _clean(title_tag.get_text())
+                version = title_tag.select_one(".package-snippet__version").get_text(strip=True) if title_tag.select_one(".package-snippet__version") else ""
+                title = f"{name} {version}".strip()
+                desc = a.select_one("p.package-snippet__description")
+                snippet = _clean(desc.get_text()) if desc else ""
+                results.append({"title": title, "url": url, "snippet": snippet})
+                if len(results) >= max_results:
+                    break
     except Exception:
         pass
 
@@ -400,9 +419,7 @@ def docs_search(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
 
 def http_get(url: str, max_chars: int = 2000, timeout: int = TIMEOUT) -> Dict[str, Any]:
     """Простой GET: вернёт статус, длину и первые max_chars HTML."""
-    headers = {"User-Agent": UA}
-    with httpx.Client(follow_redirects=True, headers=headers, timeout=timeout) as client:
-        resp = client.get(url)
+    resp = _http_get(url, headers={"User-Agent": UA}, timeout=timeout)
     text = resp.text if isinstance(resp.text, str) else str(resp.text)
     return {"status": resp.status_code, "length": len(text), "preview": text[:max_chars]}
 
@@ -426,11 +443,8 @@ def web_fetch(
                 txt = txt[:max_chars]
             return {"title": hit.get("title", ""), "url": url, "text": txt, "cached": True}
 
-    headers = {"User-Agent": UA}
-    with httpx.Client(follow_redirects=True, headers=headers, timeout=timeout) as client:
-        resp = client.get(url)
-        resp.raise_for_status()
-        html = resp.text
+    resp = _http_get(url, headers={"User-Agent": UA}, timeout=timeout, tries=3, backoff=0.7)
+    html = resp.text
 
     # основной контент через Readability
     try:
@@ -453,8 +467,8 @@ def web_fetch(
     if len(text) > max_chars:
         text = text[:max_chars]
 
-    if use_cache:
-        _cache_set(url, {"title": title, "text": text})
+    # всегда обновляем кэш, чтобы следующий вызов был быстрым
+    _cache_set(url, {"title": title, "text": text})
 
     return {"title": title, "url": url, "text": text, "cached": False}
 
