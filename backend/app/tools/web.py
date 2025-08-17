@@ -1,8 +1,8 @@
 # backend/app/tools/web.py
 from __future__ import annotations
 
-import re
 import os, json, time, hashlib
+import re
 import urllib.parse
 from typing import List, Dict, Any, Optional
 
@@ -13,6 +13,8 @@ from duckduckgo_search import DDGS
 
 UA = "AIR4Bot/1.0 (+local)"
 TIMEOUT = 20
+
+# ---------- Дисковый кэш для web_fetch ----------
 CACHE_DIR = os.path.join("storage", "web_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -41,10 +43,9 @@ def _cache_set(url: str, payload: dict) -> None:
     except Exception:
         pass
 
-
+# ---------- Вспомогательное ----------
 def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
-
 
 def _domain_matches(url: str, allowed: set[str]) -> bool:
     if not allowed:
@@ -55,7 +56,7 @@ def _domain_matches(url: str, allowed: set[str]) -> bool:
         return False
     return any(netloc == d or netloc.endswith("." + d) for d in allowed)
 
-
+# ---------- Поиск ----------
 def web_search(
     query: str,
     max_results: int = 5,
@@ -64,11 +65,12 @@ def web_search(
     timelimit: Optional[str] = None,  # "d","w","m","y"
 ) -> List[Dict[str, Any]]:
     """
-    Поиск с многоступенчатым фоллбеком:
-    1) duckduckgo_search.DDGS().text(...)
-    2) HTML парсинг DuckDuckGo (lite/html)
-    3) JSON SearXNG публичные инстансы
-    4) Спец-кейс: прямой поиск по docs.python.org (Sphinx)
+    Каскадный поиск:
+    1) Fast-path: docs.python.org (индекс Sphinx)
+    2) Fast-path: pypi.org (HTML)
+    3) duckduckgo_search.DDGS().text(...)
+    4) HTML DuckDuckGo (lite/html)
+    5) SearXNG JSON (публичные инстансы)
     + пост-фильтр по 'site:domain'
     """
     results: List[Dict[str, Any]] = []
@@ -76,7 +78,8 @@ def web_search(
     # домены из site:
     site_tokens = re.findall(r"site:([^\s]+)", query)
     allowed = {tok.strip().lstrip(".").lower() for tok in site_tokens if tok.strip()}
-    # fast-path: если фильтр по docs.python.org — используем прямой поиск по индексу Sphinx
+
+    # 1) fast-path для docs.python.org
     if allowed and any(d == "docs.python.org" or d.endswith(".docs.python.org") for d in allowed):
         q_no_site = re.sub(r"\s*site:[^\s]+", "", query).strip() or query
         try:
@@ -84,10 +87,18 @@ def web_search(
         except Exception:
             pass
 
+    # 2) fast-path для pypi.org
+    if allowed and any(d == "pypi.org" or d.endswith(".pypi.org") for d in allowed):
+        q_no_site = re.sub(r"\s*site:[^\s]+", "", query).strip() or query
+        try:
+            hits = _search_pypi(q_no_site, max_results=max_results)
+            if hits:
+                return hits
+        except Exception:
+            pass
+        # если hits пустой — НЕ возвращаем, идём дальше по каскаду
 
-    # -----------------------
-    # 1) библиотека DDGS
-    # -----------------------
+    # 3) библиотека DDGS
     try:
         oversample = max_results * 4 if allowed else max_results
         with DDGS() as ddgs:
@@ -109,9 +120,7 @@ def web_search(
     except Exception:
         pass
 
-    # -----------------------
-    # 2) HTML фоллбеки DDG
-    # -----------------------
+    # 4) HTML-фоллбеки DDG
     headers = {
         "User-Agent": UA,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -129,7 +138,6 @@ def web_search(
         resp = client.get(url)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "lxml")
-        # расширенный набор селекторов
         link_selectors = [
             "td.result-link a[href]",         # lite
             "div.result__body a.result__a",   # html
@@ -143,7 +151,6 @@ def web_search(
                 title = _clean(a.get_text())
                 if not href or not title:
                     continue
-                # /l/?..&uddg=<url>
                 if href.startswith("/l/?"):
                     qs = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
                     if "uddg" in qs:
@@ -169,9 +176,7 @@ def web_search(
     except Exception:
         pass
 
-    # -----------------------
-    # 3) SearXNG JSON фоллбек
-    # -----------------------
+    # 5) SearXNG JSON фоллбек
     searx_instances = [
         "https://searx.be/search",
         "https://searxng.site/search",
@@ -206,36 +211,21 @@ def web_search(
         except Exception:
             continue
 
-    # -----------------------
-    # 4) Спец-кейс: прямой поиск по docs.python.org (Sphinx)
-    # -----------------------
-    try:
-        if not results and (("docs.python.org" in query) or ("docs.python.org" in allowed)):
-            q_no_site = re.sub(r"\s*site:[^\s]+", "", query).strip() or query
-            direct = _search_docs_python_org(q_no_site, max_results=max_results)
-            if direct:
-                # если был site: с иным доменом — отфильтруем (на всякий)
-                direct = [r for r in direct if _domain_matches(r["url"], allowed)]
-                return direct[:max_results]
-    except Exception:
-        pass
-
     return results[:max_results]
 
-
+# ---------- Спец-поиски ----------
 def _search_docs_python_org(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
     """
     Поиск по индекс-файлу Sphinx: https://docs.python.org/<ver>/searchindex.js
-    Без JS-рендеринга. Плюс ранжирование по совпадениям в title/имени документа.
+    Без JS-рендеринга. Плюс ранжирование по совпадениям.
     """
-    import json
+    import json as _json
 
     headers = {"User-Agent": UA}
-    versions = ["3.13", "3"]  # пробуем актуальную минорную и общую ветку
+    versions = ["3.13", "3"]
     tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9_.]+", query)]
 
     def _flatten_idxs(val) -> List[int]:
-        # элементы terms могут быть int или [doc, ...] — берём id документа
         out = []
         if isinstance(val, int):
             out.append(val)
@@ -252,23 +242,20 @@ def _search_docs_python_org(query: str, max_results: int = 5) -> List[Dict[str, 
     with httpx.Client(follow_redirects=True, headers=headers, timeout=TIMEOUT) as client:
         for ver in versions:
             try:
-                # тянем индекс
                 url = f"https://docs.python.org/{ver}/searchindex.js"
                 r = client.get(url)
                 r.raise_for_status()
                 text = r.text
 
-                # извлекаем JSON из "Search.setIndex({...});"
                 m = re.search(r"Search\.setIndex\((\{.*\})\);?\s*$", text, re.S)
                 if not m:
                     continue
-                data = json.loads(m.group(1))
+                data = _json.loads(m.group(1))
 
                 docnames = data.get("docnames", [])
                 titles = data.get("titles", [])
-                terms = data.get("terms", {})  # word -> list[int] | list[list[int]]
+                terms = data.get("terms", {})
 
-                # собираем кандидатов по токенам
                 sets = []
                 for tok in tokens:
                     if tok in terms:
@@ -276,7 +263,6 @@ def _search_docs_python_org(query: str, max_results: int = 5) -> List[Dict[str, 
                         if idxs:
                             sets.append(idxs)
                     else:
-                        # мягкий матч: ключ содержит токен
                         cand = set()
                         for k, v in terms.items():
                             if tok in k:
@@ -287,10 +273,8 @@ def _search_docs_python_org(query: str, max_results: int = 5) -> List[Dict[str, 
                 if sets:
                     docs = set.intersection(*sets) if len(sets) > 1 else sets[0]
                 else:
-                    # фоллбек — фильтр по имени файла
                     docs = {i for i, name in enumerate(docnames) if all(t in name.lower() for t in tokens)}
 
-                # --- ранжирование: предпочитаем совпадения в title/docname, бонус за 'asyncio'
                 def _score(i: int) -> int:
                     name = (docnames[i] if i < len(docnames) else "").lower()
                     title_i = (titles[i] if i < len(titles) else "").lower()
@@ -304,7 +288,6 @@ def _search_docs_python_org(query: str, max_results: int = 5) -> List[Dict[str, 
                         score += 3
                     return score
 
-                # если среди токенов есть 'asyncio', мягко приоритизируем такие документы
                 if any(t == "asyncio" for t in tokens):
                     pref = [i for i in docs if (
                         "asyncio" in (titles[i] if i < len(titles) else "").lower()
@@ -314,7 +297,6 @@ def _search_docs_python_org(query: str, max_results: int = 5) -> List[Dict[str, 
 
                 docs = sorted(docs, key=_score, reverse=True)
 
-                # формируем результаты
                 for i in docs:
                     if i < 0 or i >= len(docnames):
                         continue
@@ -332,6 +314,72 @@ def _search_docs_python_org(query: str, max_results: int = 5) -> List[Dict[str, 
 
     return results
 
+def _search_pypi(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+    """
+    Поиск по PyPI:
+    1) Если запрос — одно слово (имя пакета), пробуем JSON API: /pypi/<name>/json (без JS, стабильно).
+    2) Фоллбек: HTML-страница поиска (может вернуть JS-челлендж; если пусто — просто не считаем это ошибкой).
+    """
+    headers = {"User-Agent": UA}
+    q = (query or "").strip()
+    results: List[Dict[str, Any]] = []
+
+    # 1) точное имя пакета -> JSON API
+    if re.match(r"^[A-Za-z0-9_.\-]+$", q):
+        try:
+            with httpx.Client(follow_redirects=True, headers=headers, timeout=TIMEOUT) as client:
+                r = client.get(f"https://pypi.org/pypi/{q}/json")
+                if r.status_code == 200:
+                    data = r.json()
+                    info = data.get("info", {}) or {}
+                    name = info.get("name") or q
+                    summary = _clean(info.get("summary") or "")
+                    url = f"https://pypi.org/project/{name}/"
+                    results.append({"title": name, "url": url, "snippet": summary})
+                    return results[:max_results]
+        except Exception:
+            pass  # молча падаем на фоллбек
+
+    # 2) HTML фоллбек (может не сработать из-за client challenge)
+    try:
+        params = {"q": q}
+        with httpx.Client(follow_redirects=True, headers=headers, timeout=TIMEOUT) as client:
+            resp = client.get("https://pypi.org/search/", params=params)
+            if resp.is_success and "package-snippet" in resp.text or "/project/" in resp.text:
+                soup = BeautifulSoup(resp.text, "lxml")
+                # максимально общий селектор проектов
+                for a in soup.select("a.package-snippet, a[href^='/project/']"):
+                    href = a.get("href")
+                    if not href:
+                        continue
+                    url = "https://pypi.org" + href if href.startswith("/") else href
+                    # заголовок (имя+версия если есть)
+                    title_tag = a.select_one("h3.package-snippet__title") or a
+                    name = title_tag.select_one(".package-snippet__name").get_text(strip=True) if title_tag.select_one(".package-snippet__name") else _clean(title_tag.get_text())
+                    version = title_tag.select_one(".package-snippet__version").get_text(strip=True) if title_tag.select_one(".package-snippet__version") else ""
+                    title = f"{name} {version}".strip()
+                    desc = a.select_one("p.package-snippet__description")
+                    snippet = _clean(desc.get_text()) if desc else ""
+                    results.append({"title": title, "url": url, "snippet": snippet})
+                    if len(results) >= max_results:
+                        break
+    except Exception:
+        pass
+
+    return results[:max_results]
+
+# ---------- Публичные обёртки ----------
+def docs_search(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+    """Прямой поиск по Python Docs (индекс Sphinx)."""
+    return _search_docs_python_org(query, max_results=max_results)
+
+def http_get(url: str, max_chars: int = 2000, timeout: int = TIMEOUT) -> Dict[str, Any]:
+    """Простой GET: вернёт статус, длину и первые max_chars HTML."""
+    headers = {"User-Agent": UA}
+    with httpx.Client(follow_redirects=True, headers=headers, timeout=timeout) as client:
+        resp = client.get(url)
+    text = resp.text if isinstance(resp.text, str) else str(resp.text)
+    return {"status": resp.status_code, "length": len(text), "preview": text[:max_chars]}
 
 def web_fetch(
     url: str,
@@ -342,13 +390,12 @@ def web_fetch(
 ) -> Dict[str, Any]:
     """
     Забирает страницу и выжимает читаемый текст (Readability -> BeautifulSoup).
-    Кэширует результат на диске (storage/web_cache) на ttl_sec.
+    Кэширует результат (storage/web_cache) на ttl_sec.
     Возвращает: {title, url, text, cached: bool}
     """
     if use_cache:
         hit = _cache_get(url, ttl_sec=ttl_sec)
         if hit:
-            # ограничим text на всякий (если max_chars уменьшили)
             txt = hit.get("text", "")
             if len(txt) > max_chars:
                 txt = txt[:max_chars]
@@ -377,26 +424,12 @@ def web_fetch(
         title = _clean(soup.title.get_text() if soup.title else "")
         text = soup.get_text(separator="\n")
 
-    # очистка и ограничение
     text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
     if len(text) > max_chars:
         text = text[:max_chars]
 
-    # записываем в кэш
     if use_cache:
         _cache_set(url, {"title": title, "text": text})
 
     return {"title": title, "url": url, "text": text, "cached": False}
-
-def docs_search(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
-    """Прямой поиск по https://docs.python.org/3/search.html?q=..."""
-    return _search_docs_python_org(query, max_results=max_results)
-
-def http_get(url: str, max_chars: int = 2000, timeout: int = TIMEOUT) -> Dict[str, Any]:
-    """Простой GET: вернёт статус, длину и первые max_chars HTML."""
-    headers = {"User-Agent": UA}
-    with httpx.Client(follow_redirects=True, headers=headers, timeout=timeout) as client:
-        resp = client.get(url)
-    text = resp.text if isinstance(resp.text, str) else str(resp.text)
-    return {"status": resp.status_code, "length": len(text), "preview": text[:max_chars]}
 
