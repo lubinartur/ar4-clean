@@ -65,12 +65,13 @@ def web_search(
     timelimit: Optional[str] = None,  # "d","w","m","y"
 ) -> List[Dict[str, Any]]:
     """
-    Каскадный поиск:
+    Каскадный поиск (переставлен порядок, чтобы избежать 429 от DDG):
     1) Fast-path: docs.python.org (индекс Sphinx)
-    2) Fast-path: pypi.org (HTML)
-    3) duckduckgo_search.DDGS().text(...)
-    4) HTML DuckDuckGo (lite/html)
-    5) SearXNG JSON (публичные инстансы)
+    2) Fast-path: pypi.org (JSON API + HTML)
+    3) SearXNG JSON (несколько инстансов)  ← СНАЧАЛА
+       + пара альтернативных переформулировок для общих запросов
+    4) duckduckgo_search.DDGS().text(...)
+    5) HTML DuckDuckGo (lite/html)
     + пост-фильтр по 'site:domain'
     """
     results: List[Dict[str, Any]] = []
@@ -96,9 +97,65 @@ def web_search(
                 return hits
         except Exception:
             pass
-        # если hits пустой — НЕ возвращаем, идём дальше по каскаду
+        # если пусто — идём дальше по каскаду
 
-    # 3) библиотека DDGS
+    # 3) SearXNG JSON (в первую очередь)
+    searx_instances = [
+        "https://searx.be/search",
+        "https://searxng.site/search",
+        "https://search.bus-hit.me/search",
+        "https://search.ononoki.org/search",
+        "https://searx.tiekoetter.com/search",
+        "https://search.stinpriza.org/search",
+    ]
+    params_base = {
+        "q": query,
+        "format": "json",
+        "language": "en",
+        "safesearch": 1 if safesearch == "strict" else 0,
+        "categories": "general",
+    }
+
+    def _searx_query(q: str) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for endpoint in searx_instances:
+            try:
+                with httpx.Client(follow_redirects=True, headers={"User-Agent": UA}, timeout=TIMEOUT) as client:
+                    resp = client.get(endpoint, params={**params_base, "q": q})
+                    if not resp.is_success:
+                        continue
+                    data = resp.json()
+                    items = data.get("results", []) or []
+                    for it in items:
+                        url = it.get("url")
+                        title = _clean(it.get("title"))
+                        snippet = _clean(it.get("content") or it.get("snippet") or "")
+                        if not url or not title:
+                            continue
+                        if not _domain_matches(url, allowed):
+                            continue
+                        out.append({"title": title, "url": url, "snippet": snippet})
+                        if len(out) >= max_results:
+                            return out
+            except Exception:
+                continue
+        return out
+
+    # сначала пробуем как есть
+    results = _searx_query(query)
+    # если совсем пусто и нет site-фильтра — попробуем парочку «разумных» переформулировок
+    if not results and not allowed:
+        for alt in [
+            f"site:readthedocs.io {query}",
+            f"site:github.com {query}",
+        ]:
+            results = _searx_query(alt)
+            if results:
+                break
+    if results:
+        return results[:max_results]
+
+    # 4) библиотека DDGS (может дать 429; это ок — пойдём дальше)
     try:
         oversample = max_results * 4 if allowed else max_results
         with DDGS() as ddgs:
@@ -120,7 +177,7 @@ def web_search(
     except Exception:
         pass
 
-    # 4) HTML-фоллбеки DDG
+    # 5) HTML-фоллбеки DDG
     headers = {
         "User-Agent": UA,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -131,11 +188,13 @@ def web_search(
 
     def _parse_ddg_html(client: httpx.Client, base_url: str, q: str) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
-        params = {"q": q, "kl": region, "kp": "-2", "kz": "-1"}  # no personalization
+        params = {"q": q, "kl": region, "kp": "-2", "kz": "-1"}
         if safesearch == "strict":
             params["kp"] = "1"
         url = base_url + "?" + urllib.parse.urlencode(params)
         resp = client.get(url)
+        if resp.status_code == 429:
+            return []  # отдаём пусто — оставим каскад идти дальше
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "lxml")
         link_selectors = [
@@ -175,41 +234,6 @@ def web_search(
                 return results[:max_results]
     except Exception:
         pass
-
-    # 5) SearXNG JSON фоллбек
-    searx_instances = [
-        "https://searx.be/search",
-        "https://searxng.site/search",
-        "https://search.bus-hit.me/search",
-    ]
-    params_base = {
-        "q": query,
-        "format": "json",
-        "language": "en",
-        "safesearch": 1 if safesearch == "strict" else 0,
-        "categories": "general",
-    }
-    for endpoint in searx_instances:
-        try:
-            with httpx.Client(follow_redirects=True, headers={"User-Agent": UA}, timeout=TIMEOUT) as client:
-                resp = client.get(endpoint, params=params_base)
-                if not resp.is_success:
-                    continue
-                data = resp.json()
-                items = data.get("results", []) or []
-                for it in items:
-                    url = it.get("url")
-                    title = _clean(it.get("title"))
-                    snippet = _clean(it.get("content") or it.get("snippet") or "")
-                    if not url or not title:
-                        continue
-                    if not _domain_matches(url, allowed):
-                        continue
-                    results.append({"title": title, "url": url, "snippet": snippet})
-                    if len(results) >= max_results:
-                        return results[:max_results]
-        except Exception:
-            continue
 
     return results[:max_results]
 
@@ -317,8 +341,8 @@ def _search_docs_python_org(query: str, max_results: int = 5) -> List[Dict[str, 
 def _search_pypi(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
     """
     Поиск по PyPI:
-    1) Если запрос — одно слово (имя пакета), пробуем JSON API: /pypi/<name>/json (без JS, стабильно).
-    2) Фоллбек: HTML-страница поиска (может вернуть JS-челлендж; если пусто — просто не считаем это ошибкой).
+    1) Если запрос — одно слово (имя пакета), пробуем JSON API: /pypi/<name>/json.
+    2) Фоллбек: HTML-страница поиска.
     """
     headers = {"User-Agent": UA}
     q = (query or "").strip()
@@ -340,20 +364,18 @@ def _search_pypi(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
         except Exception:
             pass  # молча падаем на фоллбек
 
-    # 2) HTML фоллбек (может не сработать из-за client challenge)
+    # 2) HTML фоллбек
     try:
         params = {"q": q}
         with httpx.Client(follow_redirects=True, headers=headers, timeout=TIMEOUT) as client:
             resp = client.get("https://pypi.org/search/", params=params)
-            if resp.is_success and "package-snippet" in resp.text or "/project/" in resp.text:
+            if resp.is_success and ("package-snippet" in resp.text or "/project/" in resp.text):
                 soup = BeautifulSoup(resp.text, "lxml")
-                # максимально общий селектор проектов
                 for a in soup.select("a.package-snippet, a[href^='/project/']"):
                     href = a.get("href")
                     if not href:
                         continue
                     url = "https://pypi.org" + href if href.startswith("/") else href
-                    # заголовок (имя+версия если есть)
                     title_tag = a.select_one("h3.package-snippet__title") or a
                     name = title_tag.select_one(".package-snippet__name").get_text(strip=True) if title_tag.select_one(".package-snippet__name") else _clean(title_tag.get_text())
                     version = title_tag.select_one(".package-snippet__version").get_text(strip=True) if title_tag.select_one(".package-snippet__version") else ""
