@@ -115,6 +115,7 @@ CONFIRM_STRINGS: Dict[str, str] = {
     "wipe": "WIPE ALL",
     "export": "I UNDERSTAND",
     "lock": "LOCK",
+    "unlock": "UNLOCK",
 }
 
 def require_confirm(action: str, confirm: Optional[str]):
@@ -132,8 +133,8 @@ async def require_auth(
     creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ) -> Authed:
     # panic допускаем без токена (обработчик сам проверит фразу)
-    if request.url.path.endswith("/panic"):
-        return Authed(user_id="panic", token="panic")
+    if request.url.path.endswith("/panic") or request.url.path.endswith("/unlock"):
+        return Authed(user_id="secure", token="secure")
     if creds is None or not creds.credentials:
         raise HTTPException(status_code=401, detail="Missing Bearer token")
     token = creds.credentials
@@ -164,6 +165,22 @@ class StatusResponse(BaseModel):
     locked: bool
     duress_active: bool
     request_id: str
+
+class UnlockRequest(BaseModel):
+    safeword: str
+    confirm: Optional[str] = None
+
+@router.post("/unlock", response_model=SecureActionResponse, status_code=status.HTTP_200_OK)
+async def unlock_endpoint(body: UnlockRequest):
+    rid = new_request_id()
+    require_safeword(body.safeword)
+    require_confirm("unlock", body.confirm)
+    SEC.locked = False
+    # старые токены не оживляем — логин заново
+    return SecureActionResponse(
+        ok=True, action="unlock", status="unlocked",
+        request_id=rid, meta={"login_required": True}
+    )
 
 # ====== РОУТЫ SECURE ======
 @router.get("/status", response_model=StatusResponse)
