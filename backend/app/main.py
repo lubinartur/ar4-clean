@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field
 
 from .summarizer import AutoSummarizer
 from . import llm_client
-from dotenv import load_dotenv; load_dotenv(override=True)
 
 # --- ENV
 # OLLAMA_HOST=http://localhost:11434
