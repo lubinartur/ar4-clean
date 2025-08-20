@@ -1,0 +1,23 @@
+storage/web_cache/
+.env
+# Python
+__pycache__/
+*.py[cod]
+
+# Env
+.env
+.env.bak*
+.env.*
+
+# Data / local artifacts
+memory/
+storage/
+.chroma/
+exports/
+backups/
+reports/
+logs/
+
+# macOS
+.DS_Store
+!.env.example

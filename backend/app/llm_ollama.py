@@ -1,28 +1,30 @@
-import os
-import requests
+# backend/app/llm_ollama.py
+import os, httpx
+from typing import List, Dict
 
-OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b-instruct")  # поменяй при желании
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+MODEL = os.getenv("OLLAMA_MODEL", "mistral")  # например: "mistral" или "llama3:instruct"
 
-def generate(messages):
-    """
-    messages: список dict [{"role":"system"/"user"/"assistant","content":"..."}]
-    Возвращает: текст ответа ассистента (str)
-    """
-    url = f"{OLLAMA_BASE}/api/chat"
-    payload = {
-        "model": OLLAMA_MODEL,
-        "messages": messages,
-        "stream": False
-    }
-    r = requests.post(url, json=payload, timeout=120)
+def _chat(payload: dict) -> str:
+    r = httpx.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=120)
     r.raise_for_status()
     data = r.json()
-    # формат Ollama chat
-    if "message" in data and "content" in data["message"]:
-        return data["message"]["content"]
-    # на случай другого формата
-    if "choices" in data and data["choices"]:
-        return data["choices"][0].get("message", {}).get("content", "")
-    return ""
+    # новый API возвращает { "message": {"content": ...} }
+    msg = (data.get("message") or {}).get("content") or ""
+    # старый потоковый формат — на всякий:
+    if not msg and "messages" in data:
+        msg = "".join(m.get("content","") for m in data["messages"] if isinstance(m, dict))
+    return msg.strip()
+
+def chat_complete(messages: List[Dict]) -> str:
+    """
+    messages: [{"role":"system"/"user"/"assistant","content":"..."}]
+    """
+    return _chat({"model": MODEL, "messages": messages, "stream": False})
+
+def complete(prompt: str) -> str:
+    """
+    Одноразовое завершение — оборачиваем в чат.
+    """
+    return chat_complete([{"role": "user", "content": prompt}])
 

@@ -1,52 +1,73 @@
-from fastapi import FastAPI
-from backend.app.memory.schemas import IngestReq, SearchReq, ProfilePatch, ChatReq
-from backend.app.chat import build_context, on_user_message, on_assistant_message, add_fact
-from backend.app.memory.manager import MemoryManager
-from backend.app.llm_ollama import generate
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+import uuid
+from typing import Optional, List
+from .security import Settings, AuditLogger, AuthManager, RBACMiddleware, AuditEventsMiddleware, SecureState
 
-app = FastAPI(title="AIR4 API — Phase 2")
+app = FastAPI(title="AIR4 API", version="0.5.0-phase5")
 
-# создаём общий MemoryManager
-_mm = MemoryManager()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# передаём его в модуль chat
-from backend.app import chat as chatmod
-chatmod.set_memory_manager(_mm)
+settings = Settings(); audit = AuditLogger(settings.AUDIT_LOG); auth = AuthManager(settings, audit); secure_state = SecureState()
+app.add_middleware(RBACMiddleware, auth=auth); app.add_middleware(AuditEventsMiddleware, audit=audit)
 
+def _auth_header_token(request: Request) -> Optional[str]:
+    ah = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not ah or not ah.lower().startswith("bearer "): return None
+    return ah.split(" ", 1)[1].strip()
 
-@app.post("/memory/ingest")
-def ingest(req: IngestReq):
-    doc_id = _mm.ingest(req.text, req.meta)
-    return {"ok": True, "id": doc_id}
+@app.get("/health")
+async def health(): return {"ok": True, "v": app.version}
 
+@app.post("/auth/login")
+async def login(request: Request):
+    try: data = await request.json()
+    except Exception: data = {}
+    password = (data.get("password") or "").strip()
+    if not password: raise HTTPException(status_code=400, detail="Missing password")
+    res = auth.login(password, request); return {"ok": True, **res}
 
-@app.post("/memory/search")
-def search(req: SearchReq):
-    hits = _mm.retrieve(req.query, k=req.k)
-    return {"ok": True, "results": hits}
+@app.post("/auth/logout")
+async def logout(request: Request):
+    token = _auth_header_token(request)
+    if not token: raise HTTPException(status_code=401, detail="Missing token")
+    auth.revoke(token, request); return {"ok": True}
 
+@app.get("/api/v0/secure/status")
+async def secure_status(request: Request):
+    token = _auth_header_token(request); duress_active=False; profile=None
+    if token:
+        try: ti = auth.verify(token); profile = ti.profile; duress_active = (ti.profile == "duress")
+        except HTTPException: pass
+    return {"locked": secure_state.is_locked(), "duress_active": duress_active, "profile": profile, "request_id": uuid.uuid4().hex[:12]}
 
-@app.post("/memory/upsert-profile")
-def upsert(req: ProfilePatch):
-    profile = _mm.upsert_profile(req.patch)
-    return {"ok": True, "profile": profile}
+@app.post("/api/v0/secure/lock")
+async def secure_lock(request: Request):
+    token = _auth_header_token(request); ti = auth.verify(token)
+    if ti.profile == "duress": raise HTTPException(status_code=403, detail="RBAC: duress cannot lock")
+    secure_state.set_locked(True); audit.log("lock", request, ti.profile, ok=True); return {"ok": True, "locked": True}
 
+@app.post("/api/v0/secure/unlock")
+async def secure_unlock(request: Request):
+    token = _auth_header_token(request); ti = auth.verify(token)
+    if ti.profile == "duress": raise HTTPException(status_code=403, detail="RBAC: duress cannot unlock")
+    secure_state.set_locked(False); audit.log("unlock", request, ti.profile, ok=True); return {"ok": True, "locked": False}
+
+_memory: List[str] = []
+
+@app.get("/memory/search")
+async def memory_search(q: Optional[str] = None, k: int = 3):
+    if not q: return {"results": _memory[-k:][::-1]}
+    res = [m for m in _memory if q.lower() in m.lower()]; return {"results": res[:k]}
+
+@app.post("/memory/add")
+async def memory_add(request: Request):
+    data = await request.json(); text = (data.get("text") or "").strip()
+    if not text: raise HTTPException(status_code=400, detail="Missing text")
+    _memory.append(text); return {"ok": True, "size": len(_memory)}
 
 @app.post("/chat")
-def chat(req: ChatReq):
-    on_user_message(req.message)
-    ctx = build_context(req.message, top_k=req.top_k, with_short_summary=req.with_short_summary)
-
-    messages = [
-        {"role": "system", "content": ctx},
-        {"role": "user", "content": req.message},
-    ]
-
-    answer = generate(messages)
-    on_assistant_message(answer)
-
-    if len(answer) > 250:
-        add_fact(answer[:600], {"source": "auto_summary"})
-
-    return {"ok": True, "answer": answer}
-
+async def chat(request: Request):
+    data = await request.json(); message = (data.get("message") or "").strip()
+    if not message: raise HTTPException(status_code=400, detail="Missing message")
+    return {"ok": True, "reply": f"echo: {message}", "request_id": uuid.uuid4().hex[:8]}
