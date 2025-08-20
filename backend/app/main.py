@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import uuid
 from typing import Optional, List
-from security import Settings, AuditLogger, AuthManager, RBACMiddleware, AuditEventsMiddleware, SecureState
+from .security import Settings, AuditLogger, AuthManager, RBACMiddleware, AuditEventsMiddleware, SecureState
 
 app = FastAPI(title="AIR4 API", version="0.5.0-phase5")
 
