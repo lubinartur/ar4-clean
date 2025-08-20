@@ -22,3 +22,7 @@ __pycache__/
 .chroma/
 .env.bak
 __pycache__/
+
+# Ignore ChromaDB and pycache
+.chroma/
+__pycache__/
