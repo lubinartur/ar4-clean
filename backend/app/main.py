@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import os, json, time
-from typing import List, Dict, Optional, Any
-
+from typing import List, Dict, Optional, Any, Tuple
+try:
+    import bcrypt
+except Exception:
+    bcrypt = None
 import httpx
-from fastapi import FastAPI, HTTPException, Query, Header, status
+from fastapi import FastAPI, HTTPException, Query, Header, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -110,6 +113,7 @@ class AuthLoginRequest(BaseModel):
 class AuthLoginResponse(BaseModel):
     ok: bool
     token: Optional[str] = None
+    duress: Optional[bool] = None  # ← явный флаг
 
 class AuthLockResponse(BaseModel):
     ok: bool
@@ -152,20 +156,91 @@ def _messages_from_req(req: ChatRequest, injected: List[str]) -> List[Dict[str, 
     msgs.append({"role": "user","content": req.message,"metadata": {"session_id": req.session_id}})
     return msgs
 
+def _parse_bearer(authorization: Optional[str]) -> Optional[str]:
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    return authorization.split(" ", 1)[1].strip()
+
+def _auth_context(authorization: Optional[str]) -> Dict[str, Any]:
+    """
+    Возвращает контекст аутентификации:
+    {
+      "profile": "duress"|"default",
+      "duress_active": bool,
+      "claims": Optional[dict]
+    }
+    """
+    from .security import verify_token as sec_verify_token
+    profile = "default"
+    duress_active = False
+    claims: Optional[Dict[str, Any]] = None
+
+    token = _parse_bearer(authorization)
+    if not token:
+        return {"profile": profile, "duress_active": duress_active, "claims": None}
+
+    res = sec_verify_token(token)  # back-compat: dict или исключение
+    if isinstance(res, dict):
+        claims = res
+        if res.get("duress") is True or res.get("profile") == "duress" or res.get("user_id") == "duress":
+            profile, duress_active = "duress", True
+        else:
+            profile, duress_active = "default", False
+    else:
+        profile, duress_active = "default", False
+
+    return {"profile": profile, "duress_active": duress_active, "claims": claims}
+
+def _effective_user_id(requested_user_id: Optional[str], auth_ctx: Dict[str, Any]) -> str:
+    if auth_ctx.get("profile") == "duress":
+        return "duress"
+    return requested_user_id or "default"
+# --- Login rate-limit (in-memory) ---
+LOGIN_RATE_WINDOW_SEC = int(os.getenv("LOGIN_RATE_WINDOW_SEC", "300"))   # окно 5 мин
+LOGIN_RATE_MAX_ATTEMPTS = int(os.getenv("LOGIN_RATE_MAX_ATTEMPTS", "10"))  # макс. попыток в окне
+
+_LOGIN_BUCKETS: Dict[str, List[int]] = {}
+
+def _rate_limit_login(key: str) -> None:
+    """
+    Примитивный лимитер: key — обычно IP.
+    Очищаем события старше окна; если попыток >= лимита — 429.
+    """
+    now = int(time.time())
+    window = LOGIN_RATE_WINDOW_SEC
+    maxn = LOGIN_RATE_MAX_ATTEMPTS
+
+    bucket = _LOGIN_BUCKETS.setdefault(key, [])
+
+    # убрать старые попытки
+    cutoff = now - window
+    i = 0
+    while i < len(bucket) and bucket[i] <= cutoff:
+        i += 1
+    if i:
+        del bucket[:i]
+
+    if len(bucket) >= maxn:
+        raise HTTPException(status_code=429, detail="Too many login attempts, try later")
+
+    bucket.append(now)
+
+def _with_profile_meta(metas: List[Dict[str, Any]], effective_user: str, auth_ctx: Dict[str, Any]):
+    """Дополняем метаданные user_id и profile (duress|default)."""
+    prof = "duress" if auth_ctx.get("profile") == "duress" else "default"
+    for m in metas:
+        m.setdefault("user_id", effective_user)
+        m.setdefault("profile", prof)
+    return metas
+
 def _require_auth(authorization: Optional[str] = Header(None)) -> None:
-    """
-    Проверка Bearer: токен обязателен и должен проходить verify_token внутри security.py.
-    Больше не используем STATE.session_token.
-    """
+    """Проверка Bearer + глобальная блокировка."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
     if is_locked():
-        # интерфейс заблокирован — запрет
         raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="Interface is locked")
     token = authorization.split(" ", 1)[1].strip()
-    # используем verify_token через secure middleware (он вызовется на роутере secure).
-    # здесь делаем простую проверку через back-compat: issue_session/verify_token реализованы в security.py.
-    from .security import verify_token  # локальный импорт, чтобы избежать циклов
+    from .security import verify_token  # избегаем циклов
     verify_token(token)  # бросит 401 при проблеме
 
 # === LLM через Ollama (non-stream) ===
@@ -229,15 +304,47 @@ def tools(req: ToolRequest):
 
 # === Security API ===
 @app.post("/auth/login", response_model=AuthLoginResponse)
-def auth_login(body: AuthLoginRequest):
+def auth_login(body: AuthLoginRequest, request: Request):
+    _rate_limit_login(request.client.host or "unknown")
+
+    # duress: сначала HASH, потом (на всякий случай) открытое значение
+    DURESS_PIN = os.getenv("DURESS_PIN", "") or ""
+    DURESS_PIN_HASH = os.getenv("DURESS_PIN_HASH", "") or ""
+    is_duress = False
+    if DURESS_PIN_HASH and bcrypt:
+        try:
+            if bcrypt.checkpw(body.password.encode("utf-8"), DURESS_PIN_HASH.encode("utf-8")):
+                is_duress = True
+        except Exception:
+            pass
+    elif DURESS_PIN and body.password == DURESS_PIN:
+        is_duress = True
+
+    if is_duress:
+        token = issue_session(user_id="duress", duress=True)
+        return {"ok": True, "token": token, "duress": True}
+
+    # обычный пароль (verify_password уже поддерживает AUTH_PASSWORD_HASH / AUTH_PASSWORD)
     if not verify_password(body.password):
         return JSONResponse(status_code=401, content=AuthLoginResponse(ok=False).dict())
     token = issue_session()
-    return AuthLoginResponse(ok=True, token=token)
+    return {"ok": True, "token": token, "duress": False}
+
+
+    # обычный пароль (проверка уже поддерживает HASH в security.py)
+    if not verify_password(body.password):
+        return JSONResponse(status_code=401, content=AuthLoginResponse(ok=False).dict())
+    token = issue_session()
+    return {"ok": True, "token": token, "duress": False}
+
+    # обычный пароль
+    if not verify_password(body.password):
+        return JSONResponse(status_code=401, content=AuthLoginResponse(ok=False).dict())
+    token = issue_session()
+    return {"ok": True, "token": token, "duress": False}
 
 @app.post("/auth/lock", response_model=AuthLockResponse)
 def auth_lock():
-    # мягкая блокировка интерфейса через secure/action можно делать тоже
     from .security import lock as sec_lock
     sec_lock()
     return AuthLockResponse(ok=True)
@@ -250,6 +357,9 @@ def secure_status_api():
 @app.post("/memory/add", response_model=MemoryAddResponse)
 def memory_add(body: MemoryAddRequest, authorization: Optional[str] = Header(None)):
     _require_auth(authorization)
+    auth_ctx = _auth_context(authorization)
+    effective_user = _effective_user_id(body.user_id, auth_ctx)
+
     from .memory import manager
     texts: List[str] = []
     metas: List[Dict[str, Any]] = []
@@ -263,18 +373,20 @@ def memory_add(body: MemoryAddRequest, authorization: Optional[str] = Header(Non
             metas.extend([{} for _ in body.texts])
     if not texts:
         return JSONResponse(status_code=400, content={"ok": False, "added": 0, "ids": []})
-    for m in metas:
-        m.setdefault("user_id", body.user_id)
-    ids = manager.add_memory(body.user_id, texts, metas)
+
+    metas = _with_profile_meta(metas, effective_user, auth_ctx)
+    ids = manager.add_memory(effective_user, texts, metas)
     return MemoryAddResponse(ok=True, added=len(ids), ids=ids)
 
 @app.get("/memory/search", response_model=MemorySearchResponse)
 def memory_search(q: str = Query(..., min_length=1), k: int = Query(5, ge=1, le=20),
                   user_id: str = "default", authorization: Optional[str] = Header(None)):
     _require_auth(authorization)
+    auth_ctx = _auth_context(authorization)
+    effective_user = _effective_user_id(user_id, auth_ctx)
     try:
         from .memory.manager import retrieve_relevant
-        blocks = retrieve_relevant(user_id=user_id, query=q, k=k) or []
+        blocks = retrieve_relevant(user_id=effective_user, query=q, k=k) or []
         results = [{"text": b} for b in blocks]
         return MemorySearchResponse(ok=True, query=q, k=k, results=results)
     except Exception as e:
@@ -284,8 +396,11 @@ def memory_search(q: str = Query(..., min_length=1), k: int = Query(5, ge=1, le=
 @app.post("/chat_rag", response_model=ChatRAGResponse)
 def chat_rag(req: ChatRAGRequest, authorization: Optional[str] = Header(None)):
     _require_auth(authorization)
+    auth_ctx = _auth_context(authorization)
+    effective_user = _effective_user_id(req.user_id, auth_ctx)
+
     start = time.perf_counter()
-    blocks = _retrieve_relevant(req.user_id, req.query, k=req.k)
+    blocks = _retrieve_relevant(effective_user, req.query, k=req.k)
     if not blocks:
         reply = "Недостаточно контекста в памяти. Добавьте данные или уточните запрос."
         return ChatRAGResponse(reply=reply, model=OLLAMA_MODEL, latency_ms=int((time.perf_counter()-start)*1000), sources=[])
@@ -294,17 +409,22 @@ def chat_rag(req: ChatRAGRequest, authorization: Optional[str] = Header(None)):
     reply = out["text"] or "(LLM пусто)"
     latency_ms = int((time.perf_counter() - start) * 1000)
     try:
-        add_memory(req.user_id, [f"user(RAG): {req.query}", "assistant(RAG): " + reply[:2000]],
-                   metas=[{"type":"chat_rag"},{"type":"chat_rag"}])
+        metas = _with_profile_meta([{"type":"chat_rag"},{"type":"chat_rag"}], effective_user, auth_ctx)
+        add_memory(effective_user, [f"user(RAG): {req.query}", "assistant(RAG): " + reply[:2000]], metas=metas)
     except Exception:
         pass
     return ChatRAGResponse(reply=reply, model=OLLAMA_MODEL, latency_ms=latency_ms, sources=blocks[:req.k])
 
 # === /chat (stream + non-stream) ===
 @app.post("/chat")
-async def chat(req: ChatRequest):
-    mem_blocks = _retrieve_relevant(req.user_id or "default", req.message, k=6)
+async def chat(req: ChatRequest, authorization: Optional[str] = Header(None)):
+    # Профиль аутентификации влияет на user_id: duress → всегда "duress"
+    auth_ctx = _auth_context(authorization)
+    effective_user = _effective_user_id(req.user_id or "default", auth_ctx)
+
+    mem_blocks = _retrieve_relevant(effective_user, req.message, k=6)
     injected = _truncate_blocks(mem_blocks, max_chars=3000)
+
     if getattr(req, "web_query", None):
         try:
             from .tools.web import web_search, web_fetch
@@ -320,6 +440,7 @@ async def chat(req: ChatRequest):
                 injected.insert(0, "Веб-контекст:\n" + "\n\n---\n\n".join(chunks))
         except Exception:
             pass
+
     messages = _messages_from_req(req, injected)
     sys_prompt = (
         "Ты — техлид проекта AIR4 на macOS.\n"
@@ -369,12 +490,12 @@ async def chat(req: ChatRequest):
                             completion_tokens = meta.get("eval_count")
                             break
             try:
-                summarizer.summarize_session(messages, user_id=req.user_id, session_id=req.session_id)
+                summarizer.summarize_session(messages, user_id=effective_user, session_id=req.session_id)
             except Exception:
                 pass
             try:
-                add_memory(req.user_id or "default", [f"user: {req.message}", "assistant: " + "".join(buf)[:2000]],
-                           metas=[{"type":"chat"}, {"type":"chat"}])
+                metas = _with_profile_meta([{"type":"chat"},{"type":"chat"}], effective_user, auth_ctx)
+                add_memory(effective_user, [f"user: {req.message}", "assistant: " + "".join(buf)[:2000]], metas=metas)
             except Exception:
                 pass
             tail = json.dumps({"meta": {
@@ -399,11 +520,11 @@ async def chat(req: ChatRequest):
         reply = f"(LLM не доступен: {e}) Я получил: {req.message}"; meta = {}
     saved_summary: Optional[str] = None
     if req.end_session:
-        saved = summarizer.summarize_session(messages, user_id=req.user_id, session_id=req.session_id)
+        saved = summarizer.summarize_session(messages, user_id=effective_user, session_id=req.session_id)
         saved_summary = saved.get("summary")
     try:
-        add_memory(req.user_id or "default", [f"user: {req.message}", "assistant: " + (reply or "")[:2000]],
-                   metas=[{"type":"chat"}, {"type":"chat"}])
+        metas = _with_profile_meta([{"type":"chat"},{"type":"chat"}], effective_user, auth_ctx)
+        add_memory(effective_user, [f"user: {req.message}", "assistant: " + (reply or "")[:2000]], metas=metas)
     except Exception:
         pass
     latency_ms = int((time.perf_counter() - start) * 1000)
