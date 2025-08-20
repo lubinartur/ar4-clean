@@ -17,3 +17,8 @@ __pycache__/
 *.bak
 *.bak
 .backup_refs_before_filter.txt
+
+# Ignore ChromaDB, backups and pycache
+.chroma/
+.env.bak
+__pycache__/
