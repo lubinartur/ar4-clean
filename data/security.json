@@ -1,0 +1,6 @@
+{
+  "salt": "wtEh1b9XN+iK3AMrHXF74w==",
+  "dkey": "50M9c9DVgt0lDjrPm3eRtQxBdN3NKvwBRsTscNoI6Ac=",
+  "algo": "pbkdf2-sha256",
+  "iter": 200000
+}
