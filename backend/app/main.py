@@ -8,16 +8,20 @@ from typing import Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+import httpx
+import json
 
 from .llm_client import LLMClient
 
 # ─── App & CORS ────────────────────────────────────────────────────────────────
-app = FastAPI(title="AIR4 API", version="0.6.0-phase6")
+app = FastAPI(title="AIR4 API", version="0.6.1-phase6.1")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten later if needed
+    allow_origins=["*"],  # можно ужесточить позже
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -28,7 +32,7 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "0000")
 
-# ─── Auth (simple token vault compatible with your smoke) ─────────────────────
+# ─── Auth (простой токен под smoke) ───────────────────────────────────────────
 _TOKENS: set[str] = set()
 
 class LoginBody(BaseModel):
@@ -57,7 +61,6 @@ def login(body: LoginBody):
 
 @app.get("/api/v0/secure/status")
 def secure_status():
-    # Keep fields expected by previous phases/smokes
     return {
         "locked": False,
         "duress_active": False,
@@ -66,9 +69,9 @@ def secure_status():
 
 @app.get("/health")
 def health():
-    return {"ok": True, "phase": "6", "llm_model": OLLAMA_MODEL}
+    return {"ok": True, "phase": "6.1", "llm_model": OLLAMA_MODEL}
 
-# ─── /chat → LLM (Ollama) ─────────────────────────────────────────────────────
+# ─── /chat → LLM (через Ollama) ───────────────────────────────────────────────
 class ChatBody(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     system: Optional[str] = Field(
@@ -83,7 +86,6 @@ class ChatReply(BaseModel):
 
 @app.post("/chat", response_model=ChatReply)
 async def chat(body: ChatBody, _auth: None = Depends(require_auth)):
-    # Prepare messages for Ollama chat API
     messages = []
     if body.system:
         messages.append({"role": "system", "content": body.system})
@@ -96,3 +98,49 @@ async def chat(body: ChatBody, _auth: None = Depends(require_auth)):
         raise HTTPException(status_code=502, detail=f"LLM error: {e}")
 
     return ChatReply(ok=True, reply=answer, request_id=uuid.uuid4().hex[:8])
+
+# ─── /chat/stream → SSE (стрим токенов) ───────────────────────────────────────
+@app.post("/chat/stream")
+async def chat_stream(body: ChatBody, _auth: None = Depends(require_auth)):
+    messages = []
+    if body.system:
+        messages.append({"role": "system", "content": body.system})
+    messages.append({"role": "user", "content": body.message})
+
+    async def event_gen():
+        url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat"
+        payload = {
+            "model": OLLAMA_MODEL,
+            "messages": messages,
+            "stream": True,
+            "options": {"temperature": body.temperature},
+        }
+        try:
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream("POST", url, json=payload) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except Exception:
+                            continue
+                        # у Ollama каждая строка — JSON с message/done
+                        msg = obj.get("message", {})
+                        chunk = msg.get("content")
+                        if chunk:
+                            yield f"data: {chunk}\n\n"
+                        if obj.get("done"):
+                            break
+        except Exception as e:
+            # прокидываем ошибку как SSE-событие
+            yield f"event: error\ndata: {str(e)}\n\n"
+        # маркер завершения
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
