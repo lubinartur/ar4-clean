@@ -60,3 +60,12 @@ smoke-audit:
 		-H "Authorization: Bearer $$TOKEN" >/dev/null; \
 	echo "== AUDIT LOG =="; \
 	tail -n +1 storage/audit.log | jq -c .
+smoke-llm:
+	@TOKEN=$$(curl -s -X POST "$(BASE)/auth/login" \
+		-H "Content-Type: application/json" \
+		-d "{\"password\":\"$${AUTH:-0000}\"}" | jq -r '.token'); \
+	echo "TOKEN=$$TOKEN"; \
+	curl -s -X POST "$(BASE)/chat" \
+		-H "Authorization: Bearer $$TOKEN" \
+		-H "Content-Type: application/json" \
+		-d "{\"message\":\"shortly explain what RBAC is\"}" | jq .

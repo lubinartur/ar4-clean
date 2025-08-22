@@ -1,53 +1,46 @@
 # backend/app/llm_client.py
-"""
-Шим под любой твой локальный клиент.
-Пытается использовать backend/app/llm_ollama.py, но оставляет общий интерфейс:
-- complete(prompt: str) -> str
-- chat_complete(messages: list[dict]) -> str
-"""
+from __future__ import annotations
+import httpx
+from typing import List, Dict, Any, Optional
 
-from typing import List, Dict
+class LLMClient:
+    def __init__(self, base_url: str, model: str, timeout: float = 120.0):
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.timeout = timeout
 
-try:
-    # пробуем использовать уже существующий файл
-    from . import llm_ollama as _src
-except Exception as e:  # нет llm_ollама — оставим понятную ошибку
-    _src = None
-    _import_err = e
+    async def chat(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.2,
+        stream: bool = False,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        messages = [{"role": "system"|"user"|"assistant", "content": "..."}]
+        """
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": stream,
+            "options": options or {"temperature": temperature},
+        }
+        url = f"{self.base_url}/api/chat"
 
-class LLMNotConfigured(RuntimeError):
-    pass
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
 
-def _ensure():
-    if _src is None:
-        raise LLMNotConfigured(f"LLM backend is not configured: {_import_err}")
+        # Expected Ollama /api/chat response:
+        # { "message": {"role": "assistant", "content": "..."} , "done": true, ... }
+        if isinstance(data, dict) and "message" in data and isinstance(data["message"], dict):
+            return data["message"].get("content", "").strip()
 
-def complete(prompt: str) -> str:
-    """
-    Одноразовое завершение (для саммари).
-    """
-    _ensure()
-    # предпочитаемые имена функций
-    for name in ("complete", "generate", "completion"):
-        fn = getattr(_src, name, None)
-        if callable(fn):
-            return (fn(prompt) or "").strip()
-    # fallback через чат
-    chat_fn = getattr(_src, "chat_complete", None) or getattr(_src, "chat", None) or getattr(_src, "generate_chat", None)
-    if callable(chat_fn):
-        return (chat_fn([{"role": "user", "content": prompt}]) or "").strip()
-    raise LLMNotConfigured("No suitable method found in llm_ollama.*")
+        # Fallback: try /api/generate format if needed
+        # { "response": "..." }
+        if isinstance(data, dict) and "response" in data:
+            return str(data["response"]).strip()
 
-def chat_complete(messages: List[Dict]) -> str:
-    """
-    Многоходовый чат (для /chat).
-    """
-    _ensure()
-    for name in ("chat_complete", "chat", "generate_chat"):
-        fn = getattr(_src, name, None)
-        if callable(fn):
-            return (fn(messages) or "").strip()
-    # fallback через complete на последнем сообщении пользователя
-    last_user = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-    return complete(last_user)
-
+        # If format unknown:
+        return str(data).strip()

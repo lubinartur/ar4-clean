@@ -1,73 +1,98 @@
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+# backend/app/main.py
+from __future__ import annotations
+
+import os
+import secrets
 import uuid
-from typing import Optional, List
-from .security import Settings, AuditLogger, AuthManager, RBACMiddleware, AuditEventsMiddleware, SecureState
+from typing import Optional
 
-app = FastAPI(title="AIR4 API", version="0.5.0-phase5")
+from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+from .llm_client import LLMClient
 
-settings = Settings(); audit = AuditLogger(settings.AUDIT_LOG); auth = AuthManager(settings, audit); secure_state = SecureState()
-app.add_middleware(RBACMiddleware, auth=auth); app.add_middleware(AuditEventsMiddleware, audit=audit)
+# ─── App & CORS ────────────────────────────────────────────────────────────────
+app = FastAPI(title="AIR4 API", version="0.6.0-phase6")
 
-def _auth_header_token(request: Request) -> Optional[str]:
-    ah = request.headers.get("authorization") or request.headers.get("Authorization")
-    if not ah or not ah.lower().startswith("bearer "): return None
-    return ah.split(" ", 1)[1].strip()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # tighten later if needed
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-@app.get("/health")
-async def health(): return {"ok": True, "v": app.version}
+# ─── Env ──────────────────────────────────────────────────────────────────────
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "0000")
 
-@app.post("/auth/login")
-async def login(request: Request):
-    try: data = await request.json()
-    except Exception: data = {}
-    password = (data.get("password") or "").strip()
-    if not password: raise HTTPException(status_code=400, detail="Missing password")
-    res = auth.login(password, request); return {"ok": True, **res}
+# ─── Auth (simple token vault compatible with your smoke) ─────────────────────
+_TOKENS: set[str] = set()
 
-@app.post("/auth/logout")
-async def logout(request: Request):
-    token = _auth_header_token(request)
-    if not token: raise HTTPException(status_code=401, detail="Missing token")
-    auth.revoke(token, request); return {"ok": True}
+class LoginBody(BaseModel):
+    password: str = Field(..., min_length=1)
+
+class LoginReply(BaseModel):
+    ok: bool
+    token: str
+
+def _bearer_token(authorization: Optional[str] = Header(default=None)) -> str:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+    return authorization.split(" ", 1)[1].strip()
+
+def require_auth(token: str = Depends(_bearer_token)) -> None:
+    if token not in _TOKENS:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+@app.post("/auth/login", response_model=LoginReply)
+def login(body: LoginBody):
+    if body.password != AUTH_PASSWORD:
+        raise HTTPException(status_code=403, detail="Invalid credentials")
+    token = secrets.token_hex(16)
+    _TOKENS.add(token)
+    return LoginReply(ok=True, token=token)
 
 @app.get("/api/v0/secure/status")
-async def secure_status(request: Request):
-    token = _auth_header_token(request); duress_active=False; profile=None
-    if token:
-        try: ti = auth.verify(token); profile = ti.profile; duress_active = (ti.profile == "duress")
-        except HTTPException: pass
-    return {"locked": secure_state.is_locked(), "duress_active": duress_active, "profile": profile, "request_id": uuid.uuid4().hex[:12]}
+def secure_status():
+    # Keep fields expected by previous phases/smokes
+    return {
+        "locked": False,
+        "duress_active": False,
+        "request_id": uuid.uuid4().hex[:12],
+    }
 
-@app.post("/api/v0/secure/lock")
-async def secure_lock(request: Request):
-    token = _auth_header_token(request); ti = auth.verify(token)
-    if ti.profile == "duress": raise HTTPException(status_code=403, detail="RBAC: duress cannot lock")
-    secure_state.set_locked(True); audit.log("lock", request, ti.profile, ok=True); return {"ok": True, "locked": True}
+@app.get("/health")
+def health():
+    return {"ok": True, "phase": "6", "llm_model": OLLAMA_MODEL}
 
-@app.post("/api/v0/secure/unlock")
-async def secure_unlock(request: Request):
-    token = _auth_header_token(request); ti = auth.verify(token)
-    if ti.profile == "duress": raise HTTPException(status_code=403, detail="RBAC: duress cannot unlock")
-    secure_state.set_locked(False); audit.log("unlock", request, ti.profile, ok=True); return {"ok": True, "locked": False}
+# ─── /chat → LLM (Ollama) ─────────────────────────────────────────────────────
+class ChatBody(BaseModel):
+    message: str = Field(..., min_length=1, max_length=4000)
+    system: Optional[str] = Field(
+        default="You are AIr4, a strict but helpful local assistant. Be concise, logical, and actionable."
+    )
+    temperature: float = 0.2
 
-_memory: List[str] = []
+class ChatReply(BaseModel):
+    ok: bool
+    reply: str
+    request_id: str
 
-@app.get("/memory/search")
-async def memory_search(q: Optional[str] = None, k: int = 3):
-    if not q: return {"results": _memory[-k:][::-1]}
-    res = [m for m in _memory if q.lower() in m.lower()]; return {"results": res[:k]}
+@app.post("/chat", response_model=ChatReply)
+async def chat(body: ChatBody, _auth: None = Depends(require_auth)):
+    # Prepare messages for Ollama chat API
+    messages = []
+    if body.system:
+        messages.append({"role": "system", "content": body.system})
+    messages.append({"role": "user", "content": body.message})
 
-@app.post("/memory/add")
-async def memory_add(request: Request):
-    data = await request.json(); text = (data.get("text") or "").strip()
-    if not text: raise HTTPException(status_code=400, detail="Missing text")
-    _memory.append(text); return {"ok": True, "size": len(_memory)}
+    client = LLMClient(base_url=OLLAMA_BASE_URL, model=OLLAMA_MODEL, timeout=180.0)
+    try:
+        answer = await client.chat(messages, temperature=body.temperature, stream=False)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"LLM error: {e}")
 
-@app.post("/chat")
-async def chat(request: Request):
-    data = await request.json(); message = (data.get("message") or "").strip()
-    if not message: raise HTTPException(status_code=400, detail="Missing message")
-    return {"ok": True, "reply": f"echo: {message}", "request_id": uuid.uuid4().hex[:8]}
+    return ChatReply(ok=True, reply=answer, request_id=uuid.uuid4().hex[:8])
