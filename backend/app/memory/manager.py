@@ -1,127 +1,83 @@
 # backend/app/memory/manager.py
 from __future__ import annotations
-
-import time, hashlib
+import os, json, hashlib, time
 from typing import List, Dict, Any, Optional
 
-from .embeddings import Embeddings
-from .vectorstore import VectorStore
-from .summarizer import summarize_turns
+# Принцип: истории хранятся как раньше.
+# Саммари/факты/туду — простым JSON + легкий дедуп. Если у тебя Chroma — оставь как есть и используй эти методы как фасад.
 
+_STORAGE = os.getenv("STORAGE_DIR", "storage")
+_SUM_DIR = os.path.join(_STORAGE, "summaries")
+_FACTS_FILE = os.path.join(_STORAGE, "facts.jsonl")
+_TODOS_FILE = os.path.join(_STORAGE, "todos.jsonl")
+_HISTORY_DIR = os.path.join(_STORAGE, "history")
+
+os.makedirs(_SUM_DIR, exist_ok=True)
+os.makedirs(_HISTORY_DIR, exist_ok=True)
+os.makedirs(_STORAGE, exist_ok=True)
+
+def _sid_file(session_id: str, user_id: str) -> str:
+    return os.path.join(_SUM_DIR, f"{user_id}__{session_id}.json")
+
+def _hash(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 
 class MemoryManager:
-    """
-    Единая точка работы с памятью:
-    - краткосрочный буфер (short_buffer)
-    - долгосрочная память (Chroma через VectorStore)
-    - профиль пользователя (goals/facts)
-    """
+    # ==== История ====
+    def fetch_history(self, user_id: str, session_id: Optional[str], k: int = 20) -> List[Dict[str, str]]:
+        if not session_id: return []
+        path = os.path.join(_HISTORY_DIR, f"{user_id}__{session_id}.jsonl")
+        if not os.path.exists(path): return []
+        lines = open(path, "r", encoding="utf-8").read().splitlines()
+        rows = [json.loads(x) for x in lines[-k:]]
+        return [{"role": r["role"], "content": r["content"]} for r in rows]
 
-    def __init__(self):
-        self.vs = VectorStore()
-        self.short_buffer: List[Dict[str, str]] = []
-        self.profile: Dict[str, Any] = {"goals": [], "facts": {}}
+    def append_turn(self, user_id: str, session_id: Optional[str], role: str, content: str) -> None:
+        if not session_id: return
+        path = os.path.join(_HISTORY_DIR, f"{user_id}__{session_id}.jsonl")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": time.time(), "role": role, "content": content}, ensure_ascii=False) + "\n")
 
-    # ---------- Short-term ----------
-    def push_short(self, role: str, content: str, max_len: int = 12):
-        self.short_buffer.append({"role": role, "content": content})
-        if len(self.short_buffer) > max_len:
-            self.short_buffer.pop(0)
+    # ==== Summary ====
+    def save_summary(self, user_id: str, session_id: str, summary: Dict[str, Any]) -> None:
+        fp = _sid_file(session_id, user_id)
+        with open(fp, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
 
-    def short_context(self) -> str:
-        return "\n".join(f"{m['role']}: {m['content']}" for m in self.short_buffer)
-
-    def short_summary(self) -> str:
-        return summarize_turns([m["content"] for m in self.short_buffer])
-
-    # ---------- Long-term: ingest ----------
-    def _gen_id(self, text: str) -> str:
-        return hashlib.sha256(f"{time.time()}::{text[:64]}".encode()).hexdigest()[:16]
-
-    def ingest(self, text: str, meta: Dict[str, Any]) -> str:
-        """
-        Добавить одиночный кусок текста в память.
-        """
-        emb = Embeddings.encode([text])[0]
-        doc_id = self._gen_id(text)
-        self.vs.add([doc_id], [text], [emb], [meta])
-        return doc_id
-
-    def ingest_many(self, texts: List[str], metas: Optional[List[Dict[str, Any]]] = None) -> List[str]:
-        """
-        Добавить батч текстов. metas по длине = texts или None (тогда пустые dict).
-        """
-        if not texts:
-            return []
-        metas = metas or [{} for _ in texts]
-        embs = Embeddings.encode(texts)
-        ids = [self._gen_id(t) for t in texts]
-        self.vs.add(ids, texts, embs, metas)
-        return ids
-
-    # ---------- Long-term: retrieve ----------
-    def retrieve(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
-        """
-        Базовый поиск по близости. Возвращает подробные записи.
-        """
-        q_emb = Embeddings.encode([query])[0]
-        res = self.vs.query(q_emb, k)
-        out: List[Dict[str, Any]] = []
-        for doc, meta, dist, _id in zip(
-            res.get("documents", [[]])[0],
-            res.get("metadatas",  [[]])[0],
-            res.get("distances",  [[]])[0],
-            res.get("ids",        [[]])[0],
-        ):
-            out.append({"id": _id, "text": doc, "meta": meta, "score": 1 - dist})
-        return out
-
-    def retrieve_relevant(self, user_id: str, query: str, k: int = 6) -> List[str]:
-        """
-        Упрощённый интерфейс для чата: только тексты, с фильтром по user_id (если он в метаданных).
-        """
+    def get_summary(self, user_id: str, session_id: str) -> Optional[Dict[str, Any]]:
+        fp = _sid_file(session_id, user_id)
+        if not os.path.exists(fp): return None
         try:
-            items = self.retrieve(query=query, k=max(1, k))
-            # если в метаданных есть user_id — фильтруем
-            filtered = [
-                it for it in items
-                if not isinstance(it.get("meta"), dict) or it["meta"].get("user_id") in (None, user_id)
-            ]
-            texts = [it["text"] for it in filtered] or [it["text"] for it in items]
-            return texts[:k]
+            return json.load(open(fp, "r", encoding="utf-8"))
         except Exception:
-            return []
+            return None
 
-    # ---------- Profile ----------
-    def upsert_profile(self, patch: Dict[str, Any]):
-        for k, v in patch.items():
-            if isinstance(v, dict):
-                self.profile.setdefault(k, {}).update(v)
-            elif isinstance(v, list):
-                self.profile.setdefault(k, [])
-                self.profile[k].extend(v)
-            else:
-                self.profile[k] = v
-        return self.profile
+    # ==== Facts / TODOs с дедупом по хэшу текста ====
+    def _dedup_append(self, path: str, payload: Dict[str, Any], key_text: str) -> None:
+        line_hash = _hash(key_text)
+        payload["hash"] = line_hash
+        payload["ts"] = time.time()
+        payload["text"] = key_text
+        # простейший дедуп: проверяем есть ли такой хэш в файле
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        if json.loads(line).get("hash") == line_hash:
+                            return
+                    except Exception:
+                        continue
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
-    def profile_text(self) -> str:
-        return f"Goals: {self.profile.get('goals', [])}\nFacts: {self.profile.get('facts', {})}"
+    def add_facts(self, user_id: str, session_id: str, facts: List[str], tags: List[str], dedup: bool = True) -> None:
+        for fact in facts:
+            self._dedup_append(_FACTS_FILE, {
+                "user_id": user_id, "session_id": session_id, "tags": tags or []
+            }, fact.strip())
 
-
-# --------- Глобальный синглтон + удобные функции для main.py ---------
-_MM = MemoryManager()
-
-def add_memory(user_id: str, texts: List[str], metas: Optional[List[Dict[str, Any]]] = None) -> List[str]:
-    """
-    Утилита для массового добавления с проставлением user_id в метаданные.
-    """
-    metas = metas or [{} for _ in texts]
-    for m in metas:
-        m.setdefault("user_id", user_id)
-    return _MM.ingest_many(texts, metas)
-
-def retrieve_relevant(user_id: str, query: str, k: int = 6) -> List[str]:
-    """
-    То, что ожидает /chat: список подходящих текстов.
-    """
-    return _MM.retrieve_relevant(user_id=user_id, query=query, k=k)
+    def add_todos(self, user_id: str, session_id: str, todos: List[str], tags: List[str], dedup: bool = True) -> None:
+        for todo in todos:
+            self._dedup_append(_TODOS_FILE, {
+                "user_id": user_id, "session_id": session_id, "done": False, "tags": tags or []
+            }, todo.strip())

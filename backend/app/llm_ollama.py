@@ -1,30 +1,85 @@
-# backend/app/llm_ollama.py
-import os, httpx
-from typing import List, Dict
+from __future__ import annotations
+import os, json, asyncio
+from typing import Any, Dict, List, Optional, AsyncGenerator
+import httpx
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-MODEL = os.getenv("OLLAMA_MODEL", "mistral")  # например: "mistral" или "llama3:instruct"
+# Настройки
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "mistral:latest")
 
-def _chat(payload: dict) -> str:
-    r = httpx.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=120)
-    r.raise_for_status()
-    data = r.json()
-    # новый API возвращает { "message": {"content": ...} }
-    msg = (data.get("message") or {}).get("content") or ""
-    # старый потоковый формат — на всякий:
-    if not msg and "messages" in data:
-        msg = "".join(m.get("content","") for m in data["messages"] if isinstance(m, dict))
-    return msg.strip()
+def _build_messages(
+    user_msg: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    system: Optional[str] = None,
+) -> List[Dict[str, str]]:
+    msgs: List[Dict[str, str]] = []
+    if system:
+        msgs.append({"role": "system", "content": system})
+    if history:
+        for h in history:
+            role = h.get("role") or "user"
+            content = h.get("content") or ""
+            if content:
+                msgs.append({"role": role, "content": content})
+    msgs.append({"role": "user", "content": user_msg})
+    return msgs
 
-def chat_complete(messages: List[Dict]) -> str:
+async def _non_stream_chat(payload: Dict[str, Any]) -> Dict[str, str]:
+    async with httpx.AsyncClient(base_url=OLLAMA_BASE_URL, timeout=httpx.Timeout(30, read=180)) as client:
+        r = await client.post("/api/chat", json=payload)
+        r.raise_for_status()
+        data = r.json()
+        text = (data.get("message") or {}).get("content") or ""
+        return {"text": text}
+
+async def _stream_chat(payload: Dict[str, Any]) -> AsyncGenerator[Dict[str, str], None]:
+    # Ollama в stream-режиме выдаёт JSON-объекты построчно
+    async with httpx.AsyncClient(base_url=OLLAMA_BASE_URL, timeout=httpx.Timeout(30, read=None)) as client:
+        async with client.stream("POST", "/api/chat", json=payload) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line:
+                    continue
+                # Каждая строка — JSON с полем message.content
+                try:
+                    obj = json.loads(line)
+                    delta = (obj.get("message") or {}).get("content") or ""
+                    if delta:
+                        # унифицированный формат для нашего main.py
+                        yield {"delta": delta}
+                except Exception:
+                    continue
+
+async def chat_llm(
+    user_msg: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    system: Optional[str] = None,
+    model: Optional[str] = None,
+    stream: bool = False,
+) -> Any:
     """
-    messages: [{"role":"system"/"user"/"assistant","content":"..."}]
+    Унифицированный клиент LLM:
+      - stream=False -> dict {"text": "..."}
+      - stream=True  -> async generator, дающий чанки {"delta": "..."}
     """
-    return _chat({"model": MODEL, "messages": messages, "stream": False})
+    messages = _build_messages(user_msg=user_msg, history=history, system=system)
+    payload = {
+        "model": model or DEFAULT_MODEL,
+        "messages": messages,
+        "stream": stream,
+        # Можешь добавить "options": {...} при необходимости
+    }
 
-def complete(prompt: str) -> str:
-    """
-    Одноразовое завершение — оборачиваем в чат.
-    """
-    return chat_complete([{"role": "user", "content": prompt}])
-
+    try:
+        if stream:
+            return _stream_chat(payload)
+        else:
+            return await _non_stream_chat(payload)
+    except httpx.ConnectError:
+        # Ollama не запущен — даём безопасный фолбэк, чтобы сервер не падал
+        fallback = "[LLM offline] Запусти Ollama: `ollama serve` и проверь модель."
+        if stream:
+            async def gen():
+                yield {"delta": fallback}
+            return gen()
+        return {"text": fallback}
