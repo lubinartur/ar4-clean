@@ -6,7 +6,8 @@ import secrets
 import uuid
 import json
 import asyncio
-from typing import Optional, Iterable, Deque, Dict
+import re
+from typing import Optional, Iterable, Deque, Dict, List
 from collections import deque
 
 from fastapi import FastAPI, Depends, HTTPException, Header
@@ -17,42 +18,45 @@ from pydantic import BaseModel, Field
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-# локальный клиент не обязателен, но оставим импорт на будущее
-from .llm_client import LLMClient  # noqa: F401
-
 # ─── App & CORS ────────────────────────────────────────────────────────────────
-app = FastAPI(title="AIR4 API", version="0.6.5-phase6.5")
+app = FastAPI(title="AIR4 API", version="0.6.8-phase6.8")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # можно ужесточить позже
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ─── Env ──────────────────────────────────────────────────────────────────────
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
-AUTH_PASSWORD   = os.getenv("AUTH_PASSWORD", "0000")
+OLLAMA_BASE_URL     = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+OLLAMA_MODEL        = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+AUTH_PASSWORD       = os.getenv("AUTH_PASSWORD", "0000")
 
 # Лимиты/настройки
-MAX_INPUT_CHARS    = int(os.getenv("MAX_INPUT_CHARS", "4000"))
-MAX_CONCURRENCY    = int(os.getenv("MAX_CONCURRENCY", "3"))
-LLM_TIMEOUT_SEC    = float(os.getenv("LLM_TIMEOUT_SEC", "60"))
-STREAM_TIMEOUT_SEC = float(os.getenv("STREAM_TIMEOUT_SEC", "120"))
+MAX_INPUT_CHARS     = int(os.getenv("MAX_INPUT_CHARS", "4000"))
+MAX_CONCURRENCY     = int(os.getenv("MAX_CONCURRENCY", "3"))
+LLM_TIMEOUT_SEC     = float(os.getenv("LLM_TIMEOUT_SEC", "60"))
+STREAM_TIMEOUT_SEC  = float(os.getenv("STREAM_TIMEOUT_SEC", "120"))
 DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.2"))
 DEFAULT_NUM_PREDICT = int(os.getenv("DEFAULT_NUM_PREDICT", "512"))
 
-# История: количество последних ТЁРНОВ (user+assistant = 1 тёрн)
-HISTORY_MAX_TURNS  = int(os.getenv("HISTORY_MAX_TURNS", "6"))
+# История
+HISTORY_MAX_TURNS   = int(os.getenv("HISTORY_MAX_TURNS", "6"))
 
-# ─── Глобальные структуры ─────────────────────────────────────────────────────
+# Память (Фаза 3)
+ENABLE_MEMORY       = os.getenv("ENABLE_MEMORY", "true").lower() == "true"
+MEMORY_TOP_K        = int(os.getenv("MEMORY_TOP_K", "8"))  # чуть больше, чтобы было из чего выбрать
+MEMORY_USER_ID      = os.getenv("MEMORY_USER_ID", "dev")
+MEMORY_INJECT_MODE  = os.getenv("MEMORY_INJECT_MODE", "system").lower().strip()
+
+# ─── Глобальные ───────────────────────────────────────────────────────────────
 _llm_semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
 _TOKENS: set[str] = set()
-_HISTORY: Dict[str, Deque[dict]] = {}  # ключ: токен, значение: deque([{"role":...,"content":...}, ...])
+_HISTORY: Dict[str, Deque[dict]] = {}
 
-# ─── Модели данных ────────────────────────────────────────────────────────────
+# ─── Models ───────────────────────────────────────────────────────────────────
 class LoginBody(BaseModel):
     password: str = Field(..., min_length=1)
 
@@ -66,7 +70,7 @@ class ChatBody(BaseModel):
         default="You are AIr4, a strict but helpful local assistant. Be concise, logical, and actionable."
     )
     temperature: float = DEFAULT_TEMPERATURE
-    reset_history: bool = False  # можно мягко сбрасывать историю при запросе
+    reset_history: bool = False
 
 class ChatReply(BaseModel):
     ok: bool
@@ -90,7 +94,7 @@ def _bearer_token(authorization: Optional[str] = Header(default=None)) -> str:
 def require_auth(token: str = Depends(_bearer_token)) -> str:
     if token not in _TOKENS:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    return token  # возвращаем сам токен — используем как ключ истории
+    return token
 
 @app.post("/auth/login", response_model=LoginReply)
 def login(body: LoginBody):
@@ -98,24 +102,19 @@ def login(body: LoginBody):
         raise HTTPException(status_code=403, detail="Invalid credentials")
     token = secrets.token_hex(16)
     _TOKENS.add(token)
-    # инициализируем историю
     _HISTORY.setdefault(token, deque(maxlen=HISTORY_MAX_TURNS * 2))
     return LoginReply(ok=True, token=token)
 
-# ─── Служебные ────────────────────────────────────────────────────────────────
+# ─── Service ──────────────────────────────────────────────────────────────────
 @app.get("/api/v0/secure/status")
 def secure_status():
-    return {
-        "locked": False,
-        "duress_active": False,
-        "request_id": uuid.uuid4().hex[:12],
-    }
+    return {"locked": False, "duress_active": False, "request_id": uuid.uuid4().hex[:12]}
 
 @app.get("/health")
 def health():
     return {
         "ok": True,
-        "phase": "6.5",
+        "phase": "6.8",
         "llm_model": OLLAMA_MODEL,
         "limits": {
             "max_input_chars": MAX_INPUT_CHARS,
@@ -125,53 +124,111 @@ def health():
             "num_predict": DEFAULT_NUM_PREDICT,
             "history_max_turns": HISTORY_MAX_TURNS,
         },
+        "memory": {
+            "enabled": ENABLE_MEMORY,
+            "top_k": MEMORY_TOP_K,
+            "user_id": MEMORY_USER_ID,
+            "mode": MEMORY_INJECT_MODE,
+            "dedup": True,
+        },
     }
 
-# ─── Утилиты ──────────────────────────────────────────────────────────────────
+# ─── Utils ────────────────────────────────────────────────────────────────────
 def _validate_message_length(text: str) -> None:
     if len(text) > MAX_INPUT_CHARS:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Input too large: {len(text)} chars > {MAX_INPUT_CHARS}. Trim the message."
-        )
+        raise HTTPException(status_code=413, detail=f"Input too large: {len(text)} > {MAX_INPUT_CHARS}")
 
-def _build_messages(
-    token: str,
-    user_text: str,
-    system_text: Optional[str],
-) -> list[dict]:
+def _normalize_model(header_model: Optional[str]) -> str:
+    return header_model.strip() if (header_model and header_model.strip()) else OLLAMA_MODEL
+
+def _remember_turn(token: str, user_text: str, assistant_text: str) -> None:
+    dq = _HISTORY.setdefault(token, deque(maxlen=HISTORY_MAX_TURNS * 2))
+    dq.append({"role": "user", "content": user_text})
+    dq.append({"role": "assistant", "content": assistant_text})
+
+# ─── Memory adapter ───────────────────────────────────────────────────────────
+async def _memory_search(query: str, user_id: str, k: int) -> List[str]:
+    if not ENABLE_MEMORY or not query.strip():
+        return []
+    try:
+        from backend.app.memory import manager as mm  # type: ignore
+        if hasattr(mm, "retrieve_relevant") and callable(mm.retrieve_relevant):
+            return await asyncio.to_thread(mm.retrieve_relevant, user_id, query, k)
+        if hasattr(mm, "MemoryManager"):
+            try:
+                mgr = mm.MemoryManager()  # type: ignore
+                return await asyncio.to_thread(mgr.retrieve_relevant, user_id, query, k)
+            except Exception:
+                return []
+    except Exception:
+        return []
+    return []
+
+# ─── RAG formatting: дедуп и жёсткая FACTS вставка ───────────────────────────
+_punct_re = re.compile(r"[^\w\s\-:()/%+.,]")  # щадящая чистка
+_ws_re = re.compile(r"\s+")
+
+def _norm(s: str) -> str:
+    s = s.strip()
+    s = _punct_re.sub(" ", s.lower())
+    s = _ws_re.sub(" ", s)
+    return s
+
+def _is_dup(a: str, b: str) -> bool:
+    # простой «похожесть»: полное совпадение после нормализации или одно — подстрока другого
+    na, nb = _norm(a), _norm(b)
+    return na == nb or (na in nb) or (nb in na)
+
+def _dedup_facts(facts: List[str]) -> List[str]:
+    out: List[str] = []
+    for f in facts:
+        if not f or not isinstance(f, str):
+            continue
+        dup = False
+        for g in out:
+            if _is_dup(f, g):
+                dup = True
+                break
+        if not dup:
+            out.append(f.strip())
+    return out
+
+def _format_memory_as_context(facts: List[str]) -> Optional[dict]:
+    if not facts:
+        return None
+    facts = _dedup_facts(facts)[:MEMORY_TOP_K]
+    if not facts:
+        return None
+    numbered = "\n".join(f"{i+1}. {f}" for i, f in enumerate(facts))
+    content = (
+        "FACTS (используй ТОЛЬКО эти факты; не выдумывай; избегай повторов):\n"
+        f"{numbered}\n"
+        "Формат ответа: РОВНО 5 кратких, не дублирующих друг друга буллетов по сути. "
+        "Каждый буллет — новая мысль/аспект."
+    )
+    role = "system" if MEMORY_INJECT_MODE == "system" else "assistant"
+    return {"role": role, "content": content}
+
+def _build_messages(token: str, user_text: str, system_text: Optional[str], memory_facts: List[str]) -> list[dict]:
     msgs: list[dict] = []
     if system_text:
         msgs.append({"role": "system", "content": system_text})
-    # подмешиваем короткую историю, если есть
+    ctx = _format_memory_as_context(memory_facts)
+    if ctx:
+        msgs.append(ctx)
     hist = _HISTORY.get(token)
     if hist:
         msgs.extend(list(hist))
-    # текущий пользовательский запрос
     msgs.append({"role": "user", "content": user_text})
     return msgs
 
 def _ollama_chat_payload(model: str, messages: list[dict], temperature: float) -> dict:
-    return {
-        "model": model,
-        "messages": messages,
-        "stream": False,
-        "options": {
-            "temperature": temperature,
-            "num_predict": DEFAULT_NUM_PREDICT,
-        },
-    }
+    return {"model": model, "messages": messages, "stream": False,
+            "options": {"temperature": temperature, "num_predict": DEFAULT_NUM_PREDICT}}
 
 def _ollama_stream_payload(model: str, messages: list[dict], temperature: float) -> dict:
-    return {
-        "model": model,
-        "messages": messages,
-        "stream": True,
-        "options": {
-            "temperature": temperature,
-            "num_predict": DEFAULT_NUM_PREDICT,
-        },
-    }
+    return {"model": model, "messages": messages, "stream": True,
+            "options": {"temperature": temperature, "num_predict": DEFAULT_NUM_PREDICT}}
 
 _retry_decorator = retry(
     reraise=True,
@@ -183,17 +240,6 @@ _retry_decorator = retry(
 async def _async_with_timeout(coro, seconds: float):
     return await asyncio.wait_for(coro, timeout=seconds)
 
-def _normalize_model(header_model: Optional[str]) -> str:
-    # Если передали X-Model, используем его; иначе дефолт из .env
-    if header_model and header_model.strip():
-        return header_model.strip()
-    return OLLAMA_MODEL
-
-def _remember_turn(token: str, user_text: str, assistant_text: str) -> None:
-    dq = _HISTORY.setdefault(token, deque(maxlen=HISTORY_MAX_TURNS * 2))
-    dq.append({"role": "user", "content": user_text})
-    dq.append({"role": "assistant", "content": assistant_text})
-
 # ─── /chat ────────────────────────────────────────────────────────────────────
 @app.post("/chat", response_model=ChatReply)
 async def chat(
@@ -203,14 +249,14 @@ async def chat(
     x_model: Optional[str] = Header(default=None, alias="X-Model"),
 ):
     _validate_message_length(body.message)
-
     if body.reset_history:
         _HISTORY[token] = deque(maxlen=HISTORY_MAX_TURNS * 2)
 
     system_text = x_system_prompt.strip() if (x_system_prompt and x_system_prompt.strip()) else body.system
     model = _normalize_model(x_model)
 
-    messages = _build_messages(token, body.message, system_text)
+    memory_facts = await _memory_search(query=body.message, user_id=MEMORY_USER_ID, k=MEMORY_TOP_K)
+    messages = _build_messages(token, body.message, system_text, memory_facts)
 
     url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat"
     payload = _ollama_chat_payload(model, messages, body.temperature)
@@ -228,7 +274,6 @@ async def chat(
                 if isinstance(data, dict) and "response" in data:
                     return str(data["response"]).strip()
                 return str(data).strip()
-
             answer = await _async_with_timeout(_do(), LLM_TIMEOUT_SEC + 5)
         except asyncio.TimeoutError:
             raise HTTPException(status_code=504, detail="LLM timeout")
@@ -237,7 +282,6 @@ async def chat(
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"LLM error: {e}")
 
-    # сохраняем тёрн в историю
     _remember_turn(token, body.message, answer)
     return ChatReply(ok=True, reply=answer, request_id=uuid.uuid4().hex[:8])
 
@@ -250,20 +294,19 @@ async def chat_stream(
     x_model: Optional[str] = Header(default=None, alias="X-Model"),
 ):
     _validate_message_length(body.message)
-
     if body.reset_history:
         _HISTORY[token] = deque(maxlen=HISTORY_MAX_TURNS * 2)
 
     system_text = x_system_prompt.strip() if (x_system_prompt and x_system_prompt.strip()) else body.system
     model = _normalize_model(x_model)
 
-    messages = _build_messages(token, body.message, system_text)
+    memory_facts = await _memory_search(query=body.message, user_id=MEMORY_USER_ID, k=MEMORY_TOP_K)
+    messages = _build_messages(token, body.message, system_text, memory_facts)
 
     async def event_gen():
         url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat"
         payload = _ollama_stream_payload(model, messages, body.temperature)
-
-        collected_chunks: list[str] = []
+        collected: List[str] = []
 
         async with _llm_semaphore:
             try:
@@ -282,12 +325,10 @@ async def chat_stream(
                                 msg = (obj or {}).get("message", {})
                                 chunk = msg.get("content")
                                 if chunk:
-                                    collected_chunks.append(chunk)
+                                    collected.append(chunk)
                                     yield f"data: {chunk}\n\n"
                                 if (obj or {}).get("done"):
                                     break
-
-                # общий таймаут стрима
                 try:
                     async with asyncio.timeout(STREAM_TIMEOUT_SEC + 10):
                         async for piece in _stream():
@@ -299,10 +340,8 @@ async def chat_stream(
             except Exception as e:
                 yield f"event: error\ndata: {str(e)}\n\n"
 
-        # сохранить весь ответ в историю
-        if collected_chunks:
-            _remember_turn(token, body.message, "".join(collected_chunks))
-
+        if collected:
+            _remember_turn(token, body.message, "".join(collected))
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -322,7 +361,6 @@ async def models(_auth: None = Depends(require_auth)):
             data = r.json()
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Ollama tags error: {e}")
-
     names = []
     for it in (data or {}).get("models", []):
         name = (it or {}).get("name")
