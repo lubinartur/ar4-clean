@@ -17,7 +17,7 @@ import json
 from .llm_client import LLMClient
 
 # ─── App & CORS ────────────────────────────────────────────────────────────────
-app = FastAPI(title="AIR4 API", version="0.6.1-phase6.1")
+app = FastAPI(title="AIR4 API", version="0.6.2-phase6.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,7 +69,7 @@ def secure_status():
 
 @app.get("/health")
 def health():
-    return {"ok": True, "phase": "6.1", "llm_model": OLLAMA_MODEL}
+    return {"ok": True, "phase": "6.2", "llm_model": OLLAMA_MODEL}
 
 # ─── /chat → LLM (через Ollama) ───────────────────────────────────────────────
 class ChatBody(BaseModel):
@@ -126,7 +126,6 @@ async def chat_stream(body: ChatBody, _auth: None = Depends(require_auth)):
                             obj = json.loads(line)
                         except Exception:
                             continue
-                        # у Ollama каждая строка — JSON с message/done
                         msg = obj.get("message", {})
                         chunk = msg.get("content")
                         if chunk:
@@ -134,9 +133,7 @@ async def chat_stream(body: ChatBody, _auth: None = Depends(require_auth)):
                         if obj.get("done"):
                             break
         except Exception as e:
-            # прокидываем ошибку как SSE-событие
             yield f"event: error\ndata: {str(e)}\n\n"
-        # маркер завершения
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -144,3 +141,27 @@ async def chat_stream(body: ChatBody, _auth: None = Depends(require_auth)):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
+
+# ─── /models → список доступных моделей Ollama ────────────────────────────────
+class ModelsReply(BaseModel):
+    ok: bool
+    models: list[str]
+
+@app.get("/models", response_model=ModelsReply)
+async def models(_auth: None = Depends(require_auth)):
+    url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/tags"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Ollama tags error: {e}")
+
+    # ожидаемый формат: {"models":[{"name":"llama3.1:8b", ...}, ...]}
+    names = []
+    for it in (data or {}).get("models", []):
+        name = (it or {}).get("name")
+        if name:
+            names.append(name)
+    return ModelsReply(ok=True, models=names)
