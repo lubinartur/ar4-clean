@@ -17,7 +17,7 @@ import json
 from .llm_client import LLMClient
 
 # ─── App & CORS ────────────────────────────────────────────────────────────────
-app = FastAPI(title="AIR4 API", version="0.6.2-phase6.2")
+app = FastAPI(title="AIR4 API", version="0.6.3-phase6.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,7 +69,7 @@ def secure_status():
 
 @app.get("/health")
 def health():
-    return {"ok": True, "phase": "6.2", "llm_model": OLLAMA_MODEL}
+    return {"ok": True, "phase": "6.3", "llm_model": OLLAMA_MODEL}
 
 # ─── /chat → LLM (через Ollama) ───────────────────────────────────────────────
 class ChatBody(BaseModel):
@@ -85,10 +85,17 @@ class ChatReply(BaseModel):
     request_id: str
 
 @app.post("/chat", response_model=ChatReply)
-async def chat(body: ChatBody, _auth: None = Depends(require_auth)):
+async def chat(
+    body: ChatBody,
+    _auth: None = Depends(require_auth),
+    x_system_prompt: Optional[str] = Header(default=None, alias="X-System-Prompt"),
+):
+    # приоритет у заголовка
+    system_text = x_system_prompt if (x_system_prompt and x_system_prompt.strip()) else body.system
+
     messages = []
-    if body.system:
-        messages.append({"role": "system", "content": body.system})
+    if system_text:
+        messages.append({"role": "system", "content": system_text})
     messages.append({"role": "user", "content": body.message})
 
     client = LLMClient(base_url=OLLAMA_BASE_URL, model=OLLAMA_MODEL, timeout=180.0)
@@ -101,10 +108,16 @@ async def chat(body: ChatBody, _auth: None = Depends(require_auth)):
 
 # ─── /chat/stream → SSE (стрим токенов) ───────────────────────────────────────
 @app.post("/chat/stream")
-async def chat_stream(body: ChatBody, _auth: None = Depends(require_auth)):
+async def chat_stream(
+    body: ChatBody,
+    _auth: None = Depends(require_auth),
+    x_system_prompt: Optional[str] = Header(default=None, alias="X-System-Prompt"),
+):
+    system_text = x_system_prompt if (x_system_prompt and x_system_prompt.strip()) else body.system
+
     messages = []
-    if body.system:
-        messages.append({"role": "system", "content": body.system})
+    if system_text:
+        messages.append({"role": "system", "content": system_text})
     messages.append({"role": "user", "content": body.message})
 
     async def event_gen():
@@ -158,7 +171,6 @@ async def models(_auth: None = Depends(require_auth)):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Ollama tags error: {e}")
 
-    # ожидаемый формат: {"models":[{"name":"llama3.1:8b", ...}, ...]}
     names = []
     for it in (data or {}).get("models", []):
         name = (it or {}).get("name")
