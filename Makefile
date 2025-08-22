@@ -69,3 +69,12 @@ smoke-llm:
 		-H "Authorization: Bearer $$TOKEN" \
 		-H "Content-Type: application/json" \
 		-d "{\"message\":\"shortly explain what RBAC is\"}" | jq .
+smoke-rag:
+	@set -euo pipefail; \
+	TOKEN=$$(curl -s -X POST "$(BASE)/auth/login" -H "Content-Type: application/json" -d '{"password":"$${AUTH:-0000}"}' | jq -r '.token'); \
+	echo "TOKEN=$$TOKEN"; \
+	curl -s -X POST "$(BASE)/chat" \
+		-H "Authorization: Bearer $$TOKEN" \
+		-H "Content-Type: application/json" \
+		-d '{"message":"Суммируй ключевые факты по моему проекту AIr4 в 5 буллетах.","temperature":0.1}' \
+	| jq .
