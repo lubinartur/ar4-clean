@@ -1,7 +1,8 @@
 from __future__ import annotations
-import os, json, asyncio
+import os, json
 from typing import Any, Dict, List, Optional, AsyncGenerator
 import httpx
+
 
 # Настройки
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
@@ -40,15 +41,13 @@ async def _stream_chat(payload: Dict[str, Any]) -> AsyncGenerator[Dict[str, str]
             async for line in resp.aiter_lines():
                 if not line:
                     continue
-                # Каждая строка — JSON с полем message.content
                 try:
                     obj = json.loads(line)
-                    delta = (obj.get("message") or {}).get("content") or ""
-                    if delta:
-                        # унифицированный формат для нашего main.py
-                        yield {"delta": delta}
                 except Exception:
                     continue
+                delta = (obj.get("message") or {}).get("content") or ""
+                if delta:
+                    yield {"delta": delta}
 
 async def chat_llm(
     user_msg: str,
@@ -67,7 +66,6 @@ async def chat_llm(
         "model": model or DEFAULT_MODEL,
         "messages": messages,
         "stream": stream,
-        # Можешь добавить "options": {...} при необходимости
     }
 
     try:
@@ -75,9 +73,17 @@ async def chat_llm(
             return _stream_chat(payload)
         else:
             return await _non_stream_chat(payload)
-    except httpx.ConnectError:
-        # Ollama не запущен — даём безопасный фолбэк, чтобы сервер не падал
-        fallback = "[LLM offline] Запусти Ollama: `ollama serve` и проверь модель."
+    except (httpx.ConnectError, httpx.HTTPError) as e:
+        # Любая HTTP-проблема -> безопасный фолбэк, чтобы /chat не упал
+        fallback = f"[LLM error] {type(e).__name__}: {e}"
+        if stream:
+            async def gen():
+                yield {"delta": fallback}
+            return gen()
+        return {"text": fallback}
+    except Exception as e:
+        # Непредвиденное -> тоже фолбэк
+        fallback = f"[LLM unexpected error] {type(e).__name__}: {e}"
         if stream:
             async def gen():
                 yield {"delta": fallback}

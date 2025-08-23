@@ -12,7 +12,10 @@ from fastapi.responses import StreamingResponse
 from backend.app.llm_ollama import chat_llm, DEFAULT_MODEL
 from backend.app.memory.manager import MemoryManager
 from backend.app.memory.summarizer import Summarizer
-from backend.app.ingest import fetch_url_text, parse_pdf_bytes, synth_session_id
+try:
+    from backend.app.ingest import fetch_url_text, parse_pdf_bytes, synth_session_id
+except ModuleNotFoundError:
+    from .ingest import fetch_url_text, parse_pdf_bytes, synth_session_id
 
 
 app = FastAPI()
@@ -26,15 +29,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ----- Auth store (in-memory demo) -----
 VALID_TOKENS: set[str] = set()
-
-# ----- Globals -----
 MEMORY = MemoryManager()
 SUM = Summarizer(llm_fn=chat_llm)
 
 
-# ================== BASIC ENDPOINTS ==================
+# ================== BASIC ==================
 
 @app.get("/health")
 def health():
@@ -55,9 +55,6 @@ async def auth_login(request: Request):
 
 @app.get("/models")
 async def list_models():
-    """
-    Список моделей из Ollama; если недоступно — возвращаем дефолтную.
-    """
     try:
         base = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
         async with httpx.AsyncClient(base_url=base, timeout=httpx.Timeout(10, read=10)) as client:
@@ -88,72 +85,84 @@ async def chat(
     stream = bool(data.get("stream", False))
     model = x_model or DEFAULT_MODEL
 
-    # 1) История для контекста (диалоговая память)
     history = MEMORY.fetch_history(user_id=x_user, session_id=x_session, k=20)
+
+    ing = MEMORY.get_recent_ingest(user_id=x_user, limit=3)
+    if ing:
+        ctx_blocks: List[str] = []
+        for r in ing:
+            meta = r.get("meta", {}) or {}
+            tag = f"[{meta.get('type','doc')}:{meta.get('filename') or meta.get('url') or r.get('doc_id')}]"
+            snippet = (r.get("text") or "")[:1200]
+            ctx_blocks.append(f"{tag}\n{snippet}")
+        rag_context = "\n\n".join(ctx_blocks)
+        sys_ctx = (x_system_prompt or "") + f"\n\n[CONTEXT FROM INGEST]\n{rag_context}\n[/CONTEXT]\n"
+    else:
+        sys_ctx = x_system_prompt
 
     if stream:
         async def gen():
             full: List[str] = []
-            agen = await chat_llm(
-                user_msg, history=history, system=x_system_prompt,
-                model=model, stream=True
-            )
-            async for chunk in agen:
-                delta = chunk.get("delta") or ""
-                if delta:
-                    full.append(delta)
-                    yield delta
-            full_text = "".join(full)
+            try:
+                agen = await chat_llm(
+                    user_msg, history=history, system=sys_ctx,
+                    model=model, stream=True
+                )
+                async for chunk in agen:
+                    delta = chunk.get("delta") or ""
+                    if delta:
+                        full.append(delta)
+                        yield delta
+            except Exception as e:
+                yield f"[stream error] {type(e).__name__}: {e}"
+                return
 
-            # 2) Авто‑саммари — в фоне
-            background.add_task(
-                SUM.summarize_and_store,
-                user_id=x_user, session_id=x_session,
-                user_msg=user_msg, assistant_msg=full_text
-            )
-            # 3) История — в конец
-            MEMORY.append_turn(x_user, x_session, "user", user_msg)
-            MEMORY.append_turn(x_user, x_session, "assistant", full_text)
+            full_text = "".join(full)
+            try:
+                background.add_task(SUM.summarize_and_store,
+                                    user_id=x_user, session_id=x_session,
+                                    user_msg=user_msg, assistant_msg=full_text)
+                MEMORY.append_turn(x_user, x_session, "user", user_msg)
+                MEMORY.append_turn(x_user, x_session, "assistant", full_text)
+            except Exception:
+                pass
 
         return StreamingResponse(gen(), media_type="text/plain")
 
-    # non‑stream
-    reply = await chat_llm(
-        user_msg, history=history, system=x_system_prompt,
-        model=model, stream=False
-    )
-    text = reply.get("text") if isinstance(reply, dict) else str(reply)
+    # non-stream
+    try:
+        reply = await chat_llm(
+            user_msg, history=history, system=sys_ctx,
+            model=model, stream=False
+        )
+        text = reply.get("text") if isinstance(reply, dict) else str(reply)
+    except Exception as e:
+        return {"ok": False, "error": "chat_llm_failed", "detail": f"{type(e).__name__}: {e}"}
 
-    # авто‑саммари в фоне
-    background.add_task(
-        SUM.summarize_and_store,
-        user_id=x_user, session_id=x_session,
-        user_msg=user_msg, assistant_msg=text
-    )
-    # история
-    MEMORY.append_turn(x_user, x_session, "user", user_msg)
-    MEMORY.append_turn(x_user, x_session, "assistant", text)
+    try:
+        background.add_task(
+            SUM.summarize_and_store,
+            user_id=x_user, session_id=x_session,
+            user_msg=user_msg, assistant_msg=text
+        )
+        MEMORY.append_turn(x_user, x_session, "user", user_msg)
+        MEMORY.append_turn(x_user, x_session, "assistant", text)
+    except Exception:
+        pass
 
     return {"ok": True, "reply": text}
 
 
-# ================== MEMORY (Summaries) ==================
+# ================== MEMORY ==================
 
 @app.get("/memory/summary/{session_id}")
-def get_summary(
-    session_id: str,
-    x_user: Optional[str] = Header(default="dev", alias="X-User"),
-):
+def get_summary(session_id: str, x_user: Optional[str] = Header(default="dev", alias="X-User")):
     s = MEMORY.get_summary(user_id=x_user, session_id=session_id)
     return {"ok": True, "summary": s}
 
 
 @app.post("/memory/summarize/{session_id}")
-async def force_summarize(
-    session_id: str,
-    request: Request,
-    x_user: Optional[str] = Header(default="dev", alias="X-User"),
-):
+async def force_summarize(session_id: str, request: Request, x_user: Optional[str] = Header(default="dev", alias="X-User")):
     body = await request.json()
     user_msg = body.get("user_msg", "")
     assistant_msg = body.get("assistant_msg", "")
@@ -164,7 +173,7 @@ async def force_summarize(
     return {"ok": True}
 
 
-# ================== TODOS API (7.2) ==================
+# ================== TODOS ==================
 
 @app.get("/todos")
 def todos_list(
@@ -178,11 +187,7 @@ def todos_list(
 
 
 @app.post("/todos")
-async def todos_create(
-    request: Request,
-    x_user: Optional[str] = Header(default="dev", alias="X-User"),
-    x_session: Optional[str] = Header(default=None, alias="X-Session"),
-):
+async def todos_create(request: Request, x_user: Optional[str] = Header(default="dev", alias="X-User"), x_session: Optional[str] = Header(default=None, alias="X-Session")):
     body = await request.json()
     text = (body.get("text") or "").strip()
     tags = body.get("tags") or ["manual"]
@@ -204,15 +209,10 @@ def todos_delete(h: str):
     return {"ok": ok}
 
 
-# ================== INGEST API (7.3) ==================
+# ================== INGEST ==================
 
 @app.post("/ingest/url")
-async def ingest_url(
-    request: Request,
-    background: BackgroundTasks,
-    x_user: Optional[str] = Header(default="dev", alias="X-User"),
-    x_session: Optional[str] = Header(default=None, alias="X-Session"),
-):
+async def ingest_url(request: Request, background: BackgroundTasks, x_user: Optional[str] = Header(default="dev", alias="X-User"), x_session: Optional[str] = Header(default=None, alias="X-Session")):
     body = await request.json()
     url = (body.get("url") or "").strip()
     if not url:
@@ -223,12 +223,8 @@ async def ingest_url(
         return {"ok": False, "error": "empty_text_from_url"}
 
     session_id = x_session or synth_session_id("url", url)
-
-    # сырьё + RAG задел
     MEMORY.save_ingest_raw(x_user, session_id, text, {"type": "url", "url": url, "content_type": content_type})
     MEMORY.add_rag_document(x_user, session_id, text, {"type": "url", "url": url})
-
-    # авто‑саммари по содержимому
     background.add_task(
         SUM.summarize_and_store,
         user_id=x_user, session_id=session_id,
@@ -239,12 +235,7 @@ async def ingest_url(
 
 
 @app.post("/ingest/file")
-async def ingest_file(
-    background: BackgroundTasks,
-    x_user: Optional[str] = Header(default="dev", alias="X-User"),
-    x_session: Optional[str] = Header(default=None, alias="X-Session"),
-    file: UploadFile = File(...),
-):
+async def ingest_file(background: BackgroundTasks, x_user: Optional[str] = Header(default="dev", alias="X-User"), x_session: Optional[str] = Header(default=None, alias="X-Session"), file: UploadFile = File(...)):
     raw = await file.read()
     filename = file.filename or "upload.bin"
     ctype = file.content_type or ""
@@ -262,10 +253,8 @@ async def ingest_file(
         return {"ok": False, "error": "empty_text_from_file"}
 
     session_id = x_session or synth_session_id("file", filename)
-
     MEMORY.save_ingest_raw(x_user, session_id, text, {"type": "file", "filename": filename, "content_type": ctype})
     MEMORY.add_rag_document(x_user, session_id, text, {"type": "file", "filename": filename})
-
     background.add_task(
         SUM.summarize_and_store,
         user_id=x_user, session_id=session_id,
