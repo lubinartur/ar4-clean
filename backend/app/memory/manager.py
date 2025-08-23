@@ -175,3 +175,19 @@ class MemoryManager:
         rec = {"user_id": user_id, "doc_id": doc_id, "meta": meta, "text": text[:5000], "ts": time.time()}
         with open(rag_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    def get_recent_ingest(self, user_id: str, limit: int = 3) -> List[Dict[str, Any]]:
+        rag_file = os.path.join(_STORAGE, "rag_docs.jsonl")
+        rows: List[Dict[str, Any]] = []
+        if not os.path.exists(rag_file):
+            return rows
+        with open(rag_file, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if obj.get("user_id") != user_id:
+                    continue
+                rows.append(obj)
+        rows.sort(key=lambda x: x.get("ts", 0), reverse=True)
+        return rows[:limit]
