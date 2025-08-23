@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="chat-page">
+
+  <h1 class="page-title">AIr4 Chat</h1>
+
+  <!-- Controls row 1 -->
+  <div class="card controls">
+    <div class="row">
+      <label class="check">
+        <input id="use-rag" type="checkbox" checked>
+        <span>Use RAG</span>
+      </label>
+
+      <label class="field">
+        <span>Top-k</span>
+        <input id="k-memory" type="number" min="1" max="12" value="4">
+      </label>
+
+      <div class="spacer"></div>
+
+      <label class="field field-session">
+        <span>Session</span>
+        <input id="session-id" type="text" value="{{ session_id }}" placeholder="auto">
+      </label>
+      <button id="btn-new"   class="btn" type="button">New</button>
+      <button id="btn-copy"  class="btn" type="button">Copy</button>
+      <button id="btn-clear" class="btn danger" type="button">Clear</button>
+    </div>
+  </div>
+
+  <!-- Controls row 2 -->
+  <div class="card controls">
+    <div class="row">
+      <label class="field">
+        <span>Model</span>
+        <select id="model">
+          <option value="">(loading…)</option>
+        </select>
+      </label>
+
+      <details class="details">
+        <summary>System prompt (optional)</summary>
+        <textarea id="system" rows="3" placeholder="Опционально: системная инструкция для модели"></textarea>
+      </details>
+
+      <div class="spacer"></div>
+      <label class="check">
+        <input id="stream" type="checkbox">
+        <span>Stream</span>
+      </label>
+    </div>
+  </div>
+
+  <!-- Messages -->
+  <div id="messages" class="card messages"></div>
+
+  <!-- Composer -->
+  <form id="chat-form" class="composer">
+    <textarea id="message" rows="3"
+      placeholder="Type your message… (Shift+Enter — перенос, Ctrl/Cmd+Enter — отправка)" required></textarea>
+    <div class="composer-actions">
+      <button id="send-btn" class="btn primary" type="submit">Send</button>
+      <span class="hint">v0.8.x • Local & Private</span>
+    </div>
+  </form>
+
+</div>
+
+<script>
+  if (window.app && typeof window.app.init === 'function') window.app.init();
+  else document.addEventListener('DOMContentLoaded', () => window.app?.init && window.app.init());
+</script>
+{% endblock %}

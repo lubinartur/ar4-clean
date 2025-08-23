@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Ingest</h1>
+
+<div class="stack">
+  <div class="card">
+    <h3 style="margin:0 0 8px 0">By URL</h3>
+    <p class="dim" style="margin:0 0 8px 0">Для загрузки веб-страницы нужно временно отключить оффлайн: <code>AIR4_OFFLINE=0</code>.</p>
+    <form id="urlForm" class="row" onsubmit="return false;" style="gap:8px; align-items:center">
+      <input id="urlInput" placeholder="https://example.com/article" style="flex:1" />
+      <button id="urlBtn" class="btn" type="button">Send</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h3 style="margin:0 0 8px 0">By File</h3>
+    <p class="dim" style="margin:0 0 8px 0">
+      Поддерживается: <code>.pdf</code>, <code>.txt</code>, <code>.md</code>, <code>.csv</code> (до ~15&nbsp;MB).
+      Для сканов PDF потребуется OCR (не входит в этот шаг).
+    </p>
+    <form id="fileForm" class="row" onsubmit="return false;" style="gap:8px; align-items:center">
+      <input id="fileInput" type="file" accept=".pdf,.txt,.md,.csv" />
+      <button id="fileBtn" class="btn" type="button">Upload</button>
+    </form>
+  </div>
+
+  <div id="result" class="card" style="display:none">
+    <div class="row" style="justify-content:space-between; align-items:center">
+      <div>
+        <div class="dim" style="font-size:.9em">session_id</div>
+        <code id="sid" style="font-size:1.05em"></code>
+      </div>
+      <div class="row" style="gap:8px">
+        <button id="copyBtn" class="btn ghost" type="button">Copy</button>
+        <a id="openBtn" class="btn" href="#" target="_self">Open summary</a>
+      </div>
+    </div>
+    <div id="hint" class="dim" style="margin-top:6px; font-size:.9em">
+      Теперь можно открыть <code>/ui/summaries?session_id=...</code>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between; align-items:center">
+      <h3 style="margin:0">Recent ingests</h3>
+      <div class="row" style="gap:8px">
+        <button id="refreshBtn" class="btn ghost small" type="button">Refresh</button>
+      </div>
+    </div>
+    <ul id="recent" style="margin:8px 0 0 0"></ul>
+  </div>
+
+  <div id="status" class="dim"></div>
+</div>
+
+<script>
+(function(){
+  const urlInput = document.getElementById('urlInput');
+  const urlBtn   = document.getElementById('urlBtn');
+
+  const fileInput= document.getElementById('fileInput');
+  const fileBtn  = document.getElementById('fileBtn');
+
+  const result  = document.getElementById('result');
+  const sidEl   = document.getElementById('sid');
+  const copyBtn = document.getElementById('copyBtn');
+  const openBtn = document.getElementById('openBtn');
+  const status  = document.getElementById('status');
+
+  const recent  = document.getElementById('recent');
+  const refreshBtn = document.getElementById('refreshBtn');
+
+  function setBusy(btn, v){ if (v) btn.setAttribute('aria-busy','true'); else btn.removeAttribute('aria-busy'); btn.disabled = !!v; }
+  function flash(t){ status.textContent = t; setTimeout(()=> status.textContent="", 1800); }
+  function trunc(s, n){ s = String(s||""); return s.length>n ? s.slice(0,n-1) + "…" : s; }
+
+  function showSid(sid){
+    sidEl.textContent = sid;
+    openBtn.href = `/ui/summaries?session_id=${encodeURIComponent(sid)}`;
+    result.style.display = 'block';
+    try { localStorage.setItem('air4.summary.sid', sid); } catch(e){}
+  }
+
+  copyBtn.addEventListener('click', async ()=>{
+    try { await navigator.clipboard.writeText(sidEl.textContent||""); flash('Скопировано'); }
+    catch { flash('Не удалось скопировать'); }
+  });
+
+  urlBtn.addEventListener('click', async ()=>{
+    const url = (urlInput.value || '').trim();
+    if (!url){ flash('Укажи URL'); return; }
+    setBusy(urlBtn, true);
+    try {
+      const r = await fetch('/ingest/url', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ url })
+      });
+      if (!r.ok){ flash(`Ошибка: ${r.status}`); return; }
+      const data = await r.json();
+      showSid(data.session_id);
+      flash('URL принят');
+      await loadRecent();
+    } catch(e){ flash(`Сеть: ${String(e)}`); }
+    finally { setBusy(urlBtn, false); }
+  });
+
+  fileBtn.addEventListener('click', async ()=>{
+    const f = fileInput.files && fileInput.files[0];
+    if (!f){ flash('Выбери файл'); return; }
+    // простой клиентский лимит ~15MB для раннего предупреждения
+    if (f.size > 15 * 1024 * 1024) { flash('Файл больше 15MB'); return; }
+
+    const fd = new FormData(); fd.append('file', f);
+    setBusy(fileBtn, true);
+    try {
+      const r = await fetch('/ingest/file', { method:'POST', body: fd });
+      if (!r.ok){
+        const text = await r.text();
+        flash(`Ошибка: ${r.status}`);
+        console.warn('ingest/file error:', text);
+        return;
+      }
+      const data = await r.json();
+      showSid(data.session_id);
+      flash('Файл принят');
+      await loadRecent();
+    } catch(e){ flash(`Сеть: ${String(e)}`); }
+    finally { setBusy(fileBtn, false); }
+  });
+
+  async function loadRecent(){
+    recent.innerHTML = '<li class="dim">Загрузка…</li>';
+    try{
+      const r = await fetch('/ingest/recent?limit=20');
+      if (!r.ok){ recent.innerHTML = `<li class="dim">Ошибка: ${r.status}</li>`; return; }
+      const list = await r.json();
+      if (!Array.isArray(list) || !list.length){
+        recent.innerHTML = '<li class="dim">Пусто</li>'; return;
+      }
+      recent.innerHTML = list.map(it => {
+        const sid = it.session_id;
+        const kind = it.type || '—';
+        const src  = trunc(it.source || '', 80);
+        const ts   = it.ts || '';
+        return `
+          <li class="row" style="gap:8px; align-items:center; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--border)">
+            <div style="display:flex; gap:8px; align-items:center; min-width:0">
+              <span class="tag">${kind}</span>
+              <code style="white-space:nowrap">${sid}</code>
+              <span class="dim" style="white-space:nowrap">• ${ts}</span>
+              <span class="dim" style="min-width:0; overflow:hidden; text-overflow:ellipsis">${src}</span>
+            </div>
+            <div class="row" style="gap:6px; flex-shrink:0">
+              <a class="btn small" href="/ui/summaries?session_id=${encodeURIComponent(sid)}">Open</a>
+              <button class="btn ghost small" data-action="recalc" data-sid="${sid}">Recalc</button>
+            </div>
+          </li>`;
+      }).join('');
+    }catch(e){
+      recent.innerHTML = '<li class="dim">NETWORK ERROR</li>';
+    }
+  }
+
+  recent.addEventListener('click', async (e)=>{
+    const btn = e.target.closest('button[data-action="recalc"]');
+    if (!btn) return;
+    const sid = btn.getAttribute('data-sid');
+    btn.setAttribute('aria-busy','true'); btn.disabled = true;
+    try{
+      const r = await fetch(`/memory/summarize/${encodeURIComponent(sid)}`, {method:'POST'});
+      if (r.ok) flash('Пересчитано'); else flash(`Ошибка: ${r.status}`);
+    }catch(err){ flash('Сеть: ошибка'); }
+    finally { btn.removeAttribute('aria-busy'); btn.disabled = false; }
+  });
+
+  refreshBtn.addEventListener('click', loadRecent);
+
+  // init
+  loadRecent();
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>AIr4 — GUI</h1>
+<p class="dim">Мини-панель навигации по разделам.</p>
+
+<div class="grid">
+  <a class="card linkcard" href="/ui/chat">
+    <h3>Chat</h3>
+    <p class="dim">Стрим ответов, выбор модели, X-Session.</p>
+  </a>
+
+  <a class="card linkcard" href="/ui/ingest">
+    <h3>Ingest</h3>
+    <p class="dim">URL / File → summary (TL;DR, facts, todos).</p>
+  </a>
+
+  <a class="card linkcard" href="/ui/todos">
+    <h3>Todos</h3>
+    <p class="dim">Список задач • Add • Done/Undo • Delete.</p>
+  </a>
+
+  <a class="card linkcard" href="/ui/summaries">
+    <h3>Summaries</h3>
+    <p class="dim">Поиск по session_id: TL;DR / facts / todos.</p>
+  </a>
+</div>
+
+<p class="dim" style="margin-top:18px">v0.8.x • Local & Private</p>
+{% endblock %}

@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Summaries</h1>
+
+<form id="findForm" class="stack" onsubmit="return false;">
+  <label>
+    <span>session_id</span>
+    <div class="row" style="gap:8px; align-items:center">
+      <input id="sid" placeholder="ing-xxxxxxxxxx" />
+      <button id="loadBtn" class="btn" type="button">Load</button>
+      <button id="recalcBtn" class="btn ghost" type="button" disabled>Recalc</button>
+    </div>
+  </label>
+</form>
+
+<div class="row" style="gap:8px; margin:8px 0">
+  <button id="copyTldrBtn" class="btn ghost" type="button" disabled>Copy TL;DR</button>
+  <button id="todoTldrBtn" class="btn ghost" type="button" disabled>Add TL;DR → Todos</button>
+  <button id="todoFactsBtn" class="btn ghost" type="button" disabled>Add Facts → Todos</button>
+  <span id="status" style="margin-left:8px; opacity:0.8"></span>
+</div>
+
+<div id="result" class="stack" style="display:none">
+  <div class="card">
+    <h3 style="margin:0 0 6px 0">TL;DR</h3>
+    <pre id="tldr" style="white-space:pre-wrap; margin:0"></pre>
+  </div>
+
+  <div class="card">
+    <h3 style="margin:0 0 6px 0">Facts</h3>
+    <ul id="facts" style="margin:0"></ul>
+  </div>
+
+  <div class="card">
+    <h3 style="margin:0 0 6px 0">Todos (из саммари)</h3>
+    <ul id="todos" style="margin:0"></ul>
+  </div>
+
+  <div class="card">
+    <h3 style="margin:0 0 6px 0">Raw JSON</h3>
+    <pre id="raw" style="white-space:pre-wrap; margin:0"></pre>
+  </div>
+</div>
+
+<script>
+(function(){
+  const sid     = document.getElementById('sid');
+  const loadBtn = document.getElementById('loadBtn');
+  const recalcBtn = document.getElementById('recalcBtn');
+  const result  = document.getElementById('result');
+  const tldrEl  = document.getElementById('tldr');
+  const factsEl = document.getElementById('facts');
+  const todosEl = document.getElementById('todos');
+  const rawEl   = document.getElementById('raw');
+  const status  = document.getElementById('status');
+  const copyTldrBtn = document.getElementById('copyTldrBtn');
+  const todoTldrBtn = document.getElementById('todoTldrBtn');
+  const todoFactsBtn= document.getElementById('todoFactsBtn');
+
+  let last = null;
+
+  // helpers
+  function qs(name){ return new URLSearchParams(location.search).get(name) || ""; }
+  function setBusy(el, v){ if (v) el.setAttribute('aria-busy','true'); else el.removeAttribute('aria-busy'); el.disabled = !!v; }
+  function flash(msg){ status.textContent = msg; setTimeout(()=> status.textContent="", 1500); }
+  function enableActions(ok){ recalcBtn.disabled = !ok; copyTldrBtn.disabled = !ok; todoTldrBtn.disabled = !ok; todoFactsBtn.disabled = !ok; }
+  function escapeHtml(s){ return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+  function renderSummary(data){
+    last = data || {};
+    result.style.display = 'block';
+    tldrEl.textContent = String(last.tldr || "");
+    factsEl.innerHTML = (Array.isArray(last.facts) ? last.facts : []).map(x => `<li>${escapeHtml(String(x))}</li>`).join('') || '<li><i>—</i></li>';
+    todosEl.innerHTML = (Array.isArray(last.todos) ? last.todos : []).map(x => `<li>${escapeHtml(typeof x === 'string' ? x : (x.text || JSON.stringify(x)))}</li>`).join('') || '<li><i>—</i></li>';
+    rawEl.textContent = JSON.stringify(last, null, 2);
+    enableActions(true);
+    // запомним sid для автоподхвата, если пользователь заходил без query
+    try { localStorage.setItem('air4.summary.sid', String(last.session_id || sid.value || "")); } catch(e){}
+  }
+
+  async function loadSummary(){
+    const id = (sid.value || "").trim();
+    if (!id){ flash('Укажи session_id'); return; }
+    setBusy(loadBtn, true); enableActions(false);
+    try{
+      const r = await fetch(`/memory/summary/${encodeURIComponent(id)}`);
+      if (!r.ok){ rawEl.textContent = `ERROR ${r.status}: ${await r.text()}`; result.style.display='block'; return; }
+      const data = await r.json();
+      renderSummary(data);
+    }catch(e){
+      rawEl.textContent = `NETWORK ERROR: ${String(e)}`; result.style.display='block';
+    }finally{
+      setBusy(loadBtn, false);
+    }
+  }
+
+  async function recalc(){
+    const id = (sid.value || "").trim();
+    if (!id){ flash('Укажи session_id'); return; }
+    setBusy(recalcBtn, true); enableActions(false);
+    try{
+      const r = await fetch(`/memory/summarize/${encodeURIComponent(id)}`, {method:'POST'});
+      if (!r.ok){ flash(`Ошибка: ${r.status}`); return; }
+      await loadSummary();
+      flash('Пересчитано');
+    }finally{
+      setBusy(recalcBtn, false);
+    }
+  }
+
+  loadBtn.addEventListener('click', loadSummary);
+  recalcBtn.addEventListener('click', recalc);
+
+  copyTldrBtn.addEventListener('click', async ()=>{
+    try{ await navigator.clipboard.writeText(String(last?.tldr || "")); flash('TL;DR скопирован'); }
+    catch{ flash('Не удалось скопировать'); }
+  });
+
+  todoTldrBtn.addEventListener('click', async ()=>{
+    const text = String(last?.tldr || "").trim();
+    if (!text){ flash('TL;DR пустой'); return; }
+    const r = await fetch('/todos', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})});
+    if (r.ok) flash('TL;DR добавлен в Todos'); else flash(`Todos error: ${r.status}`);
+  });
+
+  todoFactsBtn.addEventListener('click', async ()=>{
+    const facts = Array.isArray(last?.facts) ? last.facts : [];
+    if (!facts.length){ flash('Нет facts'); return; }
+    let ok = 0;
+    for (const f of facts.slice(0, 20)) {
+      const r = await fetch('/todos', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text: String(f)})});
+      if (r.ok) ok++;
+    }
+    flash(`Добавлено в Todos: ${ok}/${facts.length}`);
+  });
+
+  // автозагрузка: ?session_id=... или из LocalStorage
+  const fromQuery = qs('session_id');
+  if (fromQuery) {
+    sid.value = fromQuery;
+    loadSummary();
+  } else {
+    try {
+      const saved = localStorage.getItem('air4.summary.sid');
+      if (saved) { sid.value = saved; loadSummary(); }
+    } catch(e) {}
+  }
+})();
+</script>
+{% endblock %}
