@@ -1,4 +1,4 @@
-# backend/app/main.py — AIr4 v0.8.1 (Phase 8 — GUI + RAG-UI, history, summaries, ingest, todos)
+# backend/app/main.py — AIr4 v0.8.1 (Phase 9 — Chroma backend + UI)
 from __future__ import annotations
 
 import os
@@ -28,6 +28,9 @@ from pydantic import BaseModel, Field
 
 from backend.app.routes_memory import router as memory_router
 from backend.app import chat as chat_mod
+
+# Phase-9: импорт менеджера памяти
+from backend.app.memory.manager_chroma import ChromaMemoryManager
 
 # -----------------------------------------------------------------------------
 # Конфиг / лог
@@ -62,21 +65,59 @@ app.add_middleware(
 )
 
 # -----------------------------------------------------------------------------
+# Memory backend (Phase-9)
+# -----------------------------------------------------------------------------
+_app_memory = None
+
+def get_memory():
+    return _app_memory
+
+@app.on_event("startup")
+async def _memory_startup():
+    """Инициализация backend памяти"""
+    global _app_memory
+    backend = os.getenv("AIR4_MEMORY_BACKEND", "fallback")
+    force_fb = os.getenv("AIR4_MEMORY_FORCE_FALLBACK", "1") == "1"
+    if backend == "chroma" and not force_fb:
+        persist_dir = os.getenv("AIR4_CHROMA_DIR", "./storage/chroma")
+        collection = os.getenv("AIR4_CHROMA_COLLECTION", "air4_memory")
+        model_path = os.getenv("AIR4_EMBED_MODEL_PATH", "./models/bge-m3")
+        _app_memory = ChromaMemoryManager(
+            persist_dir=persist_dir,
+            collection=collection,
+            model_path=model_path,
+        )
+    else:
+        _app_memory = None
+
+# -----------------------------------------------------------------------------
 # Health / Debug
 # -----------------------------------------------------------------------------
-def _memory_backend_label() -> str:
-    return "fallback" if os.getenv("AIR4_MEMORY_FORCE_FALLBACK", "0") == "1" else "chroma"
-
 @app.get("/health")
 def health():
+    mem = get_memory()
+    memory_info = {
+        "backend": "chroma" if mem is not None else "fallback",
+        "count": -1,
+        "persist_dir": os.getenv("AIR4_CHROMA_DIR", "./storage/chroma"),
+        "collection": os.getenv("AIR4_CHROMA_COLLECTION", "air4_memory"),
+        "embed_model": os.getenv("AIR4_EMBED_MODEL_PATH", "./models/bge-m3"),
+    }
+    if mem is not None:
+        try:
+            memory_info["count"] = mem.count()
+        except Exception:
+            pass
+
     return {
         "ok": True,
         "status": "up",
         "version": APP_VERSION,
         "offline": AIR4_OFFLINE,
-        "model": OLLAMA_MODEL_DEFAULT,          # ← добавили модель
-        "memory_backend": _memory_backend_label(),
-        "ollama_base_url": OLLAMA_BASE_URL,     # опционально: удобно для отладки
+        "model": OLLAMA_MODEL_DEFAULT,
+        "memory": memory_info,
+        "memory_backend": memory_info["backend"],
+        "ollama_base_url": OLLAMA_BASE_URL,
     }
 
 @app.get("/__routes")
