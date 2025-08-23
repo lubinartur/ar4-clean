@@ -81,3 +81,97 @@ class MemoryManager:
             self._dedup_append(_TODOS_FILE, {
                 "user_id": user_id, "session_id": session_id, "done": False, "tags": tags or []
             }, todo.strip())
+    # ==== TODOs: list/toggle/delete ====
+    def list_todos(self, user_id: Optional[str] = None, session_id: Optional[str] = None,
+                   done: Optional[bool] = None, limit: int = 200) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        if not os.path.exists(_TODOS_FILE):
+            return rows
+        with open(_TODOS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if user_id and obj.get("user_id") != user_id:
+                    continue
+                if session_id and obj.get("session_id") != session_id:
+                    continue
+                if done is not None and bool(obj.get("done")) != done:
+                    continue
+                rows.append(obj)
+        # свежие последними — отсортируем по времени
+        rows.sort(key=lambda x: x.get("ts", 0), reverse=True)
+        return rows[:limit]
+
+    def _rewrite_jsonl_without_hash(self, path: str, h: str) -> None:
+        if not os.path.exists(path):
+            return
+        tmp = path + ".tmp"
+        with open(path, "r", encoding="utf-8") as src, open(tmp, "w", encoding="utf-8") as dst:
+            for line in src:
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if obj.get("hash") == h:
+                    continue
+                dst.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)
+
+    def set_todo_done(self, h: str, done: bool = True) -> bool:
+        """Помечает одну задачу по hash. Возвращает True если найдено/изменено."""
+        if not os.path.exists(_TODOS_FILE):
+            return False
+        changed = False
+        tmp = _TODOS_FILE + ".tmp"
+        with open(_TODOS_FILE, "r", encoding="utf-8") as src, open(tmp, "w", encoding="utf-8") as dst:
+            for line in src:
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if obj.get("hash") == h:
+                    obj["done"] = bool(done)
+                    changed = True
+                dst.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        os.replace(tmp, _TODOS_FILE)
+        return changed
+
+    def delete_todo(self, h: str) -> bool:
+        if not os.path.exists(_TODOS_FILE):
+            return False
+        # проверим, что существовало
+        existed = False
+        with open(_TODOS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    if json.loads(line).get("hash") == h:
+                        existed = True
+                        break
+                except Exception:
+                    continue
+        if not existed:
+            return False
+        self._rewrite_jsonl_without_hash(_TODOS_FILE, h)
+        return True
+    # ==== Ingest storage / RAG stub ====
+    def save_ingest_raw(self, user_id: str, doc_id: str, text: str, meta: Dict[str, Any]) -> None:
+        ingest_dir = os.path.join(_STORAGE, "ingest")
+        os.makedirs(ingest_dir, exist_ok=True)
+        # сырой текст
+        with open(os.path.join(ingest_dir, f"{user_id}__{doc_id}.txt"), "w", encoding="utf-8") as f:
+            f.write(text)
+        # мета
+        with open(os.path.join(ingest_dir, f"{user_id}__{doc_id}.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    def add_rag_document(self, user_id: str, doc_id: str, text: str, meta: Dict[str, Any]) -> None:
+        """
+        Задел под индексацию в RAG. Сейчас просто пишем в jsonl.
+        Позже можно заменить на добавление в Chroma.
+        """
+        rag_file = os.path.join(_STORAGE, "rag_docs.jsonl")
+        rec = {"user_id": user_id, "doc_id": doc_id, "meta": meta, "text": text[:5000], "ts": time.time()}
+        with open(rag_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
