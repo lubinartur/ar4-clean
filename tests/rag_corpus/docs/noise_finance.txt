@@ -1,0 +1,4 @@
+DOCID: noise_finance
+Выписка по счёту: 05.09.2024 ... Перевод −20.00 ... Credit repayment −19.00 ...
+(шумовой документ, не про Phase-10)
+[DOCID: noise_finance]

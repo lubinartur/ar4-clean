@@ -5,12 +5,11 @@ BASE="${BASE:-http://127.0.0.1:8000}"
 XUSER="${XUSER:-X-User: dev}"
 PASSWORD="${PASSWORD:-}"
 K="${K:-3}"
-MMR="${MMR:-0.7}"
-HYDE="${HYDE:-0}"
+MMR="${MMR:-0.2}"
+HYDE="${HYDE:-1}"
 RECENCY_DAYS="${RECENCY_DAYS:-365}"
 THRESHOLD="${THRESHOLD:-0.7}"
-FILTERS="${FILTERS:-tag:phase10 OR source:rag_corpus}"  # базовый фильтр (наш корпус)
-SMART_FILTERS="${SMART_FILTERS:-1}"
+FILTERS="${FILTERS:-tag:phase10 OR source:rag_corpus}"
 CORPUS_DIR="tests/rag_corpus"
 DOCS_DIR="$CORPUS_DIR/docs"
 QUERIES="$CORPUS_DIR/queries.tsv"
@@ -24,8 +23,8 @@ if [[ -n "$PASSWORD" ]]; then
 fi
 HEADERS=(-H "$XUSER"); [[ -n "$TOKEN" ]] && HEADERS+=(-H "Authorization: Bearer $TOKEN")
 
-echo "== Smoke Phase-10 RAG (raw) =="
-echo "BASE=$BASE, K=$K, MMR=$MMR, HYDE=$HYDE, THRESHOLD=$THRESHOLD, FILTERS='${FILTERS}', SMART=$SMART_FILTERS"
+echo "== Smoke Phase-10 RAG (raw, intent-boost) =="
+echo "BASE=$BASE, K=$K, MMR=$MMR, HYDE=$HYDE, THRESHOLD=$THRESHOLD, FILTERS='${FILTERS}'"
 
 [[ -d "$DOCS_DIR" ]] || { echo "❌ Нет директории $DOCS_DIR"; exit 2; }
 echo "→ Инжест документов из $DOCS_DIR"
@@ -51,51 +50,39 @@ total_q=0; sum_prec=0
 echo "→ Запросы и ответы:"
 
 shopt -s nocasematch
-
 while IFS=$'\t' read -r query expected || [[ -n "${query:-}" ]]; do
   [[ -z "${query// }" ]] && continue
   [[ "${query:0:1}" == "#" ]] && continue
   total_q=$((total_q+1))
 
-  base="(${FILTERS})"
-  target=""
-  if [[ "$SMART_FILTERS" == "1" ]]; then
-    qlc="$query"
-    case "$qlc" in
-      *цели*|*goals*)
-        target="filename:phase10_goals.txt OR title:phase10_goals"
-        ;;
-    esac
-    case "$qlc" in
-      *следующ*|*"next steps"*|*roadmap*)
-        target="filename:phase10_next.txt OR title:phase10_next"
-        ;;
-    esac
-    case "$qlc" in
-      *"о чём"*|*"о чем"*|*about*|*описан*)
-        target="filename:phase10_intro.txt OR title:phase10_intro"
-        ;;
-    esac
-    case "$qlc" in
-      *сделано*|*готово*|*done*)
-        target="filename:phase10_done.txt OR title:phase10_done"
-        ;;
-    esac
-  fi
+  # intent boost: добавим якорные слова в текст запроса
+  boost=""
+  qlc="$query"
+  case "$qlc" in
+    *цели*|*goals*)          boost="$boost phase10_goals цели goals" ;;
+  esac
+  case "$qlc" in
+    *следующ*|*"next steps"*|*roadmap*)
+                           boost="$boost phase10_next \"следующие шаги\" \"next steps\" roadmap" ;;
+  esac
+  case "$qlc" in
+    *"о чём"*|*"о чем"*|*about*|*описан*)
+                           boost="$boost phase10_intro описание intro" ;;
+  esac
+  case "$qlc" in
+    *сделано*|*готово*|*done*)
+                           boost="$boost phase10_done done \"что уже сделано\"" ;;
+  esac
 
-  if [[ -n "$target" ]]; then
-    extra="${base} AND (${target})"
-  else
-    extra="${base}"
-  fi
+  qsend="$query $boost"
 
   resp="$(curl -sG "$BASE/memory/debug/query_raw" \
-    --data-urlencode "q=$query" \
+    --data-urlencode "q=$qsend" \
     --data-urlencode "k=$K" \
     --data-urlencode "mmr=$MMR" \
     --data-urlencode "hyde=$HYDE" \
     --data-urlencode "recency_days=$RECENCY_DAYS" \
-    --data-urlencode "filters=$extra" \
+    --data-urlencode "filters=$FILTERS" \
     "${HEADERS[@]}")"
 
   hits=0
