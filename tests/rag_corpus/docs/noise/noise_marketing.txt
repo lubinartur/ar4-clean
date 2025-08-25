@@ -1,0 +1,1 @@
+This is a noise document unrelated to the AIr4 project. It discusses generic marketing strategies, SEO buzzwords, and random KPIs. The intent is to distract RAG retrieval and reduce precision if the retriever is weak.
