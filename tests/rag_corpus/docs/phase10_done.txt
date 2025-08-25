@@ -1,0 +1,5 @@
+DOCID: phase10_done
+Уже сделано:
+- /memory/search поддерживает MMR, HyDE, recency-фильтры.
+- Подключён ChromaMemoryManager как backend памяти.
+[DOCID: phase10_done]

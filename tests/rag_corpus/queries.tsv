@@ -1,0 +1,4 @@
+О чём фаза 10?	phase10_intro|phase10_goals
+Какие цели у фазы 10?	phase10_goals|phase10_intro
+Что уже сделано к текущему моменту?	phase10_done
+Какие следующие шаги запланированы?	phase10_next|phase10_goals|phase10_intro
