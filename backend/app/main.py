@@ -29,6 +29,9 @@ from pydantic import BaseModel, Field
 from backend.app.routes_memory import router as memory_router
 from backend.app import chat as chat_mod
 
+from backend.app.routes_ingest import router as ingest_router
+
+
 # Phase-9: импорт менеджера памяти
 from backend.app.memory.manager_chroma import ChromaMemoryManager
 
@@ -58,6 +61,7 @@ _require_local(OLLAMA_BASE_URL)
 # -----------------------------------------------------------------------------
 app = FastAPI(title="AIr4", version=APP_VERSION)
 app.include_router(memory_router)
+app.include_router(ingest_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -90,6 +94,11 @@ async def _memory_startup():
     else:
         _app_memory = None
 
+    try:
+        app.state.memory_manager = _app_memory
+    except Exception:
+        pass
+
 # -----------------------------------------------------------------------------
 # Health / Debug
 # -----------------------------------------------------------------------------
@@ -119,10 +128,6 @@ def health():
         "memory_backend": memory_info["backend"],
         "ollama_base_url": OLLAMA_BASE_URL,
     }
-
-@app.get("/__routes")
-def list_routes():
-    return [getattr(r, "path", None) for r in app.router.routes]
 
 # -----------------------------------------------------------------------------
 # Директории проекта
