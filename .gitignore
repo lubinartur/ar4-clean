@@ -30,3 +30,7 @@ __pycache__/
 # локальные бэкапы
 *.bak
 .backup_refs_before_filter.txt
+
+# локальные бэкапы
+*.bak
+.backup_refs_before_filter.txt
