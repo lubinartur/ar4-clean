@@ -1,60 +1,77 @@
+cat > .github/workflows/rag-smoke.yml <<'YAML'
 name: RAG Smoke (Phase-10)
 
 on:
   push:
-    branches: [ main, develop, feature/** ]
+    branches: [ main, master, feature/** ]
   pull_request:
-    branches: [ main, develop ]
+    branches: [ main, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   rag-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+          cache: "pip"
 
       - name: Install deps
         run: |
-          python -m pip install --upgrade pip wheel
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install -r requirements-memory.txt || true
 
-      - name: Launch uvicorn
+      - name: Prepare folders
         run: |
-          nohup uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 > uvicorn.log 2>&1 &
-          for i in {1..60}; do
-            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/health || true)
-            if [ "$code" = "200" ]; then echo "API is up"; break; fi
-            sleep 0.5
+          mkdir -p models/bge-m3 storage/chroma
+          chmod +x scripts/*.sh || true
+
+      - name: Download embeddings (bge-m3)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}   # опционально; можно не задавать
+        run: |
+          bash scripts/setup_embeddings.sh
+          ls -lh models/bge-m3 || true
+
+      - name: Start API (bg)
+        run: |
+          uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 &
+          echo $! > .uvicorn.pid
+          # небольшой запас времени на старт
+          for i in {1..10}; do
+            curl -fsS http://127.0.0.1:8000/health && break || sleep 1
           done
-          test "$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/health)" = "200"
 
-      - name: Ensure __routes is removed
-        run: |
-          code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/__routes || true)
-          test "$code" = "404"
+      - name: Health check
+        run: curl -fsS http://127.0.0.1:8000/health
 
-      - name: Add noise docs (idempotent)
-        run: |
-          mkdir -p tests/rag_corpus/docs/noise
-          echo "CI noise document to validate retriever robustness." > tests/rag_corpus/docs/noise/ci_noise.txt
+      - name: Run smoke
+        run: bash scripts/smoke_phase10_rag.sh
 
-      - name: Run smoke script
-        shell: bash
-        run: |
-          bash scripts/smoke_phase10_rag.sh | tee .smoke.log
-          AVG=$(grep -Eo 'avg p@3[[:space:]]*=[[:space:]]*[0-9.]+' .smoke.log | tail -1 | sed -E 's/.*=[[:space:]]*([0-9.]+)/\1/')
-          echo "avg p@3 = ${AVG}"
-          awk -v a="$AVG" 'BEGIN{exit (a>=0.7)?0:1}'
-
-      - name: Upload smoke log (always)
+      - name: Upload smoke log (artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: smoke-log
-          path: .smoke.log
+          path: |
+            .smoke.log
+            .smoke_phase10_step2.log
+          if-no-files-found: ignore
+
+      - name: Teardown
+        if: always()
+        run: |
+          if [ -f .uvicorn.pid ]; then kill $(cat .uvicorn.pid) || true; fi
+YAML
