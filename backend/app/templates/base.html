@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ru" class="light" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}AIr4{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <nav class="nav">
+      <a class="brand" href="/ui">AIr4</a>
+
+      <a href="/ui/chat"      class="{% if active=='chat' %}active{% endif %}">Chat</a>
+      <a href="/ui/ingest"    class="{% if active=='ingest' %}active{% endif %}">Ingest</a>
+      <a href="/ui/todos"     class="{% if active=='todos' %}active{% endif %}">Todos</a>
+      <a href="/ui/summaries" class="{% if active=='summaries' %}active{% endif %}">Summaries</a>
+
+      <span class="spacer"></span>
+
+      <!-- Status badge -->
+      <span id="health-badge" class="badge">…</span>
+
+      <button id="themeBtn" class="btn ghost" type="button" title="Toggle theme">🌓</button>
+    </nav>
+  </header>
+
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">v0.9.x • Local & Private</footer>
+
+  <div id="toasts" class="toasts"></div>
+
+  <script src="/static/app.js"></script>
+  <script>
+    // Persist theme across reloads
+    (function(){
+      const saved = localStorage.getItem('air4_theme');
+      if (saved) {
+        document.documentElement.className = saved;
+        document.documentElement.setAttribute('data-theme', saved);
+      }
+      const btn = document.getElementById('themeBtn');
+      if (btn) btn.addEventListener('click', () => {
+        const current = document.documentElement.getAttribute('data-theme') || 'light';
+        const next = current === 'light' ? 'dark' : 'light';
+        document.documentElement.className = next;
+        document.documentElement.setAttribute('data-theme', next);
+        localStorage.setItem('air4_theme', next);
+      });
+    })();
+
+    // Stable headers for HTMX/fetch (user + session)
+    (function(){
+      const USER_ID = localStorage.getItem('air4_user') || 'dev';
+      if (!localStorage.getItem('air4_session_id')) {
+        const rid = (crypto.randomUUID ? crypto.randomUUID() : Date.now());
+        localStorage.setItem('air4_session_id', 'sess-' + rid);
+      }
+      const SID = localStorage.getItem('air4_session_id');
+      // If you use HTMX, it reads this attribute automatically:
+      document.documentElement.setAttribute('hx-headers', JSON.stringify({
+        'X-User': USER_ID,
+        'X-Session': SID
+      }));
+      // Expose for app.js if needed
+      window.__AIR4__ = { USER_ID, SID };
+    })();
+
+    // Health badge
+    (async () => {
+      try {
+        const r = await fetch('/health', { cache: 'no-store' });
+        const j = await r.json();
+        const el = document.getElementById('health-badge');
+        if (!el) return;
+        const backend = j?.memory_backend || 'unknown';
+        const version = j?.version || '0.x';
+        const offline = j?.offline ? 'offline' : 'online';
+        const model = j?.model || (window.localStorage.getItem('ollama_model') || 'llama3.1:8b');
+        el.textContent = `Memory: ${backend} • Model: ${model} • ${offline} • v${version}`;
+        el.classList.toggle('badge-ok', backend === 'chroma');
+      } catch (e) {
+        const el = document.getElementById('health-badge');
+        if (el) el.textContent = 'Status: error';
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+DOCID: noise_other_project
+Цели спринта: закрыть баги. Следующие шаги: релиз на прод.
+(похожими словами, но не про Phase-10)
+[DOCID: noise_other_project]

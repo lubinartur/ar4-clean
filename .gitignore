@@ -1,0 +1,12 @@
+models/
+storage/
+__pycache__/
+*.pyc
+*.bin
+*.onnx
+*.safetensors
+.uvicorn.out
+.uvicorn.pid
+nohup.out
+*.log
+*.sqlite3

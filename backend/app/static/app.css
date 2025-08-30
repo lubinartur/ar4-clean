@@ -1,0 +1,221 @@
+/* ========== Design tokens ========== */
+:root{
+  --bg:#0b0c10; --panel:#0f1116; --muted:#858b98; --text:#e7e9ee; --brand:#4f8cff;
+  --border:#22262f; --primary:#3b82f6; --primary-ink:#fff; --danger:#ef4444;
+  --card:#0f1116; --bubble-user:#1b2432; --bubble-assist:#111827; --code-bg:#0b0f14;
+  --ring: rgba(79,140,255,.35);
+  --radius:12px; --radius-sm:10px; --shadow:0 8px 24px rgba(0,0,0,.25);
+  --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,Ubuntu,"Helvetica Neue",Arial,"Noto Sans",sans-serif;
+}
+html.light{
+  --bg:#fafafa; --panel:#ffffff; --muted:#6b7280; --text:#1f2937; --brand:#2563eb;
+  --border:#e5e7eb; --primary:#2563eb; --primary-ink:#fff; --danger:#dc2626;
+  --card:#ffffff; --bubble-user:#eef2ff; --bubble-assist:#f3f4f6; --code-bg:#0f172a;
+  --shadow:0 6px 18px rgba(0,0,0,.06);
+}
+
+/* ========== Base ========== */
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--bg); color:var(--text); font:14px/1.5 var(--font);
+}
+a{color:var(--brand); text-decoration:none}
+a:hover{text-decoration:underline}
+.container{max-width:1100px; margin:0 auto; padding:24px}
+
+/* ========== Topbar ========== */
+.topbar{
+  position:sticky; top:0; z-index:10; backdrop-filter:saturate(120%) blur(8px);
+  background:linear-gradient(to bottom, rgba(0,0,0,.35), transparent);
+  border-bottom:1px solid var(--border);
+}
+html.light .topbar{background:linear-gradient(to bottom, rgba(255,255,255,.85), rgba(255,255,255,.6))}
+.nav{display:flex; gap:14px; align-items:center; padding:10px 16px}
+.nav .brand{font-weight:700; letter-spacing:.2px}
+.nav .spacer{flex:1}
+.btn{appearance:none; border:1px solid var(--border); background:var(--panel); color:var(--text);
+     padding:6px 10px; border-radius:8px; cursor:pointer}
+.btn:hover{border-color:var(--brand)}
+.btn.ghost{background:transparent}
+.btn.primary{background:var(--primary); color:var(--primary-ink); border-color:transparent}
+.btn.danger{background:transparent; color:var(--danger); border-color:var(--danger)}
+.badge{
+  font-size:12px; padding:4px 10px; border:1px solid var(--border);
+  background:var(--panel); border-radius:10px; opacity:.9
+}
+.badge.badge-ok{background:rgba(16,185,129,.12); border-color:#10b981;}
+
+/* ========== Cards & controls ========== */
+.card{
+  background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
+  padding:14px; box-shadow:var(--shadow); margin-bottom:14px;
+}
+.controls .row{display:flex; gap:12px; flex-wrap:wrap; align-items:center}
+.field{display:flex; align-items:center; gap:8px}
+.field > span{opacity:.7; font-size:12px}
+.field input[type="number"],
+.field input[type="text"],
+.field select{
+  height:34px; padding:6px 10px; border:1px solid var(--border);
+  border-radius:10px; background:var(--panel); color:var(--text);
+}
+.field-session input{width:220px}
+.check{display:flex; gap:8px; align-items:center}
+.details summary{cursor:pointer; opacity:.8}
+.details textarea{
+  width:min(44rem, 80vw); margin-top:8px; border:1px solid var(--border);
+  background:var(--panel); color:var(--text); border-radius:10px; padding:8px 10px;
+}
+
+/* ========== Chat ========== */
+.page-title{font-size:28px; font-weight:800; margin:10px 2px 16px}
+.messages{min-height:40vh; max-height:62vh; overflow:auto}
+.messages::-webkit-scrollbar{height:12px; width:10px}
+.messages::-webkit-scrollbar-thumb{background:rgba(127,127,127,.35); border-radius:8px}
+
+.msg{display:flex; gap:10px; align-items:flex-start}
+.msg + .msg{margin-top:12px}
+.msg .role{
+  width:28px; height:28px; flex:0 0 28px; border-radius:50%; display:flex;
+  align-items:center; justify-content:center; font-size:12px; opacity:.9
+}
+.role.user{background:#a78bfa; color:#1b102e}
+.role.assistant{background:#60a5fa; color:#0a1728}
+.msg .bubble{
+  flex:1; border:1px solid var(--border); border-radius:12px; padding:10px 12px;
+  background:var(--bubble-assist);
+}
+.msg.user .bubble{background:var(--bubble-user)}
+.msg .meta{font-size:11px; opacity:.65; margin-bottom:3px}
+.msg .content{white-space:pre-wrap}
+.msg .sources{margin-top:8px}
+.msg .sources .title{font-weight:600; font-size:12px; margin-bottom:4px; opacity:.8}
+.msg .sources ul{margin:0; padding-left:18px}
+.msg .sources li{font-size:12px; opacity:.9}
+
+/* Code blocks inside messages */
+.msg pre{background:var(--code-bg); color:#d1e7ff; padding:10px; border-radius:10px; overflow:auto}
+.msg code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace}
+
+/* ========== Composer ========== */
+.composer{display:flex; flex-direction:column; gap:10px}
+.composer textarea{
+  width:100%; border:1px solid var(--border); background:var(--panel); color:var(--text);
+  border-radius:12px; padding:10px 12px; resize:vertical; min-height:80px; max-height:240px
+}
+.composer-actions{display:flex; align-items:center; gap:10px}
+.hint{font-size:12px; opacity:.65}
+
+/* Footer */
+.footer{opacity:.6; text-align:center; padding:20px}
+
+/* Toasts (placeholder) */
+.toasts{position:fixed; inset:auto 20px 20px auto; display:flex; flex-direction:column; gap:8px; z-index:50}
+
+/* ====== AIr4 Hotfix for Home + Unified Blocks ====== */
+
+/* 0) Убить «скобки» от старых псевдоэлементов на главной */
+main.container h1::before, main.container h1::after,
+main.container h2::before, main.container h2::after,
+main.container a::before,  main.container a::after,
+main.container p::before,  main.container p::after {
+  content: none !important;
+  display: none !important;
+}
+
+/* 1) Базовые токены (без color-mix — совместимо везде) */
+html[data-theme="dark"]{
+  --bg:#0b0e14; --bg2:#0f1420; --panel:#111827; --elev:#0f1723;
+  --line:#1e2633; --text:#e7ebf3; --muted:#a9b1c3;
+  --accent:#5aa2ff; --accent2:#7cf9a6; --danger:#ff6b6b;
+  --ring: rgba(82,140,255,.35);
+}
+html[data-theme="light"]{
+  --bg:#f7f8fb; --bg2:#ffffff; --panel:#ffffff; --elev:#fbfcff;
+  --line:#e8ecf3; --text:#131722; --muted:#5b6272;
+  --accent:#2b6bff; --accent2:#1fd893; --danger:#e24a4a;
+  --ring: rgba(43,107,255,.22);
+}
+
+/* 2) Фон и типографика */
+body{ background:linear-gradient(180deg,var(--bg) 0%, var(--bg2) 100%); color:var(--text); }
+
+/* 3) Универсальные блоки — применится к тому, что уже имеет .card */
+.card{
+  background: linear-gradient(180deg, var(--panel), var(--elev));
+  border:1px solid var(--line);
+  border-radius:14px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.28);
+  padding:14px;
+}
+.panel{ /* алиас, если встретится */
+  background: linear-gradient(180deg, var(--panel), var(--elev));
+  border:1px solid var(--line);
+  border-radius:14px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.28);
+  padding:14px;
+}
+
+/* 4) Сетки и ряды, если их нет */
+.row{ display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+.spacer{ flex:1 1 auto; }
+
+/* 5) Заголовки и ссылки на главной */
+main.container h1{ font-weight:800; letter-spacing:.3px; margin:18px 0 12px; }
+main.container h2, main.container h3{ margin:18px 0 6px; }
+main.container a{ color: var(--accent); text-decoration: none; }
+main.container a:hover{ text-decoration: underline; }
+
+/* 6) Кнопки и поля (подтянуть стиль, не ломая старые) */
+.btn{
+  display:inline-flex; align-items:center; gap:8px; height:36px; padding:0 12px;
+  border-radius:10px; border:1px solid var(--line);
+  background: rgba(255,255,255,.02);
+  color:var(--text); cursor:pointer; transition:.15s;
+}
+.btn:hover{ border-color: rgba(90,162,255,.5); }
+.btn.primary{ border:none; background:linear-gradient(135deg,#1e63ff,#21b1ff); color:#fff;
+              box-shadow:0 8px 20px rgba(46,119,255,.25); }
+.btn.danger{ border-color: rgba(255,107,107,.5); color:#ff8a8a; background: rgba(255,80,80,.06); }
+
+/* 7) Инпуты и textarea */
+input[type="text"], input[type="number"], input[type="url"],
+input[type="search"], select, textarea{
+  border:1px solid var(--line);
+  background: rgba(255,255,255,.03);
+  color: var(--text);
+  border-radius:10px; padding:8px 10px; outline:none; transition:.15s;
+}
+input:focus, select:focus, textarea:focus{
+  border-color: rgba(90,162,255,.55);
+  box-shadow: 0 0 0 4px var(--ring);
+}
+
+/* 8) Сообщения (если используешь .messages/.msg/.bubble уже есть в chat) */
+.messages{ background: rgba(0,0,0,.12); }
+
+/* на крайний случай — вырубить ВСЕ псевдоэлементы внутри main */
+main.container *::before, main.container *::after { content:none !important; }
+
+/* Home page grid */
+.home-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 18px;
+  margin-top: 18px;
+}
+.home-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.home-sec:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 28px rgba(0,0,0,.35);
+}
+.home-sec h2 { margin: 0; font-size: 20px; font-weight: 700; }
+.home-sec p  { margin: 0; opacity: .85; flex: 1; }
+.home-sec .btn { align-self: flex-start; }
+.home-foot { text-align: center; opacity: .6; margin-top: 20px; }

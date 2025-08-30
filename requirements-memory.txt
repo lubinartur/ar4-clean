@@ -1,0 +1,7 @@
+chromadb>=0.5,<0.6
+sentence-transformers>=3.0,<4.0
+numpy>=1.26
+torch>=2.2; platform_system!="Darwin" or platform_machine!="arm64"
+uvicorn>=0.30
+fastapi>=0.111
+pydantic>=2.7

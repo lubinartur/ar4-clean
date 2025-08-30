@@ -1,0 +1,1 @@
+Changelog: migrated from MySQL to SQLite then to PostgreSQL. Added websockets, replaced cron with systemd timers. Unrelated tech noise to confuse retrieval.

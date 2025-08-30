@@ -1,0 +1,37 @@
+[
+  {
+    "id": "q01",
+    "query": "Какой целевой показатель P@3 для Phase-10 и когда ставим тег релиза?",
+    "expected_docs": ["phase10-rag-metrics.md"]
+  },
+  {
+    "id": "q02",
+    "query": "Где находится реализация ретривера с поддержкой MMR и HyDE?",
+    "expected_docs": ["retriever-tuning.md"]
+  },
+  {
+    "id": "q03",
+    "query": "Какие форматы поддерживает ingest и какие есть эндпоинты для загрузки?",
+    "expected_docs": ["ingest-pipeline.md"]
+  },
+  {
+    "id": "q04",
+    "query": "В каком модуле инициализируется ChromaMemoryManager и как к нему обращаться?",
+    "expected_docs": ["chroma-manager-overview.md"]
+  },
+  {
+    "id": "q05",
+    "query": "Какие стартовые значения задать для mmr, hyde и recency_days?",
+    "expected_docs": ["retriever-tuning.md"]
+  },
+  {
+    "id": "q06",
+    "query": "Как включить фильтрацию по фазе для поиска только фаз 10?",
+    "expected_docs": ["retriever-tuning.md", "phase10-rag-metrics.md"]
+  },
+  {
+    "id": "q07",
+    "query": "Что такое duress режим и к какой фазе он относится?",
+    "expected_docs": ["security-duress-mode.md"]
+  }
+]
