@@ -71,7 +71,7 @@ jobs:
           AIR4_EMBED_MODEL_PATH=models/bge-m3
           AIR4_MEMORY_BACKEND=chroma
           AIR4_CHROMA_COLLECTION=air4_memory
-          AIR4_OFFLINE=1
+          AIR4_OFFLINE=0
           ENV
           cat .env
 
