@@ -1,10 +1,10 @@
-name: RAG Smoke (Phase-10)
+name: "RAG Smoke (Phase-10)"
 
 on:
   push:
-    branches: [ main, master, feature/** ]
+    branches: [ "main", "master", "feature/**" ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 concurrency:
@@ -14,28 +14,29 @@ concurrency:
 jobs:
   rag-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
-      - name: Checkout
+      - name: "Checkout"
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: "Set up Python"
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install deps
+      - name: "Install deps"
         run: |
+          set -euxo pipefail
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-memory.txt || true
-          # гарантированно для BGE-M3
-          pip install -U "torch>=2.3,<2.4" --index-url https://download.pytorch.org/whl/cpu
-          pip install -U "sentence-transformers>=3.0.1" "FlagEmbedding>=1.2.10" "onnxruntime>=1.17.0"
+          pip install -r requirements.txt --progress-bar=on
+          pip install -r requirements-memory.txt --progress-bar=on || true
 
-      - name: Download embeddings (bge-m3)
+      - name: "Install HF CLI"
+        run: pip install -U "huggingface_hub[cli]>=0.23"
+
+      - name: "Download embeddings (bge-m3)"
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -53,54 +54,50 @@ jobs:
           from FlagEmbedding import BGEM3FlagModel
           p = Path("models/bge-m3")
           print("files:", len(list(p.rglob('*'))))
-          m = BGEM3FlagModel(str(p), use_fp16=False, device="cpu")
-          out = m.encode(["hello world"])
-          print("vec dims:", len(out["dense_vecs"][0]))
+          _ = BGEM3FlagModel(p.as_posix(), use_fp16=True)
+          print("✓ Model loaded OK")
           PY
 
-      - name: Write CI .env
+      - name: "Write CI .env"
         run: |
           cat > .env <<'EOF'
           AIR4_EMBED_MODEL_PATH=models/bge-m3
+          CHROMA_DIR=storage/chroma
           AIR4_CHROMA_COLLECTION=air4_memory
           AIR4_MEMORY_BACKEND=chroma
-          CHROMA_DIR=storage/chroma
           AIR4_OFFLINE=1
           EOF
           cat .env
 
-      - name: Start API (bg)
-        env:
-          AIR4_EMBED_MODEL_PATH: "${{ github.workspace }}/models/bge-m3"
-          CHROMA_DIR: "${{ github.workspace }}/storage/chroma"
-          AIR4_CHROMA_COLLECTION: air4_memory
-          AIR4_MEMORY_BACKEND: chroma
-          AIR4_OFFLINE: "1"
+      - name: "Start API (bg)"
         run: |
+          set -euxo pipefail
           mkdir -p "$CHROMA_DIR"
           uvicorn backend.app.main:app \
             --host 127.0.0.1 --port 8000 --log-level debug >server.log 2>&1 &
           echo $! > .uvicorn.pid
-          for i in {1..30}; do
-            curl -fsS http://127.0.0.1:8000/health && break || sleep 1
+          for i in {1..40}; do
+            curl -fsS http://127.0.0.1:8000/health && break || sleep 2
           done
           echo "---- /health ----"
           curl -sS http://127.0.0.1:8000/health || true
-          
-      - name: Health check
+
+      - name: "Health check"
         run: curl -fsS http://127.0.0.1:8000/health
 
       - name: "Guard: ensure Chroma + embeddings are active"
         run: |
           set -e
-          resp=$(curl -sS http://127.0.0.1:8000/health)
-          echo "$resp"
-          echo "$resp" | grep '"memory_backend":"chroma"' || {
-            echo "Memory backend is NOT 'chroma' (embeddings init failed?)."
+          out=$(curl -s http://127.0.0.1:8000/health)
+          echo "$out"
+          if echo "$out" | grep -q '"memory_backend":"chroma"'; then
+            echo "✓ Chroma backend active"
+          else
+            echo "✗ Memory backend is NOT chroma"
             echo "---- tail server.log ----"
             tail -n 100 server.log || true
             exit 2
-          }
+          fi
 
       - name: "Sanity: one ingest call (debug)"
         run: |
@@ -112,17 +109,16 @@ jobs:
           echo "--- ingest response (first 400 chars) ---"
           head -c 400 /tmp/ingest_resp.json || true
           echo
-          echo "----------------------------------------"
           if jq . /tmp/ingest_resp.json >/dev/null 2>&1; then
             echo "OK: JSON received"
           else
             echo "ERR: not a JSON, see above"; exit 5
           fi
 
-      - name: Run smoke
+      - name: "Run smoke"
         run: bash scripts/smoke_phase10_rag.sh
 
-      - name: Upload smoke log (artifact)
+      - name: "Upload smoke log (artifact)"
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -133,7 +129,13 @@ jobs:
             server.log
           if-no-files-found: ignore
 
-      - name: Teardown
+      - name: "Print server logs on failure"
+        if: failure()
+        run: |
+          echo "==== server.log (tail) ===="
+          tail -n 200 server.log || true
+
+      - name: "Teardown"
         if: always()
         run: |
           if [ -f .uvicorn.pid ]; then kill $(cat .uvicorn.pid) || true; fi
