@@ -46,7 +46,7 @@ jobs:
             --local-dir-use-symlinks False
           ls -lh models/bge-m3 | head -n 20
 
-      - name: Preflight: load BGE-M3 locally
+      - name: "Preflight: load BGE-M3 locally"
         run: |
           python - <<'PY'
           from pathlib import Path
