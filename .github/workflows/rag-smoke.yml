@@ -33,15 +33,12 @@ jobs:
           PIP_DEFAULT_TIMEOUT: "100"
         run: |
           python -m pip install -U pip wheel setuptools
-          # Torch (CPU) — быстрый и стабильный билд
-          pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch==2.3.1"
-          # Основные зависимости проекта
+          # Torch (CPU) — быстрые стабильные колёса
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch==2.8.0"
+          # Основные зависимости проекта + нужные для ingest/RAG
           pip install --prefer-binary -r requirements.txt
           pip install --prefer-binary -r requirements-memory.txt || true
-          # Для префлайта BGE-M3
-          pip install --prefer-binary "FlagEmbedding>=1.2.10"
-          # Опционально: ONNX runtime
-          # pip install --prefer-binary "onnxruntime>=1.18.0" || true
+          pip install --prefer-binary "FlagEmbedding>=1.2.10" "chromadb>=0.5.3" "python-multipart>=0.0.9" "huggingface_hub[cli]>=0.23"
 
       - name: "Download embeddings (bge-m3)"
         env:
@@ -61,7 +58,7 @@ jobs:
           from FlagEmbedding import BGEM3FlagModel
           p = Path("models/bge-m3")
           print("files:", len(list(p.rglob('*'))))
-          _ = BGEM3FlagModel(p.as_posix(), use_fp16=True)
+          _ = BGEM3FlagModel(p.as_posix(), use_fp16=False, device="cpu")
           print("✓ Model loaded OK")
           PY
 
@@ -71,6 +68,7 @@ jobs:
           AIR4_EMBED_MODEL_PATH=models/bge-m3
           AIR4_MEMORY_BACKEND=chroma
           AIR4_CHROMA_COLLECTION=air4_memory
+          CHROMA_DIR=storage/chroma
           AIR4_OFFLINE=0
           ENV
           cat .env
@@ -81,9 +79,11 @@ jobs:
           uvicorn backend.app.main:app \
             --host 127.0.0.1 --port 8000 --log-level debug >server.log 2>&1 &
           echo $! > .uvicorn.pid
-          for i in {1..30}; do
+          for i in {1..40}; do
             curl -fsS http://127.0.0.1:8000/health && break || sleep 1
           done
+          echo "---- /health ----"
+          curl -sS http://127.0.0.1:8000/health || true
 
       - name: "Health check"
         run: curl -fsS http://127.0.0.1:8000/health
@@ -98,7 +98,7 @@ jobs:
           else
             echo "Memory backend is NOT 'chroma' (embeddings init failed?)"
             echo "---- tail server.log ----"
-            tail -n 100 server.log || true
+            tail -n 150 server.log || true
             exit 2
           fi
 
