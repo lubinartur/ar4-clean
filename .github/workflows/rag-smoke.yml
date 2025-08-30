@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
 
 jobs:
@@ -26,29 +26,26 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install deps
+      - name: "Install deps"
         env:
-         PIP_DISABLE_PIP_VERSION_CHECK: "1"
-         PIP_NO_INPUT: "1"
-         PIP_DEFAULT_TIMEOUT: "100"
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+          PIP_NO_INPUT: "1"
+          PIP_DEFAULT_TIMEOUT: "100"
         run: |
-        python -m pip install -U pip wheel setuptools
-        # Torch CPU-колёса чтобы ставилось быстро и стабильно
-        pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch==2.3.1"
-        # Основные зависимости проекта
-        pip install --prefer-binary -r requirements.txt
-        pip install --prefer-binary -r requirements-memory.txt || true
-        # НУЖНО для BGE-M3 (префлайт)
-        pip install --prefer-binary "FlagEmbedding>=1.2.10"
-        # опционально (ускоряет ONNX-вариант, если понадобится)
-        # pip install --prefer-binary "onnxruntime>=1.18.0" || true
-
-      - name: "Install HF CLI"
-        run: pip install -U "huggingface_hub[cli]>=0.23"
+          python -m pip install -U pip wheel setuptools
+          # Torch (CPU) — быстрый и стабильный билд
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch==2.3.1"
+          # Основные зависимости проекта
+          pip install --prefer-binary -r requirements.txt
+          pip install --prefer-binary -r requirements-memory.txt || true
+          # Для префлайта BGE-M3
+          pip install --prefer-binary "FlagEmbedding>=1.2.10"
+          # Опционально: ONNX runtime
+          # pip install --prefer-binary "onnxruntime>=1.18.0" || true
 
       - name: "Download embeddings (bge-m3)"
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TOKEN: "${{ secrets.HF_TOKEN }}"
         run: |
           mkdir -p models/bge-m3 storage/chroma
           huggingface-cli download \
@@ -70,27 +67,23 @@ jobs:
 
       - name: "Write CI .env"
         run: |
-          cat > .env <<'EOF'
+          cat > .env <<'ENV'
           AIR4_EMBED_MODEL_PATH=models/bge-m3
-          CHROMA_DIR=storage/chroma
-          AIR4_CHROMA_COLLECTION=air4_memory
           AIR4_MEMORY_BACKEND=chroma
+          AIR4_CHROMA_COLLECTION=air4_memory
           AIR4_OFFLINE=1
-          EOF
+          ENV
           cat .env
 
       - name: "Start API (bg)"
         run: |
-          set -euxo pipefail
-          mkdir -p "$CHROMA_DIR"
+          mkdir -p storage/chroma
           uvicorn backend.app.main:app \
             --host 127.0.0.1 --port 8000 --log-level debug >server.log 2>&1 &
           echo $! > .uvicorn.pid
-          for i in {1..40}; do
-            curl -fsS http://127.0.0.1:8000/health && break || sleep 2
+          for i in {1..30}; do
+            curl -fsS http://127.0.0.1:8000/health && break || sleep 1
           done
-          echo "---- /health ----"
-          curl -sS http://127.0.0.1:8000/health || true
 
       - name: "Health check"
         run: curl -fsS http://127.0.0.1:8000/health
@@ -98,12 +91,12 @@ jobs:
       - name: "Guard: ensure Chroma + embeddings are active"
         run: |
           set -e
-          out=$(curl -s http://127.0.0.1:8000/health)
+          out=$(curl -fsS http://127.0.0.1:8000/health)
           echo "$out"
           if echo "$out" | grep -q '"memory_backend":"chroma"'; then
             echo "✓ Chroma backend active"
           else
-            echo "✗ Memory backend is NOT chroma"
+            echo "Memory backend is NOT 'chroma' (embeddings init failed?)"
             echo "---- tail server.log ----"
             tail -n 100 server.log || true
             exit 2
@@ -132,18 +125,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: smoke-log
+          name: "smoke-log"
           path: |
             .smoke.log
             .smoke_phase10_step2.log
             server.log
           if-no-files-found: ignore
-
-      - name: "Print server logs on failure"
-        if: failure()
-        run: |
-          echo "==== server.log (tail) ===="
-          tail -n 200 server.log || true
 
       - name: "Teardown"
         if: always()
