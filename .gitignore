@@ -26,3 +26,7 @@ nohup.out
 .DS_Store
 # Python cache
 __pycache__/
+
+# локальные бэкапы
+*.bak
+.backup_refs_before_filter.txt
