@@ -31,8 +31,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-memory.txt || true
-          pip install -U "huggingface_hub[cli]>=0.23"
-          pip install -U "sentence-transformers>=2.7" "transformers>=4.41" "safetensors>=0.4"
+          # Для bge-m3 часто требуются эти пакеты
+          pip install -U "huggingface_hub[cli]>=0.23" \
+                         "sentence-transformers>=2.7" \
+                         "transformers>=4.41" \
+                         "safetensors>=0.4"
+          # CPU-версия Torch
           pip install -U torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Prepare folders
@@ -42,7 +46,7 @@ jobs:
 
       - name: Download embeddings (bge-m3)
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }} # можно пустым
         run: |
           huggingface-cli download \
             --repo-type model BAAI/bge-m3 \
@@ -50,35 +54,50 @@ jobs:
             --local-dir-use-symlinks False
           ls -lh models/bge-m3 | head -n 20
 
-      - name: Write CI .env
-        run: |
-          cat > .env <<'ENV'
-          AIR4_OFFLINE=1
-          OLLAMA_BASE_URL=http://127.0.0.1:11434
-          AIR4_MEMORY_BACKEND=chroma
-          AIR4_CHROMA_COLLECTION=air4_memory
-          CHROMA_DIR=${{ github.workspace }}/storage/chroma
-          AIR4_EMBED_MODEL_PATH=${{ github.workspace }}/models/bge-m3
-          ENV
-          echo "---- .env ----"
-          cat .env
-
       - name: Start API (bg)
+        env:
+          # важные ENV — прокидываем напрямую в процесс
+          AIR4_OFFLINE: "1"
+          OLLAMA_BASE_URL: http://127.0.0.1:11434
+          AIR4_MEMORY_BACKEND: chroma
+          AIR4_CHROMA_COLLECTION: air4_memory
+          CHROMA_DIR: ${{ github.workspace }}/storage/chroma
+          AIR4_EMBED_MODEL_PATH: ${{ github.workspace }}/models/bge-m3
         run: |
-          mkdir -p "${{ github.workspace }}/storage/chroma"
+          set -e
+          echo "EMBED_MODEL_PATH=$AIR4_EMBED_MODEL_PATH"
+          ls -lah "$AIR4_EMBED_MODEL_PATH" | head -n 50 || true
+          mkdir -p "$CHROMA_DIR"
+
           uvicorn backend.app.main:app \
             --host 127.0.0.1 --port 8000 --log-level debug >server.log 2>&1 &
           echo $! > .uvicorn.pid
+
+          # ждём подъём
           for i in {1..30}; do
             curl -fsS http://127.0.0.1:8000/health && break || sleep 1
           done
+
           echo "---- /health ----"
           curl -sS http://127.0.0.1:8000/health || true
 
-      - name: Health check
-        run: curl -fsS http://127.0.0.1:8000/health
+      - name: Guard: ensure Chroma + embeddings are active
+        run: |
+          set -e
+          HEALTH=$(curl -fsS http://127.0.0.1:8000/health)
+          echo "$HEALTH"
+          # если бэкенд памяти — fallback, значит эмбеддер не поднялся
+          echo "$HEALTH" | jq -e '.memory_backend=="chroma"' >/dev/null || {
+            echo "Memory backend is not 'chroma' (likely embeddings init failed)."
+            echo "---- tail server.log ----"
+            tail -n 300 server.log || true
+            exit 2
+          }
 
-      - name: "Sanity: one ingest call (debug)"
+      - name: Health check
+        run: curl -fsS http://127.0.0.1:8000/health | jq .
+
+      - name: Sanity: one ingest call (debug)
         run: |
           set -e
           echo "Trying single ingest…"
@@ -113,7 +132,7 @@ jobs:
         if: failure()
         run: |
           echo "==== server.log (tail) ===="
-          tail -n 200 server.log || true
+          tail -n 300 server.log || true
 
       - name: Teardown
         if: always()
