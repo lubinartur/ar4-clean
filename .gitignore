@@ -21,3 +21,8 @@ nohup.out
 *.log
 *.sqlite3
 *.bin
+
+# macOS
+.DS_Store
+# Python cache
+__pycache__/
