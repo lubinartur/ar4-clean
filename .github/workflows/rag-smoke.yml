@@ -33,12 +33,19 @@ jobs:
           PIP_DEFAULT_TIMEOUT: "100"
         run: |
           python -m pip install -U pip wheel setuptools
-          # Torch (CPU) — быстрые стабильные колёса
+          # Torch (CPU) — стабильные колёса
           pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch==2.8.0"
-          # Основные зависимости проекта + нужные для ingest/RAG
+          # Совместимость numpy/chromadb/duckdb
+          pip install "numpy<2" "chromadb>=0.5.4,<0.6" "duckdb>=0.10,<1.0"
+          # Основные зависимости проекта
           pip install --prefer-binary -r requirements.txt
           pip install --prefer-binary -r requirements-memory.txt || true
-          pip install --prefer-binary "FlagEmbedding>=1.2.10" "chromadb>=0.5.3" "python-multipart>=0.0.9" "huggingface_hub[cli]>=0.23"
+          # Для префлайта BGE-M3
+          pip install --prefer-binary "FlagEmbedding>=1.2.10"
+          # Huggingface CLI для скачивания моделей
+          pip install --prefer-binary "huggingface_hub[cli]>=0.23"
+          # multipart для /ingest/file
+          pip install --prefer-binary "python-multipart>=0.0.9"
 
       - name: "Download embeddings (bge-m3)"
         env:
@@ -77,7 +84,7 @@ jobs:
         run: |
           set -e
           echo "---- .env used by API ----"
-          sed -n '1,120p' .env || true
+          cat .env || true
           mkdir -p storage/chroma
           uvicorn backend.app.main:app \
             --host 127.0.0.1 \
@@ -99,13 +106,25 @@ jobs:
         run: |
           set -e
           out=$(curl -fsS http://127.0.0.1:8000/health)
-          echo "$out"
+          echo "$out" | jq . || echo "$out"
+          echo "---- quick env check ----"
+          python -V
+          pip show chromadb duckdb FlagEmbedding || true
+          python - <<'PY'
+import sys
+try:
+    import chromadb, duckdb
+    print("chromadb", getattr(chromadb, "__version__", "?"),
+          "| duckdb", getattr(duckdb, "__version__", "?"))
+except Exception as e:
+    print("Import FAIL:", e)
+PY
           if echo "$out" | grep -q '"memory_backend":"chroma"'; then
             echo "✓ Chroma backend active"
           else
             echo "Memory backend is NOT 'chroma' (embeddings init failed?)"
             echo "---- tail server.log ----"
-            tail -n 150 server.log || true
+            tail -n 200 server.log || true
             exit 2
           fi
 
