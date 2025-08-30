@@ -58,7 +58,7 @@ jobs:
       - name: Health check
         run: curl -fsS http://127.0.0.1:8000/health
       
-            - name: Sanity: one ingest call (debug)
+      - name: Sanity: one ingest call (debug)
         run: |
           set -e
           echo "Trying single ingest…"
