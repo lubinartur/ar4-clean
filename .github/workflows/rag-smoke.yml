@@ -39,11 +39,13 @@ jobs:
           chmod +x scripts/*.sh || true
 
       - name: Download embeddings (bge-m3)
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          bash scripts/setup_embeddings.sh
-          ls -lh models/bge-m3 || true
+          mkdir -p models/bge-m3
+          wget -q https://huggingface.co/BAAI/bge-m3/resolve/main/pytorch_model.bin -O models/bge-m3/pytorch_model.bin
+          wget -q https://huggingface.co/BAAI/bge-m3/resolve/main/config.json -O models/bge-m3/config.json
+          wget -q https://huggingface.co/BAAI/bge-m3/resolve/main/tokenizer.json -O models/bge-m3/tokenizer.json
+          wget -q https://huggingface.co/BAAI/bge-m3/resolve/main/tokenizer_config.json -O models/bge-m3/tokenizer_config.json
+          ls -lh models/bge-m3
 
       - name: Start API (bg)
         run: |
