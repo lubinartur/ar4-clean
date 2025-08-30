@@ -68,23 +68,15 @@ jobs:
       - name: "Write CI .env"
         shell: bash
         run: |
-          cat > .env <<'ENV'
-          ENABLE_MEMORY=true
-          AIR4_ENABLE_MEMORY=true
-          AIR4_EMBED_MODEL_PATH=models/bge-m3
-          AIR4_MEMORY_BACKEND=chroma
-          AIR4_CHROMA_COLLECTION=air4_memory
-          CHROMA_DIR=storage/chroma
-          AIR4_OFFLINE=0
-          ENV
-          echo "---- .env ----"
-          cat .env
-
-          # в CI работаем оффлайн
-          AIR4_OFFLINE=1
-          ENV
-          echo "---- .env ----"
-          sed -n '1,200p' .env
+        {
+         echo 'ENABLE_MEMORY=true'
+         echo 'AIR4_ENABLE_MEMORY=true'
+         echo 'AIR4_EMBED_MODEL_PATH=models/bge-m3'
+         echo 'AIR4_MEMORY_BACKEND=chroma'
+         echo 'AIR4_CHROMA_COLLECTION=air4_memory'
+         echo 'CHROMA_DIR=storage/chroma'
+         echo 'AIR4_OFFLINE=1'
+        } > .env
 
       - name: "Start API (bg)"
         shell: bash
