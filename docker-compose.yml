@@ -1,0 +1,62 @@
+
+services:
+  api:
+    build: .
+    container_name: air4-api
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - MODEL_NAME=${MODEL_NAME:-llama3.1:8b}
+      - CHROMA_DIR=${CHROMA_DIR:-/app/storage/chroma}
+      - HF_TOKEN=${HF_TOKEN:-}
+      # опционально (резерв на будущее)
+      - AIR4_MEMORY_BACKEND=chroma
+      - AIR4_MEMORY_FORCE_FALLBACK=0
+      - AIR4_OFFLINE=${AIR4_OFFLINE:-0}
+      - AIR4_CHROMA_COLLECTION=${CHROMA_COLLECTION:-air4_memory}
+      - AIR4_EMBED_MODEL_PATH=/app/models/bge-m3
+      - AIR4_RAG_MIN_SCORE_CHROMA=${RAG_MIN_SCORE:-0.20}
+    volumes:
+      - ./storage:/app/storage
+      - ./models:/app/models
+    networks: [air4-net]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: air4-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    volumes:
+      - ollama-data:/root/.ollama
+    networks: [air4-net]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+networks:
+  air4-net:
+    driver: bridge
+    name: air4-net
+
+volumes:
+  ollama-data:
+    name: air4-ollama-data
