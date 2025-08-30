@@ -1,0 +1,46 @@
+name: CI Fast (uvicorn)
+
+on:
+  pull_request:
+    branches: [ main, master ]
+  push:
+    branches: [ main, master ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke-fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-memory.txt || true
+
+      - name: Start API (bg)
+        run: |
+          uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 &
+          echo $! > .uvicorn.pid
+          sleep 3
+
+      - name: Health
+        run: curl -fsS http://127.0.0.1:8000/health
+
+      - name: Smoke RAG
+        run: bash scripts/smoke_phase10_rag.sh
+
+      - name: Teardown
+        if: always()
+        run: |
+          if [ -f .uvicorn.pid ]; then kill $(cat .uvicorn.pid) || true; fi
