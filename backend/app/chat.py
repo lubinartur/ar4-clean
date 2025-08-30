@@ -1,6 +1,4 @@
-# backend/app/chat.py — RAG hook (v0.8.1)
-# Порог релевантности + анти-«привет» гейт + дедуп источников
-
+# backend/app/chat.py — AIr4 v0.11.1 (Phase 11 — Profile + RAG)
 from __future__ import annotations
 
 import os
@@ -10,26 +8,33 @@ from typing import List, Optional, Dict, Any
 
 from pydantic import BaseModel, Field
 
+from backend.app.routes_profile import load_profile as _load_user_profile
+
 # ==== ENV / defaults ====
 PORT = int(os.getenv("PORT", "8000"))
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL_DEFAULT = os.getenv("OLLAMA_MODEL_DEFAULT", "llama3.1:8b")
 
+
 def _memory_backend() -> str:
     return "fallback" if os.getenv("AIR4_MEMORY_FORCE_FALLBACK", "0") == "1" else "chroma"
 
-# Порог релевантности (тюним через ENV)
+
 RAG_MIN_SCORE_FALLBACK = float(os.getenv("AIR4_RAG_MIN_SCORE_FALLBACK", "0.60"))
-RAG_MIN_SCORE_CHROMA   = float(os.getenv("AIR4_RAG_MIN_SCORE_CHROMA",   "0.20"))
+RAG_MIN_SCORE_CHROMA = float(os.getenv("AIR4_RAG_MIN_SCORE_CHROMA", "0.20"))
+
 
 def _min_score() -> float:
     return RAG_MIN_SCORE_FALLBACK if _memory_backend() == "fallback" else RAG_MIN_SCORE_CHROMA
 
-GREETING_RE = re.compile(r'^(hi|hello|hey|привет|здрав|qq|ку|yo|sup)\b', re.I)
+
+GREETING_RE = re.compile(r"^(hi|hello|hey|привет|здрав|qq|ку|yo|sup)\b", re.I)
+
+
 def _is_greeting(q: str) -> bool:
     q = (q or "").strip()
-    # короткие/пустые сообщения или явные приветствия — не подмешиваем RAG
     return (len(q) < 5) or bool(GREETING_RE.search(q))
+
 
 # -----------------------------------------------------------------------------
 # Models
@@ -38,9 +43,10 @@ class ChatBody(BaseModel):
     message: str
     session_id: Optional[str] = None
     system: Optional[str] = None
-    stream: bool = False  # UI-прокси использует non-stream
+    stream: bool = False
     use_rag: bool = True
     k_memory: int = Field(4, ge=1, le=50)
+
 
 class ChatResult(BaseModel):
     ok: bool = True
@@ -48,12 +54,13 @@ class ChatResult(BaseModel):
     session_id: str
     memory_used: Optional[List[str]] = None
 
+
 # -----------------------------------------------------------------------------
-# Memory retrieval (via local HTTP API /memory/search)
+# Memory retrieval
 # -----------------------------------------------------------------------------
 async def _memory_search_http(query: str, k: int) -> List[Dict[str, Any]]:
-    """Запрос к локальному API памяти. Возвращает список dict с ключами id,text,score."""
     import httpx
+
     url = f"http://127.0.0.1:{PORT}/memory/search"
     params = {"q": query, "k": k}
     try:
@@ -63,7 +70,8 @@ async def _memory_search_http(query: str, k: int) -> List[Dict[str, Any]]:
         obj = r.json() or {}
     except Exception:
         return []
-    results = obj.get("results") or obj.get("data") or obj.get("items") or []
+
+    results = obj.get("results") or []
     out: List[Dict[str, Any]] = []
     for it in results:
         rid = it.get("id") or it.get("h") or it.get("hash") or ""
@@ -75,10 +83,43 @@ async def _memory_search_http(query: str, k: int) -> List[Dict[str, Any]]:
             out.append({"id": str(rid), "text": str(txt), "score": float(scr)})
     return out[:k]
 
+
 def _format_sources_for_system(blocks: List[str]) -> str:
     return "Relevant context (top-k):\n" + "\n\n---\n".join(blocks)
 
-def build_messages(system: Optional[str], memory_blocks: List[str], user_text: str) -> List[dict]:
+
+def _profile_block_from_request(headers: Dict[str, str]) -> str:
+    try:
+        user_id = headers.get("X-User", "dev")
+    except Exception:
+        user_id = "dev"
+    try:
+        prof = _load_user_profile(user_id)
+    except Exception:
+        return ""
+
+    prefs = getattr(prof, "preferences", {}) or {}
+    facts = getattr(prof, "facts", {}) or {}
+    goals = getattr(prof, "goals", []) or []
+
+    parts = []
+    if getattr(prof, "name", None):
+        parts.append(f"name={prof.name}")
+    if prefs:
+        parts.append("prefs=" + ",".join([f"{k}:{v}" for k, v in list(prefs.items())[:5]]))
+    if facts:
+        parts.append("facts=" + ",".join([f"{k}:{v}" for k, v in list(facts.items())[:6]]))
+    if goals:
+        parts.append("goals=" + "; ".join([getattr(g, 'title', getattr(g, 'id', '')) for g in goals][:3]))
+
+    return "USER_PROFILE: " + " | ".join(parts) if parts else ""
+
+
+def build_messages(system: Optional[str], memory_blocks: List[str], user_text: str, headers: Dict[str, str]) -> List[dict]:
+    profile_block = _profile_block_from_request(headers)
+    if profile_block:
+        system = (system + "\n" + profile_block) if system else profile_block
+
     messages: List[dict] = []
     if system:
         messages.append({"role": "system", "content": str(system)})
@@ -87,16 +128,18 @@ def build_messages(system: Optional[str], memory_blocks: List[str], user_text: s
     messages.append({"role": "user", "content": str(user_text)})
     return messages
 
+
 def _summarize_for_sources_display(text: str, limit: int = 220) -> str:
     text = " ".join(text.split())
     return text if len(text) <= limit else (text[:limit].rstrip() + "…")
 
+
 # -----------------------------------------------------------------------------
-# Ollama non-stream call (для UI JSON-ответа)
+# Ollama call
 # -----------------------------------------------------------------------------
 async def call_ollama(messages: List[dict], session_id: Optional[str]) -> str:
-    """Простой non-stream вызов Ollama /api/chat."""
     import httpx
+
     payload = {"model": OLLAMA_MODEL_DEFAULT, "messages": messages, "stream": False}
     timeout = httpx.Timeout(60.0, read=300.0, connect=10.0)
     try:
@@ -105,34 +148,28 @@ async def call_ollama(messages: List[dict], session_id: Optional[str]) -> str:
         r.raise_for_status()
         obj = r.json() or {}
         msg = (obj.get("message") or {}).get("content") or ""
-        return str(msg)
+        return str(msg).strip()
     except Exception as e:
-        # Не роняем чат — возвращаем echo
         last_user = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-        return f"echo: {last_user}  (ollama failed: {e})"
+        return f"echo: {last_user} (ollama failed: {e})"
+
 
 def generate_session_id() -> str:
     return str(uuid.uuid4())[:12]
 
+
 # -----------------------------------------------------------------------------
-# Public entry (used by /ui/chat/send)
+# Public entry
 # -----------------------------------------------------------------------------
-async def chat_endpoint_call(body: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    UI-прокси (main.py) вызывает эту функцию.
-    Возвращаем: { ok, reply, session_id, memory_used }
-    """
+async def chat_endpoint_call(body: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
     data = ChatBody(**body)
 
-    # 1) Подтянуть RAG-контекст: гейт по "привет" + порог по score + дедуп
     memory_blocks: List[str] = []
     if data.use_rag and not _is_greeting(data.message):
         try:
             rel = await _memory_search_http(data.message, data.k_memory)
-            # фильтр по порогу релевантности
             threshold = _min_score()
             rel = [r for r in rel if float(r.get("score", 0.0)) >= threshold]
-            # дедуп по нормализованному тексту
             seen = set()
             for r in rel:
                 t = r.get("text") or ""
@@ -144,13 +181,9 @@ async def chat_endpoint_call(body: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             memory_blocks = []
 
-    # 2) Собрать сообщения
-    messages = build_messages(data.system, memory_blocks, data.message)
-
-    # 3) Вызвать модель
+    messages = build_messages(data.system, memory_blocks, data.message, headers)
     reply_text = await call_ollama(messages, session_id=data.session_id)
 
-    # 4) Вернуть session_id и использованные источники (с обрезкой)
     session_id = data.session_id or generate_session_id()
     memory_used = [_summarize_for_sources_display(t) for t in memory_blocks] if memory_blocks else []
 
