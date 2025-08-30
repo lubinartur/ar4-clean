@@ -31,25 +31,20 @@ jobs:
           PIP_DISABLE_PIP_VERSION_CHECK: "1"
           PIP_NO_INPUT: "1"
           PIP_DEFAULT_TIMEOUT: "100"
+        shell: bash
         run: |
           python -m pip install -U pip wheel setuptools
           # Torch (CPU) — стабильные колёса
           pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch==2.8.0"
-          # Совместимость numpy/chromadb/duckdb
-          pip install "numpy<2" "chromadb>=0.5.4,<0.6" "duckdb>=0.10,<1.0"
-          # Основные зависимости проекта
+          # Основные зависимости проекта + для RAG/ingest
           pip install --prefer-binary -r requirements.txt
           pip install --prefer-binary -r requirements-memory.txt || true
-          # Для префлайта BGE-M3
-          pip install --prefer-binary "FlagEmbedding>=1.2.10"
-          # Huggingface CLI для скачивания моделей
-          pip install --prefer-binary "huggingface_hub[cli]>=0.23"
-          # multipart для /ingest/file
-          pip install --prefer-binary "python-multipart>=0.0.9"
+          pip install --prefer-binary "FlagEmbedding>=1.2.10" "chromadb>=0.5.3" "python-multipart>=0.0.9" "huggingface_hub[cli]>=0.23"
 
       - name: "Download embeddings (bge-m3)"
         env:
           HF_TOKEN: "${{ secrets.HF_TOKEN }}"
+        shell: bash
         run: |
           mkdir -p models/bge-m3 storage/chroma
           huggingface-cli download \
@@ -59,32 +54,35 @@ jobs:
           ls -lh models/bge-m3 | head -n 20
 
       - name: "Preflight: load BGE-M3 locally"
+        shell: bash
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          from FlagEmbedding import BGEM3FlagModel
-          p = Path("models/bge-m3")
-          print("files:", len(list(p.rglob('*'))))
-          _ = BGEM3FlagModel(p.as_posix(), use_fp16=False, device="cpu")
-          print("✓ Model loaded OK")
-          PY
+          cat > /tmp/_preflight.py <<'PY'
+from pathlib import Path
+from FlagEmbedding import BGEM3FlagModel
+p = Path("models/bge-m3")
+print("files:", len(list(p.rglob("*"))))
+_ = BGEM3FlagModel(p.as_posix(), use_fp16=False, device="cpu")
+print("OK: BGE-M3 loaded")
+PY
+          python /tmp/_preflight.py
 
       - name: "Write CI .env"
+        shell: bash
         run: |
           cat > .env <<'ENV'
-          AIR4_EMBED_MODEL_PATH=models/bge-m3
-          AIR4_MEMORY_BACKEND=chroma
-          AIR4_CHROMA_COLLECTION=air4_memory
-          CHROMA_DIR=storage/chroma
-          AIR4_OFFLINE=0
-          ENV
-          cat .env
+AIR4_EMBED_MODEL_PATH=models/bge-m3
+AIR4_MEMORY_BACKEND=chroma
+AIR4_CHROMA_COLLECTION=air4_memory
+CHROMA_DIR=storage/chroma
+AIR4_OFFLINE=0
+ENV
+          echo "---- .env ----"
+          sed -n '1,200p' .env
 
       - name: "Start API (bg)"
+        shell: bash
         run: |
           set -e
-          echo "---- .env used by API ----"
-          cat .env || true
           mkdir -p storage/chroma
           uvicorn backend.app.main:app \
             --host 127.0.0.1 \
@@ -93,8 +91,12 @@ jobs:
             --env-file .env \
             > server.log 2>&1 &
           echo $! > .uvicorn.pid
-          for i in {1..30}; do
-            curl -fsS http://127.0.0.1:8000/health && break || sleep 1
+          # Ждём ап
+          for i in {1..40}; do
+            if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
+              break
+            fi
+            sleep 1
           done
           echo "---- /health after boot ----"
           curl -sS http://127.0.0.1:8000/health || true
@@ -103,22 +105,27 @@ jobs:
         run: curl -fsS http://127.0.0.1:8000/health
 
       - name: "Guard: ensure Chroma + embeddings are active"
+        shell: bash
         run: |
           set -e
           out=$(curl -fsS http://127.0.0.1:8000/health)
           echo "$out" | jq . || echo "$out"
+
           echo "---- quick env check ----"
           python -V
           pip show chromadb duckdb FlagEmbedding || true
-          python - <<'PY'
+
+          # Безопасно пишем Python в файл (чтобы не ломать YAML)
+          cat > /tmp/_check.py <<'PY'
 import sys
 try:
-    import chromadb, duckdb
-    print("chromadb", getattr(chromadb, "__version__", "?"),
-          "| duckdb", getattr(duckdb, "__version__", "?"))
+    import chromadb, duckdb  # noqa
+    print("chromadb ok; duckdb ok")
 except Exception as e:
     print("Import FAIL:", e)
 PY
+          python /tmp/_check.py || true
+
           if echo "$out" | grep -q '"memory_backend":"chroma"'; then
             echo "✓ Chroma backend active"
           else
@@ -129,9 +136,10 @@ PY
           fi
 
       - name: "Sanity: one ingest call (debug)"
+        shell: bash
         run: |
           set -e
-          echo "Trying single ingest…"
+          echo "Trying single ingest..."
           curl -sS -o /tmp/ingest_resp.json -w "\nHTTP:%{http_code}\n" \
             -F "file=@tests/rag_corpus/docs/noise_finance.txt" \
             http://127.0.0.1:8000/ingest/file || true
@@ -145,6 +153,7 @@ PY
           fi
 
       - name: "Run smoke"
+        shell: bash
         run: bash scripts/smoke_phase10_rag.sh
 
       - name: "Upload smoke log (artifact)"
@@ -160,5 +169,6 @@ PY
 
       - name: "Teardown"
         if: always()
+        shell: bash
         run: |
-          if [ -f .uvicorn.pid ]; then kill $(cat .uvicorn.pid) || true; fi
+          if [ -f .uvicorn.pid ]; then kill "$(cat .uvicorn.pid)" || true; fi
