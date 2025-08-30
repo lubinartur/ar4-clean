@@ -27,21 +27,40 @@ jobs:
           cache: "pip"
 
       - name: "Install deps"
+        shell: bash
         env:
           PIP_DISABLE_PIP_VERSION_CHECK: "1"
           PIP_NO_INPUT: "1"
-          PIP_DEFAULT_TIMEOUT: "100"
+          PIP_DEFAULT_TIMEOUT: "120"
         run: |
           python -m pip install -U pip wheel setuptools
-          # Torch (CPU)
+          # CPU torch
           pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch==2.8.0"
-          # Основные зависимости
+          # Основные зависимости проекта
           pip install --prefer-binary -r requirements.txt
           pip install --prefer-binary -r requirements-memory.txt || true
-          # RAG и эмбеддинги
-          pip install --prefer-binary "FlagEmbedding>=1.2.10" "chromadb>=0.5.3" "python-multipart>=0.0.9" "huggingface_hub[cli]>=0.23"
+          # Для эмбеддингов/ингеста/вектора
+          pip install --prefer-binary \
+            "FlagEmbedding>=1.2.10" \
+            "python-multipart>=0.0.9" \
+            "chromadb==0.5.4" \
+            "duckdb==1.0.0" \
+            "uvicorn>=0.30" \
+            "huggingface_hub[cli]>=0.23"
+
+          python - <<'PY'
+          import sys
+          import importlib
+          for m in ("chromadb","duckdb","FlagEmbedding","multipart"):
+              try:
+                  mod = importlib.import_module(m)
+                  print(f"OK import {m}", getattr(mod, "__version__", ""))
+              except Exception as e:
+                  print("FAIL import", m, e); sys.exit(1)
+          PY
 
       - name: "Download embeddings (bge-m3)"
+        shell: bash
         env:
           HF_TOKEN: "${{ secrets.HF_TOKEN }}"
         run: |
@@ -50,7 +69,7 @@ jobs:
             --repo-type model BAAI/bge-m3 \
             --local-dir models/bge-m3 \
             --local-dir-use-symlinks False
-          ls -lh models/bge-m3 | head -n 20
+          ls -lh models/bge-m3 | head -n 30
 
       - name: "Preflight: load BGE-M3 locally"
         shell: bash
@@ -68,51 +87,73 @@ jobs:
       - name: "Write CI .env"
         shell: bash
         run: |
-        {
-         echo 'ENABLE_MEMORY=true'
-         echo 'AIR4_ENABLE_MEMORY=true'
-         echo 'AIR4_EMBED_MODEL_PATH=models/bge-m3'
-         echo 'AIR4_MEMORY_BACKEND=chroma'
-         echo 'AIR4_CHROMA_COLLECTION=air4_memory'
-         echo 'CHROMA_DIR=storage/chroma'
-         echo 'AIR4_OFFLINE=1'
-        } > .env
+          # Абсолютные пути — чтобы uvicorn/рабочая папка не мешали
+          ROOT="${GITHUB_WORKSPACE}"
+          EMB="${ROOT}/models/bge-m3"
+          CHR="${ROOT}/storage/chroma"
+
+          {
+            echo 'ENABLE_MEMORY=true'
+            echo 'AIR4_ENABLE_MEMORY=true'
+            echo "AIR4_EMBED_MODEL_PATH=${EMB}"
+            echo 'AIR4_MEMORY_BACKEND=chroma'
+            echo 'AIR4_MEMORY_FORCE_FALLBACK=0'
+            echo "AIR4_CHROMA_COLLECTION=air4_memory"
+            echo "CHROMA_DIR=${CHR}"
+            echo 'AIR4_OFFLINE=0'
+            echo 'MODEL_NAME=llama3.1:8b'
+            echo 'OLLAMA_BASE_URL=http://127.0.0.1:11434'
+          } > .env
+
+          echo "---- .env ----"
+          sed -n '1,200p' .env
 
       - name: "Start API (bg)"
         shell: bash
         run: |
           set -e
-          echo "---- .env used by API ----"
-          sed -n '1,120p' .env || true
           mkdir -p storage/chroma
+          # Экспортируем .env в окружение и дополнительно передаём как --env-file
+          set -a; source .env; set +a
           uvicorn backend.app.main:app \
             --host 127.0.0.1 \
             --port 8000 \
             --log-level debug \
             --env-file .env \
             > server.log 2>&1 &
+
           echo $! > .uvicorn.pid
-          for i in {1..30}; do
-            curl -fsS http://127.0.0.1:8000/health && break || sleep 1
+
+          # Ждём ответа /health
+          for i in {1..40}; do
+            curl -fsS http://127.0.0.1:8000/health >/dev/null && break || sleep 1
           done
           echo "---- /health after boot ----"
           curl -sS http://127.0.0.1:8000/health || true
 
       - name: "Health check"
+        shell: bash
         run: curl -fsS http://127.0.0.1:8000/health
 
       - name: "Guard: ensure Chroma + embeddings are active"
         shell: bash
         run: |
           set -e
-          out=$(curl -fsS http://127.0.0.1:8000/health)
+          out="$(curl -fsS http://127.0.0.1:8000/health)"
           echo "$out"
+
+          # допускаем 2 формата поля: top-level "memory_backend" и nested
           if echo "$out" | grep -q '"memory_backend":"chroma"'; then
             echo "✓ Chroma backend active"
+          elif echo "$out" | grep -q '"backend":"chroma"'; then
+            echo "✓ Chroma backend active (nested)"
           else
             echo "Memory backend is NOT 'chroma' (embeddings init failed?)"
+            echo "---- quick env check ----"
+            python -V
+            pip show chromadb duckdb FlagEmbedding || true
             echo "---- tail server.log ----"
-            tail -n 150 server.log || true
+            tail -n 200 server.log || true
             exit 2
           fi
 
@@ -134,7 +175,11 @@ jobs:
           fi
 
       - name: "Run smoke"
-        run: bash scripts/smoke_phase10_rag.sh
+        shell: bash
+        run: |
+          # Можно переопределить здесь дефолты, если хочешь
+          export K="${K:-6}" MMR="${MMR:-0.4}" HYDE="${HYDE:-2}" THRESHOLD="${THRESHOLD:-0.60}"
+          bash scripts/smoke_phase10_rag.sh
 
       - name: "Upload smoke log (artifact)"
         if: always()
@@ -149,5 +194,6 @@ jobs:
 
       - name: "Teardown"
         if: always()
+        shell: bash
         run: |
-          if [ -f .uvicorn.pid ]; then kill $(cat .uvicorn.pid) || true; fi
+          if [ -f .uvicorn.pid ]; then kill "$(cat .uvicorn.pid)" || true; fi
