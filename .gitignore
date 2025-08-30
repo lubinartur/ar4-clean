@@ -1,23 +1,11 @@
-storage/web_cache/
-.env
-# Python
 __pycache__/
-*.py[cod]
-
-# Env
-.env
-.env.bak*
-.env.*
-
-# Data / local artifacts
-memory/
+*.pyc
+.uvicorn.out
+.uvicorn.pid
+nohup.out
+.smoke.log
+.smoke_phase10_step2.log
 storage/
-.chroma/
-exports/
-backups/
-reports/
-logs/
-
-# macOS
-.DS_Store
-!.env.example
+storage/**
+*.bin
+*.sqlite3

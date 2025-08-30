@@ -113,3 +113,109 @@ html.light .topbar{background:linear-gradient(to bottom, rgba(255,255,255,.85), 
 /* Toasts (placeholder) */
 .toasts{position:fixed; inset:auto 20px 20px auto; display:flex; flex-direction:column; gap:8px; z-index:50}
 
+/* ====== AIr4 Hotfix for Home + Unified Blocks ====== */
+
+/* 0) Убить «скобки» от старых псевдоэлементов на главной */
+main.container h1::before, main.container h1::after,
+main.container h2::before, main.container h2::after,
+main.container a::before,  main.container a::after,
+main.container p::before,  main.container p::after {
+  content: none !important;
+  display: none !important;
+}
+
+/* 1) Базовые токены (без color-mix — совместимо везде) */
+html[data-theme="dark"]{
+  --bg:#0b0e14; --bg2:#0f1420; --panel:#111827; --elev:#0f1723;
+  --line:#1e2633; --text:#e7ebf3; --muted:#a9b1c3;
+  --accent:#5aa2ff; --accent2:#7cf9a6; --danger:#ff6b6b;
+  --ring: rgba(82,140,255,.35);
+}
+html[data-theme="light"]{
+  --bg:#f7f8fb; --bg2:#ffffff; --panel:#ffffff; --elev:#fbfcff;
+  --line:#e8ecf3; --text:#131722; --muted:#5b6272;
+  --accent:#2b6bff; --accent2:#1fd893; --danger:#e24a4a;
+  --ring: rgba(43,107,255,.22);
+}
+
+/* 2) Фон и типографика */
+body{ background:linear-gradient(180deg,var(--bg) 0%, var(--bg2) 100%); color:var(--text); }
+
+/* 3) Универсальные блоки — применится к тому, что уже имеет .card */
+.card{
+  background: linear-gradient(180deg, var(--panel), var(--elev));
+  border:1px solid var(--line);
+  border-radius:14px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.28);
+  padding:14px;
+}
+.panel{ /* алиас, если встретится */
+  background: linear-gradient(180deg, var(--panel), var(--elev));
+  border:1px solid var(--line);
+  border-radius:14px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.28);
+  padding:14px;
+}
+
+/* 4) Сетки и ряды, если их нет */
+.row{ display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+.spacer{ flex:1 1 auto; }
+
+/* 5) Заголовки и ссылки на главной */
+main.container h1{ font-weight:800; letter-spacing:.3px; margin:18px 0 12px; }
+main.container h2, main.container h3{ margin:18px 0 6px; }
+main.container a{ color: var(--accent); text-decoration: none; }
+main.container a:hover{ text-decoration: underline; }
+
+/* 6) Кнопки и поля (подтянуть стиль, не ломая старые) */
+.btn{
+  display:inline-flex; align-items:center; gap:8px; height:36px; padding:0 12px;
+  border-radius:10px; border:1px solid var(--line);
+  background: rgba(255,255,255,.02);
+  color:var(--text); cursor:pointer; transition:.15s;
+}
+.btn:hover{ border-color: rgba(90,162,255,.5); }
+.btn.primary{ border:none; background:linear-gradient(135deg,#1e63ff,#21b1ff); color:#fff;
+              box-shadow:0 8px 20px rgba(46,119,255,.25); }
+.btn.danger{ border-color: rgba(255,107,107,.5); color:#ff8a8a; background: rgba(255,80,80,.06); }
+
+/* 7) Инпуты и textarea */
+input[type="text"], input[type="number"], input[type="url"],
+input[type="search"], select, textarea{
+  border:1px solid var(--line);
+  background: rgba(255,255,255,.03);
+  color: var(--text);
+  border-radius:10px; padding:8px 10px; outline:none; transition:.15s;
+}
+input:focus, select:focus, textarea:focus{
+  border-color: rgba(90,162,255,.55);
+  box-shadow: 0 0 0 4px var(--ring);
+}
+
+/* 8) Сообщения (если используешь .messages/.msg/.bubble уже есть в chat) */
+.messages{ background: rgba(0,0,0,.12); }
+
+/* на крайний случай — вырубить ВСЕ псевдоэлементы внутри main */
+main.container *::before, main.container *::after { content:none !important; }
+
+/* Home page grid */
+.home-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 18px;
+  margin-top: 18px;
+}
+.home-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.home-sec:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 28px rgba(0,0,0,.35);
+}
+.home-sec h2 { margin: 0; font-size: 20px; font-weight: 700; }
+.home-sec p  { margin: 0; opacity: .85; flex: 1; }
+.home-sec .btn { align-self: flex-start; }
+.home-foot { text-align: center; opacity: .6; margin-top: 20px; }
