@@ -81,7 +81,7 @@ jobs:
           echo "---- /health ----"
           curl -sS http://127.0.0.1:8000/health || true
 
-      - name: Guard: ensure Chroma + embeddings are active
+      - name: "Guard: ensure Chroma + embeddings are active"
         run: |
           set -e
           HEALTH=$(curl -fsS http://127.0.0.1:8000/health)
@@ -97,7 +97,7 @@ jobs:
       - name: Health check
         run: curl -fsS http://127.0.0.1:8000/health | jq .
 
-      - name: Sanity: one ingest call (debug)
+      - name: "Sanity: one ingest call (debug)"
         run: |
           set -e
           echo "Trying single ingest…"
