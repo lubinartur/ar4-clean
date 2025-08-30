@@ -57,6 +57,24 @@ jobs:
 
       - name: Health check
         run: curl -fsS http://127.0.0.1:8000/health
+      
+            - name: Sanity: one ingest call (debug)
+        run: |
+          set -e
+          echo "Trying single ingest…"
+          curl -sS -o /tmp/ingest_resp.json -w "\nHTTP:%{http_code}\n" \
+            -F "file=@tests/rag_corpus/docs/noise_finance.txt" \
+            http://127.0.0.1:8000/ingest/file || true
+          echo "--- ingest response (first 400 chars) ---"
+          head -c 400 /tmp/ingest_resp.json || true
+          echo
+          echo "----------------------------------------"
+          # Проверим, JSON ли это
+          if jq . /tmp/ingest_resp.json >/dev/null 2>&1; then
+            echo "OK: JSON received"
+          else
+            echo "ERR: not a JSON, see above"; exit 5
+          fi
 
       - name: Run smoke
         run: bash scripts/smoke_phase10_rag.sh
