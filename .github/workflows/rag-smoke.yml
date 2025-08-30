@@ -137,13 +137,25 @@ jobs:
           ls -lh models/bge-m3 || true
 
       - name: Start API (bg)
+        env:
+          AIR4_EMBED_MODEL_PATH: "${{ github.workspace }}/models/bge-m3"
+          CHROMA_DIR: "${{ github.workspace }}/storage/chroma"
+          AIR4_CHROMA_COLLECTION: air4_memory
+          AIR4_MEMORY_BACKEND: chroma
+          AIR4_OFFLINE: "1"
         run: |
-          uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 &
+          set -e
+          echo "EMBED_DIR=$AIR4_EMBED_MODEL_PATH"
+          ls -lah "$AIR4_EMBED_MODEL_PATH" | head -n 20 || true
+          mkdir -p "$CHROMA_DIR"
+          uvicorn backend.app.main:app \
+            --host 127.0.0.1 --port 8000 --log-level debug >server.log 2>&1 &
           echo $! > .uvicorn.pid
-          # небольшой запас времени на старт
-          for i in {1..10}; do
+          for i in {1..30}; do
             curl -fsS http://127.0.0.1:8000/health && break || sleep 1
           done
+          echo "---- /health ----"
+          curl -sS http://127.0.0.1:8000/health || true
 
       - name: Health check
         run: curl -fsS http://127.0.0.1:8000/health
