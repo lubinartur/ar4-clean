@@ -33,8 +33,18 @@ jobs:
           pip install -r requirements-memory.txt || true
 
       - name: Install HF CLI
+        run: pip install -U "huggingface_hub[cli]>=0.23"
+
+      - name: Download embeddings (bge-m3)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}   # можно пусто
         run: |
-          pip install -U "huggingface_hub[cli]>=0.23"
+          mkdir -p models/bge-m3 storage/chroma
+          huggingface-cli download \
+            --repo-type model BAAI/bge-m3 \
+            --local-dir models/bge-m3 \
+            --local-dir-use-symlinks False
+          ls -lh models/bge-m3 | head -n 20
 
       - name: Download embeddings (bge-m3)
         env:
@@ -49,12 +59,22 @@ jobs:
           ls -lh models/bge-m3 | head -n 20
 
       - name: Start API (bg)
+        env:
+          AIR4_EMBED_MODEL_PATH: models/bge-m3
+          CHROMA_DIR: storage/chroma
+          AIR4_CHROMA_COLLECTION: air4_memory
+          AIR4_MEMORY_BACKEND: chroma
+          AIR4_OFFLINE: "1"
         run: |
-          uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --log-level info >server.log 2>&1 &
+          mkdir -p "$CHROMA_DIR"
+          uvicorn backend.app.main:app \
+            --host 127.0.0.1 --port 8000 --log-level debug >server.log 2>&1 &
           echo $! > .uvicorn.pid
           for i in {1..30}; do
             curl -fsS http://127.0.0.1:8000/health && break || sleep 1
           done
+          echo "---- /health ----"
+          curl -sS http://127.0.0.1:8000/health || true
 
       - name: Health check
         run: curl -fsS http://127.0.0.1:8000/health
