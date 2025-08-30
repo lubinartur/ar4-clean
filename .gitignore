@@ -9,3 +9,15 @@ storage/
 storage/**
 *.bin
 *.sqlite3
+models/
+models/
+models/
+storage/
+__pycache__/
+*.pyc
+.uvicorn.out
+.uvicorn.pid
+nohup.out
+*.log
+*.sqlite3
+*.bin
