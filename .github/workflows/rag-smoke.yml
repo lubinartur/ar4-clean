@@ -70,6 +70,12 @@ jobs:
           cat .env
 
       - name: Start API (bg)
+        env:
+          AIR4_EMBED_MODEL_PATH: "${{ github.workspace }}/models/bge-m3"
+          CHROMA_DIR: "${{ github.workspace }}/storage/chroma"
+          AIR4_CHROMA_COLLECTION: air4_memory
+          AIR4_MEMORY_BACKEND: chroma
+          AIR4_OFFLINE: "1"
         run: |
           mkdir -p "$CHROMA_DIR"
           uvicorn backend.app.main:app \
@@ -80,7 +86,7 @@ jobs:
           done
           echo "---- /health ----"
           curl -sS http://127.0.0.1:8000/health || true
-
+          
       - name: Health check
         run: curl -fsS http://127.0.0.1:8000/health
 
