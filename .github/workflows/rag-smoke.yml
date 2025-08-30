@@ -48,20 +48,27 @@ jobs:
             --local-dir-use-symlinks False
           ls -lh models/bge-m3 | head -n 20
 
+      - name: Write CI .env
+        run: |
+          {
+            echo "AIR4_MEMORY_BACKEND=chroma"
+            echo "AIR4_EMBED_MODEL_PATH=models/bge-m3"
+            echo "CHROMA_DIR=storage/chroma"
+            echo "AIR4_CHROMA_COLLECTION=air4_memory"
+            echo "AIR4_OFFLINE=1"
+          } > .env
+          echo "---- .env ----"
+          cat .env
+
       - name: Start API (bg)
-        env:
-          AIR4_EMBED_MODEL_PATH: "${{ github.workspace }}/models/bge-m3"
-          CHROMA_DIR: "${{ github.workspace }}/storage/chroma"
-          AIR4_CHROMA_COLLECTION: air4_memory
-          AIR4_MEMORY_BACKEND: chroma
-          AIR4_OFFLINE: "1"
         run: |
           set -e
-          echo "EMBED_DIR=$AIR4_EMBED_MODEL_PATH"
-          ls -lah "$AIR4_EMBED_MODEL_PATH" || true
-          mkdir -p "$CHROMA_DIR"
+          mkdir -p storage/chroma
+          echo "Starting API..."
           uvicorn backend.app.main:app \
-            --host 127.0.0.1 --port 8000 --log-level debug >server.log 2>&1 &
+            --host 127.0.0.1 --port 8000 \
+            --env-file .env \
+            --log-level debug >server.log 2>&1 &
           echo $! > .uvicorn.pid
           for i in {1..30}; do
             curl -fsS http://127.0.0.1:8000/health && break || sleep 1
@@ -72,7 +79,7 @@ jobs:
       - name: Health check
         run: curl -fsS http://127.0.0.1:8000/health
 
-      - name: "Guard: ensure Chroma + embeddings are active"
+      - name: Guard: ensure Chroma + embeddings are active
         run: |
           set -e
           HEALTH="$(curl -fsS http://127.0.0.1:8000/health || true)"
@@ -84,7 +91,7 @@ jobs:
             exit 2
           }
 
-      - name: "Sanity: one ingest call (debug)"
+      - name: Sanity: one ingest call (debug)
         run: |
           set -e
           echo "Trying single ingest…"
@@ -119,4 +126,4 @@ jobs:
       - name: Teardown
         if: always()
         run: |
-          if [ -f .uvicorn.pid ]; then kill $(cat .uvicorn.pid) || true; fi
+          if [ -f .uvicorn.pid ]; then kill "$(cat .uvicorn.pid)" || true; fi
