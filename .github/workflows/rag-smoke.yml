@@ -1,4 +1,3 @@
-cat > .github/workflows/rag-smoke.yml <<'YAML'
 name: RAG Smoke (Phase-10)
 
 on:
@@ -40,7 +39,7 @@ jobs:
 
       - name: Download embeddings (bge-m3)
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}   # опционально; можно не задавать
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           bash scripts/setup_embeddings.sh
           ls -lh models/bge-m3 || true
@@ -49,7 +48,6 @@ jobs:
         run: |
           uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 &
           echo $! > .uvicorn.pid
-          # небольшой запас времени на старт
           for i in {1..10}; do
             curl -fsS http://127.0.0.1:8000/health && break || sleep 1
           done
@@ -74,4 +72,3 @@ jobs:
         if: always()
         run: |
           if [ -f .uvicorn.pid ]; then kill $(cat .uvicorn.pid) || true; fi
-YAML
