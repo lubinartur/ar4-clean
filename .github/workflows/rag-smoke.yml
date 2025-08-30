@@ -177,9 +177,11 @@ jobs:
       - name: "Run smoke"
         shell: bash
         run: |
-          # Можно переопределить здесь дефолты, если хочешь
-          export K="${K:-6}" MMR="${MMR:-0.4}" HYDE="${HYDE:-2}" THRESHOLD="${THRESHOLD:-0.60}"
-          bash scripts/smoke_phase10_rag.sh
+        export K=6
+        export MMR=0.4
+        export HYDE=2
+        export THRESHOLD=0.30
+        bash scripts/smoke_phase10_rag.sh
 
       - name: "Upload smoke log (artifact)"
         if: always()
