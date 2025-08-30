@@ -31,7 +31,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-memory.txt || true
-          pip install uvicorn || true
 
       - name: Prepare folders
         run: |
@@ -40,24 +39,21 @@ jobs:
 
       - name: Download embeddings (bge-m3)
         run: |
-          mkdir -p models/bge-m3
-          wget -q https://huggingface.co/BAAI/bge-m3/resolve/main/pytorch_model.bin -O models/bge-m3/pytorch_model.bin
-          wget -q https://huggingface.co/BAAI/bge-m3/resolve/main/config.json -O models/bge-m3/config.json
-          wget -q https://huggingface.co/BAAI/bge-m3/resolve/main/tokenizer.json -O models/bge-m3/tokenizer.json
-          wget -q https://huggingface.co/BAAI/bge-m3/resolve/main/tokenizer_config.json -O models/bge-m3/tokenizer_config.json
-          ls -lh models/bge-m3
+          bash scripts/setup_embeddings.sh || true
+          ls -lh models/bge-m3 || true
 
       - name: Start API (bg)
         run: |
           uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 &
           echo $! > .uvicorn.pid
+          # небольшой запас времени на старт
           for i in {1..10}; do
             curl -fsS http://127.0.0.1:8000/health && break || sleep 1
           done
 
       - name: Health check
         run: curl -fsS http://127.0.0.1:8000/health
-      
+
       - name: Sanity: one ingest call (debug)
         run: |
           set -e
