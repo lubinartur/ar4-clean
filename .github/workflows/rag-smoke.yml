@@ -31,6 +31,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-memory.txt || true
+          # гарантируем наличие uvicorn (если вдруг не в requirements.txt)
+          python - <<'PY'
+import importlib, sys, subprocess
+try:
+    importlib.import_module("uvicorn")
+    print("uvicorn already installed")
+except ImportError:
+    print("installing uvicorn…")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "uvicorn>=0.30"])
+PY
 
       - name: Prepare folders
         run: |
@@ -39,16 +49,28 @@ jobs:
 
       - name: Download embeddings (bge-m3)
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}   # не обязателен; ускоряет, если задан
         run: |
           bash scripts/setup_embeddings.sh
           ls -lh models/bge-m3 || true
 
+      - name: Debug env
+        run: |
+          which python || true
+          python -V
+          which pip || true
+          pip --version
+          python -c "import importlib; import sys; \
+print('uvicorn import:', 'OK' if not __import__('importlib').util.find_spec('uvicorn') is None else 'NO'); \
+print('site-packages:', [p for p in sys.path if 'site-packages' in p])"
+
       - name: Start API (bg)
         run: |
-          uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 &
+          set -e
+          python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 &
           echo $! > .uvicorn.pid
-          for i in {1..10}; do
+          # ждём поднятия /health до 20 секунд
+          for i in {1..20}; do
             curl -fsS http://127.0.0.1:8000/health && break || sleep 1
           done
 
@@ -58,11 +80,11 @@ jobs:
       - name: Run smoke
         run: bash scripts/smoke_phase10_rag.sh
 
-      - name: Upload smoke log (artifact)
+      - name: Upload smoke logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: smoke-log
+          name: smoke-logs
           path: |
             .smoke.log
             .smoke_phase10_step2.log
