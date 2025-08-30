@@ -60,3 +60,16 @@ networks:
 volumes:
   ollama-data:
     name: air4-ollama-data
+
+  setup:
+    build: .
+    container_name: air4-setup
+    profiles: ["setup"]
+    entrypoint: ["/bin/bash","-lc"]
+    command: "/app/scripts/setup_embeddings.sh"
+    env_file: [.env]
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - ./models:/app/models
+    networks: [air4-net]
