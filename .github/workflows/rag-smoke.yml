@@ -31,42 +31,41 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-memory.txt || true
+          pip install -U "huggingface_hub[cli]>=0.23"
+          pip install -U "sentence-transformers>=2.7" "transformers>=4.41" "safetensors>=0.4"
+          pip install -U torch --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Install HF CLI
-        run: pip install -U "huggingface_hub[cli]>=0.23"
+      - name: Prepare folders
+        run: |
+          mkdir -p models/bge-m3 storage/chroma
+          chmod +x scripts/*.sh || true
 
       - name: Download embeddings (bge-m3)
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}   # можно пусто
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          mkdir -p models/bge-m3 storage/chroma
           huggingface-cli download \
             --repo-type model BAAI/bge-m3 \
             --local-dir models/bge-m3 \
             --local-dir-use-symlinks False
           ls -lh models/bge-m3 | head -n 20
 
-      - name: Download embeddings (bge-m3)
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}  # можно не задавать, но с токеном быстрее и стабильнее
+      - name: Write CI .env
         run: |
-          mkdir -p models/bge-m3
-          huggingface-cli download \
-            --repo-type model \
-            BAAI/bge-m3 \
-            --local-dir models/bge-m3 \
-            --local-dir-use-symlinks False
-          ls -lh models/bge-m3 | head -n 20
+          cat > .env <<'ENV'
+          AIR4_OFFLINE=1
+          OLLAMA_BASE_URL=http://127.0.0.1:11434
+          AIR4_MEMORY_BACKEND=chroma
+          AIR4_CHROMA_COLLECTION=air4_memory
+          CHROMA_DIR=${{ github.workspace }}/storage/chroma
+          AIR4_EMBED_MODEL_PATH=${{ github.workspace }}/models/bge-m3
+          ENV
+          echo "---- .env ----"
+          cat .env
 
       - name: Start API (bg)
-        env:
-          AIR4_EMBED_MODEL_PATH: models/bge-m3
-          CHROMA_DIR: storage/chroma
-          AIR4_CHROMA_COLLECTION: air4_memory
-          AIR4_MEMORY_BACKEND: chroma
-          AIR4_OFFLINE: "1"
         run: |
-          mkdir -p "$CHROMA_DIR"
+          mkdir -p "${{ github.workspace }}/storage/chroma"
           uvicorn backend.app.main:app \
             --host 127.0.0.1 --port 8000 --log-level debug >server.log 2>&1 &
           echo $! > .uvicorn.pid
@@ -95,16 +94,6 @@ jobs:
           else
             echo "ERR: not a JSON, see above"; exit 5
           fi
-      - name: Dump health (debug)
-        run: |
-          echo "---- /health ----"
-          curl -sS http://127.0.0.1:8000/health | jq . || curl -sS http://127.0.0.1:8000/health
-
-      - name: Tail server log after sanity (debug)
-        if: always()
-        run: |
-          echo "---- server.log (tail) ----"
-          tail -n 200 server.log || true
 
       - name: Run smoke
         run: bash scripts/smoke_phase10_rag.sh
@@ -125,71 +114,6 @@ jobs:
         run: |
           echo "==== server.log (tail) ===="
           tail -n 200 server.log || true
-
-      - name: Prepare folders
-        run: |
-          mkdir -p models/bge-m3 storage/chroma
-          chmod +x scripts/*.sh || true
-
-      - name: Download embeddings (bge-m3)
-        run: |
-          bash scripts/setup_embeddings.sh || true
-          ls -lh models/bge-m3 || true
-
-      - name: Start API (bg)
-        env:
-          AIR4_EMBED_MODEL_PATH: "${{ github.workspace }}/models/bge-m3"
-          CHROMA_DIR: "${{ github.workspace }}/storage/chroma"
-          AIR4_CHROMA_COLLECTION: air4_memory
-          AIR4_MEMORY_BACKEND: chroma
-          AIR4_OFFLINE: "1"
-        run: |
-          set -e
-          echo "EMBED_DIR=$AIR4_EMBED_MODEL_PATH"
-          ls -lah "$AIR4_EMBED_MODEL_PATH" | head -n 20 || true
-          mkdir -p "$CHROMA_DIR"
-          uvicorn backend.app.main:app \
-            --host 127.0.0.1 --port 8000 --log-level debug >server.log 2>&1 &
-          echo $! > .uvicorn.pid
-          for i in {1..30}; do
-            curl -fsS http://127.0.0.1:8000/health && break || sleep 1
-          done
-          echo "---- /health ----"
-          curl -sS http://127.0.0.1:8000/health || true
-
-      - name: Health check
-        run: curl -fsS http://127.0.0.1:8000/health
-
-      - name: "Sanity: one ingest call (debug)"
-        run: |
-          set -e
-          echo "Trying single ingest…"
-          curl -sS -o /tmp/ingest_resp.json -w "\nHTTP:%{http_code}\n" \
-            -F "file=@tests/rag_corpus/docs/noise_finance.txt" \
-            http://127.0.0.1:8000/ingest/file || true
-          echo "--- ingest response (first 400 chars) ---"
-          head -c 400 /tmp/ingest_resp.json || true
-          echo
-          echo "----------------------------------------"
-          # Проверим, JSON ли это
-          if jq . /tmp/ingest_resp.json >/dev/null 2>&1; then
-            echo "OK: JSON received"
-          else
-            echo "ERR: not a JSON, see above"; exit 5
-          fi
-
-      - name: Run smoke
-        run: bash scripts/smoke_phase10_rag.sh
-
-      - name: Upload smoke log (artifact)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: smoke-log
-          path: |
-            .smoke.log
-            .smoke_phase10_step2.log
-          if-no-files-found: ignore
 
       - name: Teardown
         if: always()
