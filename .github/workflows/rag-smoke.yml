@@ -26,12 +26,16 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: "Install deps"
+      - name: Install deps
+        env:
+         PIP_DISABLE_PIP_VERSION_CHECK: "1"
+         PIP_NO_INPUT: "1"
+         PIP_DEFAULT_TIMEOUT: "100"
         run: |
-          set -euxo pipefail
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt --progress-bar=on
-          pip install -r requirements-memory.txt --progress-bar=on || true
+        python -m pip install -U pip wheel setuptools
+        pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch==2.3.1"
+        pip install --prefer-binary -r requirements.txt
+        pip install --prefer-binary -r requirements-memory.txt || true
 
       - name: "Install HF CLI"
         run: pip install -U "huggingface_hub[cli]>=0.23"
