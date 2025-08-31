@@ -182,8 +182,8 @@ jobs:
            HYDE="2"
            THRESHOLD="0.30"
         run: |
-        echo "CI params: K=$K MMR=$MMR HYDE=$HYDE THRESHOLD=$THRESHOLD"
-        bash scripts/smoke_phase10_rag.sh
+           echo "CI params: K=$K MMR=$MMR HYDE=$HYDE THRESHOLD=$THRESHOLD"
+           bash scripts/smoke_phase10_rag.sh
         
       - name: "Upload smoke log (artifact)"
         if: always()
