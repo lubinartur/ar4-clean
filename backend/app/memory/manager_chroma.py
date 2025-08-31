@@ -28,8 +28,7 @@ class ChromaMemoryManager:
             embedding_function=self.ef,
             metadata={"hnsw:space": "cosine"},
         )
-        # совместимость с кодом, который ожидает .collection
-        self.collection = self.col
+        self.collection = self.col  # совместимость с legacy-кодом
 
     # -------------------------
     # Bulk API для ingest_path(...)
@@ -53,8 +52,8 @@ class ChromaMemoryManager:
         text: str,
         session_id: Optional[str] = None,
         source: str = "user",
-        chunk_size: int = 800,
-        chunk_overlap: int = 200,
+        chunk_size: int = 6000,       # увеличено для Phase-12
+        chunk_overlap: int = 800,     # увеличено
     ) -> Dict[str, Any]:
         chunks = chunk_text(text, chunk_size, chunk_overlap)
         if not chunks:
@@ -77,41 +76,39 @@ class ChromaMemoryManager:
         return {"ok": True, "added": len(ids)}
 
     # -------------------------
-    # Поиск для ретривера (возвращаем metadata 1:1 из стора)
+    # Поиск Phase-12
     # -------------------------
-def search(
-    self,
-    *,
-    user_id: str,
-    query: str,
-    k: int = 4,
-    score_threshold: float = 0.0,
-    dedup: bool = True,
-) -> Dict[str, Any]:
-    qr = self.col.query(
-        query_texts=[query],
-        n_results=max(k * 2, k),
-        # ВАЖНО: без where={"user_id": ...} — иначе ingest-доки отсекаются
-        include=["documents", "metadatas", "distances", "ids"],
-    )
-    docs = (qr.get("documents") or [[]])[0]
-    metas = (qr.get("metadatas") or [[]])[0]
-    dists = (qr.get("distances") or [[]])[0]
+    def search(
+        self,
+        *,
+        user_id: str,
+        query: str,
+        k: int = 5,
+        score_threshold: float = 0.0,
+        dedup: bool = True,
+    ) -> Dict[str, Any]:
+        qr = self.col.query(
+            query_texts=[query],
+            n_results=max(k * 2, k),
+            include=["documents", "metadatas", "distances"],  # убрали 'ids' чтобы Chroma не падал
+        )
+        docs = (qr.get("documents") or [[]])[0]
+        metas = (qr.get("metadatas") or [[]])[0]
+        dists = (qr.get("distances") or [[]])[0]
 
-    out: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-    for doc, meta, dist in zip(docs, metas, dists):
-        if not doc:
-            continue
-        sim = 1.0 - float(dist if dist is not None else 1.0)
-        if score_threshold and sim < score_threshold:
-            continue
-        key = doc.strip().lower()[:160]
-        if dedup and key in seen:
-            continue
-        seen.add(key)
-        # ВАЖНО: ключ — "metadata", не "meta"
-        out.append({"text": doc, "metadata": (meta or {}), "score": round(sim, 4)})
-        if len(out) >= k:
-            break
-    return {"ok": True, "results": out}
+        out: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for doc, meta, dist in zip(docs, metas, dists):
+            if not doc:
+                continue
+            sim = 1.0 - float(dist if dist is not None else 1.0)
+            if score_threshold and sim < score_threshold:
+                continue
+            key = doc.strip().lower()[:160]
+            if dedup and key in seen:
+                continue
+            seen.add(key)
+            out.append({"text": doc, "metadata": meta or {}, "score": round(sim, 4)})
+            if len(out) >= k:
+                break
+        return {"ok": True, "results": out}
