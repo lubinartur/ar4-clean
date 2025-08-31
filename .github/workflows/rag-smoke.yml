@@ -176,12 +176,12 @@ jobs:
 
       - name: "Run smoke"
         shell: bash
+        env:
+           K="6"
+           MMR="0.4"
+           HYDE="2"
+           THRESHOLD="0.30"
         run: |
-        export K=6
-        export MMR=0.4
-        export HYDE=2
-        export THRESHOLD=0.30
-
         echo "CI params: K=$K MMR=$MMR HYDE=$HYDE THRESHOLD=$THRESHOLD"
         bash scripts/smoke_phase10_rag.sh
         
