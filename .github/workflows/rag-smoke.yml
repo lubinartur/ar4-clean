@@ -181,8 +181,10 @@ jobs:
         export MMR=0.4
         export HYDE=2
         export THRESHOLD=0.30
-        bash scripts/smoke_phase10_rag.sh
 
+        echo "CI params: K=$K MMR=$MMR HYDE=$HYDE THRESHOLD=$THRESHOLD"
+        bash scripts/smoke_phase10_rag.sh
+        
       - name: "Upload smoke log (artifact)"
         if: always()
         uses: actions/upload-artifact@v4
