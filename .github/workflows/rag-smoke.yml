@@ -27,79 +27,76 @@ jobs:
           cache: "pip"
 
       - name: "Install deps"
-        shell: bash
         env:
           PIP_DISABLE_PIP_VERSION_CHECK: "1"
           PIP_NO_INPUT: "1"
           PIP_DEFAULT_TIMEOUT: "100"
+        shell: bash
         run: |
+          set -e
           python -m pip install -U pip wheel setuptools
-          # Torch (CPU) – стабильные колёса для runner'а
+          # Стабильные CPU-колёса
           pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch==2.8.0"
           # Основные зависимости проекта
           pip install --prefer-binary -r requirements.txt
           pip install --prefer-binary -r requirements-memory.txt || true
-          # Для RAG/ингеста и загрузки моделей
-          pip install --prefer-binary "chromadb==0.5.3" "duckdb==0.10.2" \
-                                   "FlagEmbedding>=1.2.10" "python-multipart>=0.0.9" \
-                                   "huggingface_hub[cli]>=0.23"
+          # То, что нужно прямо в CI
+          pip install --prefer-binary "chromadb==0.5.3" "duckdb==0.10.2" "FlagEmbedding>=1.2.10" "huggingface_hub[cli]>=0.23" "python-multipart>=0.0.9" "jq"
 
       - name: "Download embeddings (bge-m3)"
-        shell: bash
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}  # можно без токена; с токеном быстрее/стабильнее
+          HF_TOKEN: "${{ secrets.HF_TOKEN }}"
+        shell: bash
         run: |
           set -e
-          mkdir -p "$GITHUB_WORKSPACE/models/bge-m3" "$GITHUB_WORKSPACE/storage/chroma"
-          huggingface-cli download --repo-type model BAAI/bge-m3 \
-            --local-dir "$GITHUB_WORKSPACE/models/bge-m3" \
+          mkdir -p models/bge-m3 storage/chroma
+          huggingface-cli download \
+            --repo-type model BAAI/bge-m3 \
+            --local-dir models/bge-m3 \
             --local-dir-use-symlinks False
-          ls -lh "$GITHUB_WORKSPACE/models/bge-m3" | head -n 20
+          ls -lh models/bge-m3 | head -n 20
 
       - name: "Preflight: load BGE-M3 locally"
         shell: bash
         run: |
+          set -e
           python - <<'PY'
-          import os
           from pathlib import Path
           from FlagEmbedding import BGEM3FlagModel
-
-          ws = Path(os.environ.get("GITHUB_WORKSPACE", "."))
-          p = ws / "models" / "bge-m3"
-
-          print("model_dir:", p)
-          print("exists:", p.exists())
-          print("files:", sum(1 for _ in p.rglob('*')))
-
-          _ = BGEM3FlagModel(p.as_posix(), use_fp16=False, device="cpu")
-          print("✓ Model loaded OK")
+          p = Path("models/bge-m3")
+          print("files:", len(list(p.rglob('*'))))
+          BGEM3FlagModel(p.as_posix(), use_fp16=False, device="cpu")
+          print("✓ BGE-M3 loaded OK")
           PY
 
       - name: "Write CI .env"
         shell: bash
         run: |
-         set -e
-         WS="${GITHUB_WORKSPACE%/}"                          # /home/runner/work/.../ar4-clean
-         mkdir -p "$WS/storage/chroma" "$WS/models/bge-m3"
+          set -e
+          WS="${GITHUB_WORKSPACE%/}"
+          mkdir -p "$WS/storage/chroma" "$WS/models/bge-m3"
 
-         cat > .env <<EOF
-         ENABLE_MEMORY=true
-         AIR4_ENABLE_MEMORY=true
-         AIR4_MEMORY_BACKEND=chroma
-         AIR4_CHROMA_COLLECTION=air4_memory
-         CHROMA_DIR=$WS/storage/chroma
-         AIR4_EMBED_MODEL_PATH=$WS/models/bge-m3
-         AIR4_OFFLINE=0
-         EOF
+          cat > .env <<EOF
+          ENABLE_MEMORY=true
+          AIR4_ENABLE_MEMORY=true
+          AIR4_MEMORY_BACKEND=chroma
+          AIR4_CHROMA_COLLECTION=air4_memory
+          CHROMA_DIR=$WS/storage/chroma
+          AIR4_EMBED_MODEL_PATH=$WS/models/bge-m3
+          AIR4_OFFLINE=0
+          EOF
 
-         echo "---- .env (first lines) ----"
-         sed -n '1,120p' .env
+          # Показать первые строки для диагностики
+          echo "---- .env (first lines) ----"
+          sed -n '1,120p' .env
 
       - name: "Start API (bg)"
         shell: bash
         run: |
           set -e
-          mkdir -p "$GITHUB_WORKSPACE/storage/chroma"
+          echo "---- /health before boot (expected fail) ----" || true
+          curl -sS http://127.0.0.1:8000/health || true
+
           uvicorn backend.app.main:app \
             --host 127.0.0.1 \
             --port 8000 \
@@ -108,9 +105,12 @@ jobs:
             > server.log 2>&1 &
           echo $! > .uvicorn.pid
 
-          # Ждём готовности API
-          for i in {1..30}; do
-            curl -fsS http://127.0.0.1:8000/health && break || sleep 1
+          # Ждём прогрева
+          for i in {1..40}; do
+            if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
           done
 
           echo "---- /health after boot ----"
@@ -124,20 +124,19 @@ jobs:
         shell: bash
         run: |
           set -e
+          echo "python location:"
+          python -c "import sys; print(sys.executable)"
+          echo "pip show:"
+          pip show chromadb || true
+          pip show duckdb || true
+
           out="$(curl -fsS http://127.0.0.1:8000/health || true)"
           echo "$out"
-          echo "---- quick env check ----"
-          python -V
-          pip show chromadb duckdb FlagEmbedding || true
 
-          # Мини-валидация .env для отладки
-          echo "---- .env (first lines) ----"
-          sed -n '1,120p' .env
-
-          if echo "$out" | grep -q '"memory_backend":"chroma"'; then
+          if echo "$out" | jq -e '.memory_backend=="chroma"' >/dev/null 2>&1; then
             echo "✓ Chroma backend active"
           else
-            echo "Memory backend is NOT 'chroma' (embeddings init failed?)"
+            echo "✗ Memory backend is NOT 'chroma' (embeddings init failed?)"
             echo "---- tail server.log ----"
             tail -n 200 server.log || true
             exit 2
@@ -151,23 +150,25 @@ jobs:
           curl -sS -o /tmp/ingest_resp.json -w "\nHTTP:%{http_code}\n" \
             -F "file=@tests/rag_corpus/docs/noise_finance.txt" \
             http://127.0.0.1:8000/ingest/file || true
-          echo "--- ingest response (first 400 chars) ---"
+          echo "--- first 400 chars ---"
           head -c 400 /tmp/ingest_resp.json || true
           echo
           if jq . /tmp/ingest_resp.json >/dev/null 2>&1; then
             echo "OK: JSON received"
           else
-            echo "ERR: not a JSON, see above"; exit 5
+            echo "ERR: not JSON"; exit 5
           fi
 
       - name: "Run smoke"
         shell: bash
+        env:
+          # CI-порог и параметры поиска
+          K: "6"
+          MMR: "0.4"
+          HYDE: "2"
+          THRESHOLD: "0.30"
         run: |
           set -e
-          export K=6
-          export MMR=0.4
-          export HYDE=2
-          export THRESHOLD=0.30
           echo "CI params: K=$K MMR=$MMR HYDE=$HYDE THRESHOLD=$THRESHOLD"
           bash scripts/smoke_phase10_rag.sh
 
@@ -187,5 +188,5 @@ jobs:
         shell: bash
         run: |
           if [ -f .uvicorn.pid ]; then
-            kill "$(cat .uvicorn.pid)" 2>/dev/null || true
+            kill "$(cat .uvicorn.pid)" >/dev/null 2>&1 || true
           fi
