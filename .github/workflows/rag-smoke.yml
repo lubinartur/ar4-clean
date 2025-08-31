@@ -73,9 +73,9 @@ jobs:
           print("✓ BGE-M3 loaded")
           PY
           WS="${WS}" python - <<'PY'
-import os, subprocess
-subprocess.check_call(["python", "/tmp/_preflight.py"], env={**os.environ, "WS": os.environ.get("WS",".")})
-PY
+    import os, subprocess
+    subprocess.check_call(["python", "/tmp/_preflight.py"], env={**os.environ, "WS": os.environ.get("WS",".")})
+        PY
 
       - name: "Write CI .env"
         shell: bash
