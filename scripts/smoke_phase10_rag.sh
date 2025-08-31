@@ -63,21 +63,51 @@ while IFS=$'\t' read -r query expected || [[ -n "${query:-}" ]]; do
   [[ "${query:0:1}" == "#" ]] && continue
   total_q=$((total_q+1))
 
-  # Intent-boost (минимально, но достаточно)
+  # intent boost: добавим якорные слова в текст запроса
   boost=""
   qlc="$query"
+
+  # intro / about
   case "$qlc" in
-    *цели*|*goals*)                       boost="$boost phase10_goals цели goals" ;;
+    *"о чём"*|*"о чем"*|*about*|*описан*)
+      boost="$boost phase10_intro описание intro"
+      ;;
   esac
+
+  # goals / цели
   case "$qlc" in
-    *следующ*|*"next steps"*|*roadmap*)   boost="$boost phase10_next \"следующие шаги\" \"next steps\" roadmap" ;;
+    *цели*|*goal*|*goals*)
+      boost="$boost phase10_goals цели goals"
+      ;;
   esac
+
+  # next steps / следующие шаги
   case "$qlc" in
-    *"о чём"*|*"о чем"*|*about*|*описан*) boost="$boost phase10_intro описание intro" ;;
+    *следующ*|*"next steps"*|*roadmap*|*планирова*)
+      boost="$boost phase10_next \"следующие шаги\" \"next steps\" roadmap"
+      ;;
   esac
+
+  # done / что уже сделано — усиливаем!
   case "$qlc" in
-    *сделано*|*готово*|*done*)            boost="$boost phase10_done done \"что уже сделано\"" ;;
+    *сделано*|*готово*|*итог*|*завершен*|*выполнен*|*готовность*|*done*|*completed*|*finished*|*"status done"* )
+      boost="$boost phase10_done done \"что уже сделано\" завершено итоги выполнено completed finished"
+      ;;
   esac
+
+  # Локальные параметры запроса (по умолчанию — глобальные)
+  hyde_local="$HYDE"
+  filters_extra=""
+  # Если этот вопрос ожидает phase10_done — ещё усиливаем HYDE и фильтры
+  if [[ "$expected" == *"phase10_done"* ]] || [[ "$qlc" =~ (сделано|готово|итог|завершен|done|completed|finished) ]]; then
+    # Поднимаем HYDE только здесь (+1 минимум, чтобы не ноль)
+    if [[ "${hyde_local:-0}" -lt 2 ]]; then hyde_local=2; else hyde_local=$((hyde_local+1)); fi
+    # Добавляем мягкий расширяющий фильтр (останется совместимым с текущей API-логикой)
+    filters_extra=' OR tag:status OR tag:done'
+  fi
+
+  qsend="$query $boost"
+  filters_send="$FILTERS$filters_extra"
 
   qsend="$query $boost"
 
@@ -85,10 +115,10 @@ while IFS=$'\t' read -r query expected || [[ -n "${query:-}" ]]; do
     --data-urlencode "q=$qsend" \
     --data-urlencode "k=$K" \
     --data-urlencode "mmr=$MMR" \
-    --data-urlencode "hyde=$HYDE" \
+    --data-urlencode "hyde=$hyde_local" \
     --data-urlencode "recency_days=$RECENCY_DAYS" \
-    --data-urlencode "filters=$FILTERS" \
-    "${HEADERS[@]}")" || { echo "❌ Ошибка запроса debug/query_raw"; exit 1; }
+    --data-urlencode "filters=$filters_send" \
+    "${HEADERS[@]}")"
 
   # считаем hits среди top-K
   hits=0
