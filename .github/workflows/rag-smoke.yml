@@ -78,22 +78,23 @@ jobs:
       - name: "Write CI .env"
         shell: bash
         run: |
-          set -e
-          WS="${GITHUB_WORKSPACE%/}"              # /home/runner/work/.../ar4-clean
-          mkdir -p "$WS/storage/chroma" "$WS/models/bge-m3"
+         set -e
+         WS="${GITHUB_WORKSPACE%/}"                          # /home/runner/work/.../ar4-clean
+         mkdir -p "$WS/storage/chroma" "$WS/models/bge-m3"
 
-          cat > .env <<EOF
-ENABLE_MEMORY=true
-AIR4_ENABLE_MEMORY=true
-AIR4_MEMORY_BACKEND=chroma
-AIR4_CHROMA_COLLECTION=air4_memory
-CHROMA_DIR=$WS/storage/chroma
-AIR4_EMBED_MODEL_PATH=$WS/models/bge-m3
-AIR4_OFFLINE=0
-EOF
+         cat > .env <<EOF
+         ENABLE_MEMORY=true
+         AIR4_ENABLE_MEMORY=true
+         AIR4_MEMORY_BACKEND=chroma
+         AIR4_CHROMA_COLLECTION=air4_memory
+         CHROMA_DIR=$WS/storage/chroma
+         AIR4_EMBED_MODEL_PATH=$WS/models/bge-m3
+         AIR4_OFFLINE=0
+         EOF
 
-          echo "---- .env (first lines) ----"
-          sed -n '1,120p' .env
+         echo "---- .env (first lines) ----"
+         sed -n '1,120p' .env
+
       - name: "Start API (bg)"
         shell: bash
         run: |
