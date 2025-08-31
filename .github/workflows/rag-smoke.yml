@@ -60,10 +60,17 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
+          import os
           from pathlib import Path
           from FlagEmbedding import BGEM3FlagModel
-          p = Path("${GITHUB_WORKSPACE}/models/bge-m3")
-          print("files:", len(list(p.rglob('*'))))
+
+          ws = Path(os.environ.get("GITHUB_WORKSPACE", "."))
+          p = ws / "models" / "bge-m3"
+
+          print("model_dir:", p)
+          print("exists:", p.exists())
+          print("files:", sum(1 for _ in p.rglob('*')))
+
           _ = BGEM3FlagModel(p.as_posix(), use_fp16=False, device="cpu")
           print("✓ Model loaded OK")
           PY
