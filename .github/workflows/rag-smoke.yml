@@ -2,9 +2,9 @@ name: "RAG Smoke (Phase-10)"
 
 on:
   push:
-    branches: [ "main", "master", "feature/**" ]
+    branches: [ "**" ]   # временно — на любые бранчи
   pull_request:
-    branches: [ "main", "master" ]
+    branches: [ "**" ]
   workflow_dispatch:
 
 concurrency:
