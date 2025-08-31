@@ -10,3 +10,10 @@ __pycache__/
 nohup.out
 *.log
 *.sqlite3
+
+# Ignore temp and cache
+__pycache__/
+*.pyc
+*.bak
+*.bak
+.backup_refs_before_filter.txt
