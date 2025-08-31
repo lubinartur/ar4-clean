@@ -71,12 +71,14 @@ jobs:
       - name: "Write CI .env (absolute paths)"
         run: |
           # Абсолютные пути — надёжнее для всех импортов и фоновых процессов
+          cat > .env <<'ENV'
           echo "ENABLE_MEMORY=true"                                   > .env
           echo "AIR4_ENABLE_MEMORY=true"                             >> .env
-          echo "AIR4_EMBED_MODEL_PATH=${GITHUB_WORKSPACE}/models/bge-m3"   >> .env
+          AIR4_EMBED_MODEL_PATH=./models/bge-m3
           echo "AIR4_MEMORY_BACKEND=chroma"                          >> .env
           echo "AIR4_CHROMA_COLLECTION=air4_memory"                  >> .env
           echo "CHROMA_DIR=${GITHUB_WORKSPACE}/storage/chroma"       >> .env
+          CHROMA_DIR=./storage/chroma
           echo "AIR4_OFFLINE=0"                                      >> .env
           echo "---- .env ----"
           sed -n '1,200p' .env
@@ -84,7 +86,7 @@ jobs:
       - name: "Start API (bg)"
         run: |
           set -e
-          mkdir -p storage/chroma
+          mkdir -p ./storage/chroma ./models/bge-m3
           uvicorn backend.app.main:app \
             --host 127.0.0.1 \
             --port 8000 \
