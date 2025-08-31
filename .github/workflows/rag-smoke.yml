@@ -78,20 +78,22 @@ jobs:
       - name: "Write CI .env"
         shell: bash
         run: |
-          cat > .env <<'ENV'
-          ENABLE_MEMORY=true
-          AIR4_ENABLE_MEMORY=true
-          AIR4_MEMORY_BACKEND=chroma
-          AIR4_CHROMA_COLLECTION=air4_memory
-          CHROMA_DIR=$GITHUB_WORKSPACE/storage/chroma
-          AIR4_EMBED_MODEL_PATH=$GITHUB_WORKSPACE/models/bge-m3
-          AIR4_OFFLINE=0
-          ENV
-          # Нормализуем перевод строк и покажем первые строки
-          sed -i -e 's/\r$//' .env || true
-          echo "---- .env (first lines) ----"
-          sed -n '1,80p' .env
+          set -e
+          WS="${GITHUB_WORKSPACE%/}"              # /home/runner/work/.../ar4-clean
+          mkdir -p "$WS/storage/chroma" "$WS/models/bge-m3"
 
+          cat > .env <<EOF
+ENABLE_MEMORY=true
+AIR4_ENABLE_MEMORY=true
+AIR4_MEMORY_BACKEND=chroma
+AIR4_CHROMA_COLLECTION=air4_memory
+CHROMA_DIR=$WS/storage/chroma
+AIR4_EMBED_MODEL_PATH=$WS/models/bge-m3
+AIR4_OFFLINE=0
+EOF
+
+          echo "---- .env (first lines) ----"
+          sed -n '1,120p' .env
       - name: "Start API (bg)"
         shell: bash
         run: |
