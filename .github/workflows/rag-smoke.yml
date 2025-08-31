@@ -72,10 +72,8 @@ jobs:
       - name: "Write CI .env"
         shell: bash
         run: |
-          set -e
-          WS="${GITHUB_WORKSPACE%/}"
+          WS="$(pwd)"
           mkdir -p "$WS/storage/chroma" "$WS/models/bge-m3"
-
           cat > .env <<EOF
           ENABLE_MEMORY=true
           AIR4_ENABLE_MEMORY=true
@@ -85,10 +83,8 @@ jobs:
           AIR4_EMBED_MODEL_PATH=$WS/models/bge-m3
           AIR4_OFFLINE=0
           EOF
-
-          # Показать первые строки для диагностики
           echo "---- .env (first lines) ----"
-          sed -n '1,120p' .env
+          head -n 20 .env
 
       - name: "Start API (bg)"
         shell: bash
@@ -124,21 +120,15 @@ jobs:
         shell: bash
         run: |
           set -e
-          echo "python location:"
-          python -c "import sys; print(sys.executable)"
-          echo "pip show:"
-          pip show chromadb || true
-          pip show duckdb || true
-
-          out="$(curl -fsS http://127.0.0.1:8000/health || true)"
+          echo "---- .env (dump) ----"
+          cat .env
+          out=$(curl -fsS http://127.0.0.1:8000/health)
           echo "$out"
-
-          if echo "$out" | jq -e '.memory_backend=="chroma"' >/dev/null 2>&1; then
+          if echo "$out" | grep -q '"memory_backend":"chroma"'; then
             echo "✓ Chroma backend active"
           else
             echo "✗ Memory backend is NOT 'chroma' (embeddings init failed?)"
-            echo "---- tail server.log ----"
-            tail -n 200 server.log || true
+            tail -n 100 server.log || true
             exit 2
           fi
 
