@@ -1,0 +1,11 @@
+name: "HELLO PING"
+
+on:
+  push:
+    branches: [ "**" ]
+
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "hello from $GITHUB_REF @ $GITHUB_SHA"
