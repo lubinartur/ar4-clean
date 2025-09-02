@@ -30,3 +30,13 @@ backend/app/storage/
 models/
 *.bak
 
+
+# --- runtime & local data ---
+.uvicorn.out
+.uvicorn.pid
+nohup.out
+backups/
+storage/
+backend/app/storage/
+models/
+*.bak
