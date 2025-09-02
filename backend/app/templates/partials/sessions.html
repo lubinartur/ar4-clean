@@ -1,0 +1,24 @@
+<div class="sb-list">
+{% if groups and groups|length %}
+  {% for g in groups %}
+    <div class="sb-section">
+      <div class="sb-section-title">{{ g.label }}</div>
+      {% for s in g.items %}
+        <div class="sb-item">
+          <a href="/ui/chat?sid={{ s.id }}">
+            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M21 15V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14l4-4h12a2 2 0 0 0 2-2Z"/>
+            </svg>
+            <span class="sb-title-line">{{ s.title }}</span>
+          </a>
+          {% if s.last_message %}
+            <div class="sb-sub muted">{{ s.last_message }}</div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  {% endfor %}
+{% else %}
+  <div class="muted">No chats yet</div>
+{% endif %}
+</div>

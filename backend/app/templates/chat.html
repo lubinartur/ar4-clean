@@ -1,74 +1,128 @@
 {% extends "base.html" %}
+{% block title %}Chat · AIr4{% endblock %}
+
 {% block content %}
-<div class="chat-page">
-
-  <h1 class="page-title">AIr4 Chat</h1>
-
-  <!-- Controls row 1 -->
-  <div class="card controls">
-    <div class="row">
-      <label class="check">
-        <input id="use-rag" type="checkbox" checked>
-        <span>Use RAG</span>
-      </label>
-
-      <label class="field">
-        <span>Top-k</span>
-        <input id="k-memory" type="number" min="1" max="12" value="4">
-      </label>
-
-      <div class="spacer"></div>
-
-      <label class="field field-session">
-        <span>Session</span>
-        <input id="session-id" type="text" value="{{ session_id }}" placeholder="auto">
-      </label>
-      <button id="btn-new"   class="btn" type="button">New</button>
-      <button id="btn-copy"  class="btn" type="button">Copy</button>
-      <button id="btn-clear" class="btn danger" type="button">Clear</button>
+  <section class="stage">
+    <div class="stage-head">
+  <div class="stage-head-left">
+    <div class="stage-title">Chat</div>
+    <div class="stage-sub">
+      Unified /send3 endpoint ·
+      <span id="health-badge" class="ws-badge">Loading…</span>
+      <!-- ▼ новый индикатор стиля -->
+      <button id="styleBadge" class="ws-badge" type="button" title="Click to switch">style: short</button>
     </div>
   </div>
 
-  <!-- Controls row 2 -->
-  <div class="card controls">
-    <div class="row">
-      <label class="field">
-        <span>Model</span>
-        <select id="model">
-          <option value="">(loading…)</option>
-        </select>
-      </label>
-
-      <details class="details">
-        <summary>System prompt (optional)</summary>
-        <textarea id="system" rows="3" placeholder="Опционально: системная инструкция для модели"></textarea>
-      </details>
-
-      <div class="spacer"></div>
-      <label class="check">
-        <input id="stream" type="checkbox">
-        <span>Stream</span>
-      </label>
-    </div>
+  <!-- оставим селект, но спрячем (на всякий случай) -->
+  <div style="display:none">
+    <label for="styleSel">Style</label>
+    <select id="styleSel" class="btn">
+      <option value="short">short</option>
+      <option value="normal">normal</option>
+      <option value="detailed">detailed</option>
+    </select>
   </div>
-
-  <!-- Messages -->
-  <div id="messages" class="card messages"></div>
-
-  <!-- Composer -->
-  <form id="chat-form" class="composer">
-    <textarea id="message" rows="3"
-      placeholder="Type your message… (Shift+Enter — перенос, Ctrl/Cmd+Enter — отправка)" required></textarea>
-    <div class="composer-actions">
-      <button id="send-btn" class="btn primary" type="submit">Send</button>
-      <span class="hint">v0.8.x • Local & Private</span>
-    </div>
-  </form>
-
 </div>
 
-<script>
-  if (window.app && typeof window.app.init === 'function') window.app.init();
-  else document.addEventListener('DOMContentLoaded', () => window.app?.init && window.app.init());
-</script>
+    <div class="glass">
+      <div class="inner">
+        <div id="messages" class="messages"></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="composer">
+    <textarea id="input" rows="1" placeholder="Спросите меня что-нибудь… (Enter — отправить, Shift+Enter — новая строка)"></textarea>
+    <button id="send" class="send-btn" title="Отправить">➤</button>
+  </div>
+
+  <script>
+  (function(){
+    const log = document.getElementById('messages');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const styleSel = document.getElementById('styleSel');
+const styleBadge = document.getElementById('styleBadge');
+
+let session_id = localStorage.getItem('air4.session_id') || null;
+let chatStyle  = localStorage.getItem('air4.style') || 'short';
+if (styleSel) styleSel.value = chatStyle;
+if (styleBadge) styleBadge.textContent = 'style: ' + chatStyle;
+
+// клик по «пилюле» циклически меняет стиль
+if (styleBadge) {
+  const order = ['short','normal','detailed'];
+  styleBadge.addEventListener('click', () => {
+    const idx = order.indexOf(chatStyle);
+    chatStyle = order[(idx + 1) % order.length];
+    localStorage.setItem('air4.style', chatStyle);
+    if (styleSel) styleSel.value = chatStyle;
+    styleBadge.textContent = 'style: ' + chatStyle;
+  });
+}
+
+    async function ensureSession(){
+      if (session_id) return session_id;
+      const r = await fetch('/sessions', {method:'POST'});
+      const s = await r.json();
+      session_id = s.id; localStorage.setItem('air4.session_id', session_id);
+      return session_id;
+    }
+
+    function escapeHtml(s){
+      return (s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+    }
+
+    function add(role, text){
+      const wrap = document.createElement('div');
+      wrap.className = 'msg '+role;
+      wrap.innerHTML =
+        '<div class="avatar">'+(role==='user'?'🧑':'🤖')+'</div>'+
+        '<div class="bubble">'+escapeHtml(text)+'</div>';
+      log.appendChild(wrap);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    async function send(){
+      const text = input.value.trim();
+      if (!text) return;
+      input.value='';
+      add('user', text);
+      await ensureSession();
+
+      // читаем актуальный стиль (вдруг пользователь переключил)
+      const styleNow = (styleSel && styleSel.value) || localStorage.getItem('air4.style') || 'short';
+      try{
+        const r = await fetch('/send3', {
+          method:'POST',
+          headers:{
+            'Content-Type':'application/json',
+            'X-Style': styleNow
+          },
+          body: JSON.stringify({ text, session_id, style: styleNow })
+        });
+        const data = await r.json();
+        if (data.session_id && data.session_id !== session_id){
+          session_id = data.session_id; localStorage.setItem('air4.session_id', session_id);
+        }
+        add('assistant', data.reply || '(пусто)');
+      }catch(e){
+        add('assistant', '⚠️ '+e.message);
+      }
+    }
+
+    // === events ===
+    if (styleSel) {
+      styleSel.addEventListener('change', () => {
+        chatStyle = styleSel.value;
+        localStorage.setItem('air4.style', chatStyle);
+      });
+    }
+    sendBtn.addEventListener('click', send);
+    input.addEventListener('keydown', (e)=>{
+      if (e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+    });
+  })();
+  </script>
 {% endblock %}

@@ -188,7 +188,6 @@ class Retriever:
         except Exception:
             pass
 
-
         # where_json фильтр
         if where:
             cands = [c for c in cands if _meta_match(c.get("metadata") or {}, where)]

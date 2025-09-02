@@ -1,28 +1,20 @@
-models/
-storage/
+# Python
 __pycache__/
 *.pyc
-*.bin
-*.onnx
-*.safetensors
-.uvicorn.out
-.uvicorn.pid
-nohup.out
+*.pyo
+*.pyd
 *.log
 *.sqlite3
 
-# Ignore temp and cache
-__pycache__/
-*.pyc
-*.bak
-*.bak
-.backup_refs_before_filter.txt
+# Virtual env
+.venv/
+venv/
 
-# Ignore ChromaDB, backups and pycache
-.chroma/
-.env.bak
-__pycache__/
+# Editor
+.vscode/
+.idea/
 
-# Ignore ChromaDB and pycache
-.chroma/
-__pycache__/
+# Local data
+data/chroma/
+data/embeddings/
+.DS_Store

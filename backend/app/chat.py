@@ -1,4 +1,4 @@
-# backend/app/chat.py — AIr4 v0.11.1 (Phase 11 — Profile + RAG)
+# backend/app/chat.py — AIr4 v0.11.3 (Profile + RAG + styles)
 from __future__ import annotations
 
 import os
@@ -36,6 +36,31 @@ def _is_greeting(q: str) -> bool:
     return (len(q) < 5) or bool(GREETING_RE.search(q))
 
 
+# ===== Style presets =====
+STYLE_DEFAULT = "short"
+STYLES: Dict[str, Dict[str, Any]] = {
+    "short": {
+        "prompt": (
+            "Отвечай кратко и по-русски. Пиши по делу, без лишних предисловий. "
+            "Формат: 1–3 коротких предложения или лаконичный список. "
+            "Если нужен код/формула — дай минимально достаточный фрагмент. "
+            "Не повторяй вопрос и не извиняйся."
+        ),
+        "options": {"temperature": 0.2, "top_p": 0.9, "repeat_penalty": 1.15, "num_ctx": 4096, "num_predict": 128},
+    },
+    "normal": {
+        "prompt": "Отвечай по-русски, понятно и без воды.",
+        "options": {"temperature": 0.35, "top_p": 0.95, "repeat_penalty": 1.1, "num_ctx": 4096, "num_predict": 256},
+    },
+    "detailed": {
+        "prompt": (
+            "Отвечай развёрнуто по-русски. Структурируй ответ, используй подзаголовки/списки по мере необходимости."
+        ),
+        "options": {"temperature": 0.6, "top_p": 0.97, "repeat_penalty": 1.05, "num_ctx": 6144, "num_predict": 512},
+    },
+}
+
+
 # -----------------------------------------------------------------------------
 # Models
 # -----------------------------------------------------------------------------
@@ -46,6 +71,7 @@ class ChatBody(BaseModel):
     stream: bool = False
     use_rag: bool = True
     k_memory: int = Field(4, ge=1, le=50)
+    style: Optional[str] = Field(STYLE_DEFAULT, description="short | normal | detailed")
 
 
 class ChatResult(BaseModel):
@@ -115,10 +141,15 @@ def _profile_block_from_request(headers: Dict[str, str]) -> str:
     return "USER_PROFILE: " + " | ".join(parts) if parts else ""
 
 
-def build_messages(system: Optional[str], memory_blocks: List[str], user_text: str, headers: Dict[str, str]) -> List[dict]:
+def build_messages(system: Optional[str], memory_blocks: List[str], user_text: str, headers: Dict[str, str], style_prompt: Optional[str]) -> List[dict]:
+    # Merge profile block
     profile_block = _profile_block_from_request(headers)
     if profile_block:
         system = (system + "\n" + profile_block) if system else profile_block
+
+    # Prepend style prompt if provided
+    if style_prompt:
+        system = (style_prompt + ("\n" + system if system else ""))
 
     messages: List[dict] = []
     if system:
@@ -137,10 +168,11 @@ def _summarize_for_sources_display(text: str, limit: int = 220) -> str:
 # -----------------------------------------------------------------------------
 # Ollama call
 # -----------------------------------------------------------------------------
-async def call_ollama(messages: List[dict], session_id: Optional[str]) -> str:
+async def call_ollama(messages: List[dict], session_id: Optional[str], options: Optional[Dict[str, Any]] = None) -> str:
     import httpx
 
-    payload = {"model": OLLAMA_MODEL_DEFAULT, "messages": messages, "stream": False}
+    options = options or STYLES[STYLE_DEFAULT]["options"]
+    payload = {"model": OLLAMA_MODEL_DEFAULT, "messages": messages, "stream": False, "options": options}
     timeout = httpx.Timeout(60.0, read=300.0, connect=10.0)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -164,6 +196,10 @@ def generate_session_id() -> str:
 async def chat_endpoint_call(body: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
     data = ChatBody(**body)
 
+    # Resolve style from body or headers
+    style_key = (data.style or headers.get("X-Style") or STYLE_DEFAULT).lower()
+    cfg = STYLES.get(style_key, STYLES[STYLE_DEFAULT])
+
     memory_blocks: List[str] = []
     if data.use_rag and not _is_greeting(data.message):
         try:
@@ -181,8 +217,8 @@ async def chat_endpoint_call(body: Dict[str, Any], headers: Dict[str, str]) -> D
         except Exception:
             memory_blocks = []
 
-    messages = build_messages(data.system, memory_blocks, data.message, headers)
-    reply_text = await call_ollama(messages, session_id=data.session_id)
+    messages = build_messages(data.system, memory_blocks, data.message, headers, cfg.get("prompt"))
+    reply_text = await call_ollama(messages, session_id=data.session_id, options=cfg.get("options"))
 
     session_id = data.session_id or generate_session_id()
     memory_used = [_summarize_for_sources_display(t) for t in memory_blocks] if memory_blocks else []
