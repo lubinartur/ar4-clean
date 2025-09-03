@@ -3,31 +3,161 @@
 
 {% block content %}
   <section class="stage">
-    <div class="stage-head">
-  <div class="stage-head-left">
-    <div class="stage-title">Chat</div>
-    <div class="stage-sub">
-      Unified /send3 endpoint ·
-      <span id="health-badge" class="ws-badge">Loading…</span>
-      <!-- ▼ новый индикатор стиля -->
-      <button id="styleBadge" class="ws-badge" type="button" title="Click to switch">style: short</button>
-    </div>
-  </div>
+    <style>
+      /* ---- header layout (two rows: title + sub/badges) ---- */
+      .head-title-row{display:flex;justify-content:space-between;align-items:flex-end;gap:16px}
+      .head-sub-row{display:flex;justify-content:space-between;align-items:baseline;gap:16px;margin-top:2px}
+      .head-brand{display:flex;flex-direction:column;gap:2px;min-width:0}
+      .head-sub{font-size:12px;color:var(--muted)}
+      .head-actions{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+      /* make all small text in the right block the same typography as subtitle */
+      .head-actions .ws-badge, .head-actions .btn.ghost, .head-actions .head-muted{font-size:12px;line-height:1.2}
+      /* compact pills */
+      .head-actions .ws-badge{padding:6px 10px}
+      .head-actions .btn.ghost{padding:6px 10px;border-radius:999px}
 
-  <!-- оставим селект, но спрячем (на всякий случай) -->
-  <div style="display:none">
-    <label for="styleSel">Style</label>
-    <select id="styleSel" class="btn">
-      <option value="short">short</option>
-      <option value="normal">normal</option>
-      <option value="detailed">detailed</option>
-    </select>
-  </div>
-</div>
+      /* --- new-messages pill inside the scroll area --- */
+      .messages{position:relative}
+      .new-msgs{
+        position:sticky;bottom:12px;z-index:3;display:flex;justify-content:flex-end;
+        pointer-events:none
+      }
+      .new-msgs-btn{
+        display:none;pointer-events:auto;border:1px solid rgba(142,172,255,.28);
+        background:linear-gradient(180deg, rgba(24,30,48,.9), rgba(20,26,44,.86));
+        color:#cfe0ff;padding:8px 12px;border-radius:999px;font-size:12px;
+        box-shadow:0 6px 18px rgba(0,0,0,.35);cursor:pointer;user-select:none
+      }
+      .new-msgs-btn.show{display:inline-flex;align-items:center;gap:6px}
+      .new-msgs-btn::after{content:"↓";font-weight:700;opacity:.9}
 
-    <div class="glass">
-      <div class="inner">
-        <div id="messages" class="messages"></div>
+      /* ширина верхней области = ширине композера */
+      .chat-edges{margin-left:auto;margin-right:auto}
+
+      /* === Style dropdown (ws-badge look) === */
+      .style-dd{ position:relative; }
+      .style-trigger{ display:inline-flex; align-items:center; gap:6px; }
+      .style-dd.open .style-trigger{ filter:brightness(1.08); }
+
+      .style-menu{
+        position:absolute; right:0; top:calc(100% + 6px);
+        min-width: 160px;
+        background: linear-gradient(180deg, rgba(18,24,40,.96), rgba(16,22,38,.94));
+        border:1px solid rgba(142,172,255,.20);
+        border-radius:12px;
+        box-shadow: 0 12px 28px rgba(0,0,0,.35), 0 0 0 1px rgba(255,255,255,.02) inset;
+        padding:6px;
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        transform-origin: top right;
+        transform: translateY(-6px) scale(.98);
+        opacity:0; pointer-events:none;
+        transition: opacity .12s ease, transform .12s ease;
+        z-index: 30;
+      }
+      .style-dd.open .style-menu{
+        opacity:1; transform: translateY(0) scale(1); pointer-events:auto;
+      }
+
+      .style-item{
+        width:100%; text-align:left;
+        background:transparent; color:#cfe0ff;
+        border:1px solid transparent;
+        padding:8px 10px; border-radius:10px;
+        font-size:13px; cursor:pointer;
+      }
+      .style-item:hover{
+        background: rgba(255,255,255,.06);
+        border-color: rgba(142,172,255,.18);
+      }
+      .style-item[aria-selected="true"]{
+        background: rgba(122,162,255,.14);
+        border-color: rgba(142,172,255,.28);
+      }
+
+      /* === Model dropdown (same look as style) === */
+      .model-dd{ position:relative; }
+      .model-trigger{ display:inline-flex; align-items:center; gap:6px; }
+      .model-dd.open .model-trigger{ filter:brightness(1.08); }
+      /* reuse .style-menu/.style-item visuals for the model menu */
+      .model-menu{ composes: style-menu; }
+      .model-item{ composes: style-item; }
+      /* Fallback if `composes` unsupported by the browser: clone key props */
+      .model-menu{
+        position:absolute; right:0; top:calc(100% + 6px);
+        min-width: 220px;
+        background: linear-gradient(180deg, rgba(18,24,40,.96), rgba(16,22,38,.94));
+        border:1px solid rgba(142,172,255,.20);
+        border-radius:12px;
+        box-shadow: 0 12px 28px rgba(0,0,0,.35), 0 0 0 1px rgba(255,255,255,.02) inset;
+        padding:6px; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+        transform-origin: top right; transform: translateY(-6px) scale(.98);
+        opacity:0; pointer-events:none; transition: opacity .12s ease, transform .12s ease; z-index:30;
+      }
+      .model-dd.open .model-menu{ opacity:1; transform: translateY(0) scale(1); pointer-events:auto; }
+      .model-item{ width:100%; text-align:left; background:transparent; color:#cfe0ff; border:1px solid transparent; padding:8px 10px; border-radius:10px; font-size:13px; cursor:pointer; }
+      .model-item:hover{ background: rgba(255,255,255,.06); border-color: rgba(142,172,255,.18); }
+      .model-item[aria-selected="true"]{ background: rgba(122,162,255,.14); border-color: rgba(142,172,255,.28); }
+    </style>
+
+    <div class="chat-edges" id="chatEdges">
+      <!-- row 1: title only -->
+      <div class="stage-head head-title-row">
+        <div class="head-brand">
+          <div class="stage-title">AIr4</div>
+        </div>
+      </div>
+
+      <!-- row 2: subtitle on the left, badges/actions on the right (baseline aligned by text) -->
+      <div class="stage-head head-sub-row">
+        <div class="head-sub">Личный локальный интеллект</div>
+        <div class="head-actions">
+          <span id="health-badge" class="ws-badge">Loading…</span>
+
+          <!-- ▼ Dropdown: style -->
+          <div class="style-dd">
+            <button id="styleBadge"
+                    class="ws-badge style-trigger"
+                    type="button"
+                    aria-haspopup="listbox"
+                    aria-expanded="false"
+                    aria-controls="styleMenu">
+              style: short ▾
+            </button>
+            <div id="styleMenu" class="style-menu" role="listbox" aria-label="Response style">
+              <button class="style-item" data-val="short"    role="option" aria-selected="false">short</button>
+              <button class="style-item" data-val="normal"   role="option" aria-selected="false">normal</button>
+              <button class="style-item" data-val="detailed" role="option" aria-selected="false">detailed</button>
+            </div>
+          </div>
+          <!-- ▲ Dropdown: style -->
+
+          <!-- ▼ Dropdown: model -->
+          <div class="model-dd">
+            <button id="modelBadge"
+                    class="ws-badge model-trigger"
+                    type="button"
+                    aria-haspopup="listbox"
+                    aria-expanded="false"
+                    aria-controls="modelMenu">
+              model: llama3.1:8b ▾
+            </button>
+            <div id="modelMenu" class="model-menu" role="listbox" aria-label="LLM model">
+              <button class="model-item" data-val="llama3.1:8b"                role="option" aria-selected="false">llama3.1:8b</button>
+              <button class="model-item" data-val="hermes-2-pro-mistral-7b"   role="option" aria-selected="false">hermes-2-pro-mistral-7b</button>
+              <button class="model-item" data-val="nous-hermes2-mixtral:8x7b" role="option" aria-selected="false">nous-hermes2-mixtral:8x7b</button>
+            </div>
+          </div>
+          <!-- ▲ Dropdown: model -->
+
+          <button id="btnClear" class="ws-badge" type="button" title="Очистить чат">Очистить</button>
+        </div>
+      </div>
+
+      <div class="glass">
+        <div class="inner">
+          <div id="messages" class="messages" role="log" aria-live="polite" aria-relevant="additions"></div>
+        </div>
       </div>
     </div>
   </section>
@@ -39,28 +169,158 @@
 
   <script>
   (function(){
-    const log = document.getElementById('messages');
-const input = document.getElementById('input');
-const sendBtn = document.getElementById('send');
-const styleSel = document.getElementById('styleSel');
-const styleBadge = document.getElementById('styleBadge');
+    document.body.classList.add('chat-wide');
 
-let session_id = localStorage.getItem('air4.session_id') || null;
-let chatStyle  = localStorage.getItem('air4.style') || 'short';
-if (styleSel) styleSel.value = chatStyle;
-if (styleBadge) styleBadge.textContent = 'style: ' + chatStyle;
+    const log       = document.getElementById('messages');
+    const input     = document.getElementById('input');
+    const sendBtn   = document.getElementById('send');
+    const styleBadge= document.getElementById('styleBadge');
+    const btnClear  = document.getElementById('btnClear');
 
-// клик по «пилюле» циклически меняет стиль
-if (styleBadge) {
-  const order = ['short','normal','detailed'];
-  styleBadge.addEventListener('click', () => {
-    const idx = order.indexOf(chatStyle);
-    chatStyle = order[(idx + 1) % order.length];
-    localStorage.setItem('air4.style', chatStyle);
-    if (styleSel) styleSel.value = chatStyle;
-    styleBadge.textContent = 'style: ' + chatStyle;
-  });
-}
+    // --- New messages indicator + smart autoscroll ---
+    const BOTTOM_GAP = 28;
+    let pinBottom = true;
+    let newWrap = null, newBtn = null;
+
+    function ensureNewWrap(){
+      if (newWrap) return;
+      newWrap = document.createElement('div');
+      newWrap.className = 'new-msgs';
+      newWrap.innerHTML = '<button id="newMsgsBtn" class="new-msgs-btn" type="button" title="Прокрутить вниз">Новые сообщения ↓</button>';
+      log.appendChild(newWrap);
+      newBtn = newWrap.querySelector('#newMsgsBtn');
+      newBtn.addEventListener('click', ()=>{
+        pinBottom = true; hideNewBtn();
+        requestAnimationFrame(()=>scrollToBottom(true));
+        setTimeout(()=>scrollToBottom(true), 120);
+      });
+    }
+    function isNearBottom(){ return (log.scrollHeight - log.scrollTop - log.clientHeight) <= BOTTOM_GAP; }
+    function showNewBtn(){ newBtn && newBtn.classList.add('show'); }
+    function hideNewBtn(){ newBtn && newBtn.classList.remove('show'); }
+    log.addEventListener('scroll', ()=>{ pinBottom = isNearBottom(); if (pinBottom) hideNewBtn(); });
+
+    // --- sync top width with composer ---
+    function syncTopWidth(){
+      const box = document.getElementById('chatEdges');
+      const comp = document.querySelector('.composer');
+      if (!box || !comp) return;
+      const w = Math.round(comp.getBoundingClientRect().width);
+      box.style.width = w + 'px';
+      box.style.maxWidth = w + 'px';
+    }
+    syncTopWidth();
+    ['resize','orientationchange'].forEach(ev=>window.addEventListener(ev, syncTopWidth));
+    setTimeout(syncTopWidth, 0); setTimeout(syncTopWidth, 200);
+
+    // --- bottom inset under messages = composer height ---
+    function updateBottomInset(){
+      const comp = document.querySelector('.composer'); if (!comp) return;
+      const h = comp.getBoundingClientRect().height || 0;
+      log.style.paddingBottom = (h + 70) + 'px';
+      if (pinBottom) scrollToBottom(true);
+    }
+    updateBottomInset();
+    new ResizeObserver(updateBottomInset).observe(document.querySelector('.composer'));
+    ['resize','orientationchange'].forEach(ev=>window.addEventListener(ev, updateBottomInset));
+
+    // state
+    let session_id = localStorage.getItem('air4.session_id') || null;
+
+    // === Style dropdown ===
+    const styleDD      = document.querySelector('.style-dd');
+    const styleTrigger = document.getElementById('styleBadge');
+    const styleMenu    = document.getElementById('styleMenu');
+    const styleItems   = styleMenu ? styleMenu.querySelectorAll('.style-item') : [];
+
+    // === Model dropdown ===
+    const modelDD      = document.querySelector('.model-dd');
+    const modelTrigger = document.getElementById('modelBadge');
+    const modelMenu    = document.getElementById('modelMenu');
+    const modelItems   = modelMenu ? modelMenu.querySelectorAll('.model-item') : [];
+
+    let chatStyle = localStorage.getItem('air4.style') || 'short';
+    updateStyleUI(chatStyle);
+
+    let chatModel = localStorage.getItem('air4.model') || 'llama3.1:8b';
+    updateModelUI(chatModel);
+
+    // Sync model badge with backend's actually used model from /health
+    (async () => {
+      try {
+        const r = await fetch('/health', { cache: 'no-store' });
+        const j = await r.json();
+        if (j && j.model) {
+          setModel(j.model); // reflect real active model
+        }
+      } catch (_) { /* noop */ }
+    })();
+
+    function openStyle(){ if (!styleDD) return; styleDD.classList.add('open'); styleTrigger?.setAttribute('aria-expanded','true'); }
+    function closeStyle(){ if (!styleDD) return; styleDD.classList.remove('open'); styleTrigger?.setAttribute('aria-expanded','false'); }
+    function toggleStyle(){ if (!styleDD) return; (styleDD.classList.contains('open') ? closeStyle() : openStyle()); }
+
+    function setStyle(val){
+      chatStyle = val;
+      localStorage.setItem('air4.style', chatStyle);
+      updateStyleUI(chatStyle);
+      closeStyle();
+    }
+
+    function updateStyleUI(val){
+      if (styleTrigger) styleTrigger.textContent = `style: ${val} ▾`;
+      styleItems.forEach(btn=>{
+        const on = (btn.dataset.val === val);
+        btn.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+    }
+
+    function openModel(){ if (!modelDD) return; modelDD.classList.add('open'); modelTrigger?.setAttribute('aria-expanded','true'); }
+    function closeModel(){ if (!modelDD) return; modelDD.classList.remove('open'); modelTrigger?.setAttribute('aria-expanded','false'); }
+    function toggleModel(){ if (!modelDD) return; (modelDD.classList.contains('open') ? closeModel() : openModel()); }
+
+    function setModel(val){
+      chatModel = val;
+      localStorage.setItem('air4.model', chatModel);
+      updateModelUI(chatModel);
+      closeModel();
+    }
+    function updateModelUI(val){
+      if (modelTrigger) modelTrigger.textContent = `model: ${val} ▾`;
+      modelItems.forEach(btn=>{
+        const on = (btn.dataset.val === val);
+        btn.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+    }
+
+    if (styleTrigger) styleTrigger.addEventListener('click', (e)=>{ e.stopPropagation(); toggleStyle(); });
+    styleItems.forEach(btn=>{
+      btn.addEventListener('click', (e)=>{
+        e.stopPropagation();
+        setStyle(btn.dataset.val);
+      });
+    });
+    document.addEventListener('click', (e)=>{
+      if (!styleDD) return;
+      if (!styleDD.contains(e.target)) closeStyle();
+    });
+    document.addEventListener('keydown', (e)=>{ if (e.key === 'Escape') closeStyle(); });
+
+    if (modelTrigger) modelTrigger.addEventListener('click', (e)=>{ e.stopPropagation(); toggleModel(); });
+    modelItems.forEach(btn=>{
+      btn.addEventListener('click', (e)=>{ e.stopPropagation(); setModel(btn.dataset.val); });
+    });
+    document.addEventListener('click', (e)=>{ if (!modelDD) return; if (!modelDD.contains(e.target)) closeModel(); });
+    document.addEventListener('keydown', (e)=>{ if (e.key === 'Escape') closeModel(); });
+
+    // textarea autosize
+    function autoresize(){
+      input.style.height = 'auto';
+      input.style.height = Math.min(220, Math.max(44, input.scrollHeight)) + 'px';
+      updateBottomInset();
+    }
+    input.addEventListener('input', autoresize);
+    setTimeout(autoresize, 0);
 
     async function ensureSession(){
       if (session_id) return session_id;
@@ -69,60 +329,109 @@ if (styleBadge) {
       session_id = s.id; localStorage.setItem('air4.session_id', session_id);
       return session_id;
     }
-
-    function escapeHtml(s){
-      return (s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+    function escapeHtml(s){ return (s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+    function hhmm(ts){ const d=new Date(ts); return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}); }
+    function isNearBottom(){
+      const threshold = 120; // px
+      return (log.scrollHeight - (log.scrollTop + log.clientHeight)) <= threshold;
+    }
+    function scrollToBottom(smooth = true){
+      if (smooth){
+        try { log.scrollTo({ top: log.scrollHeight, behavior: 'smooth' }); }
+        catch { log.scrollTop = log.scrollHeight; }
+      } else {
+        log.scrollTop = log.scrollHeight;
+      }
     }
 
+    // day chips
+    let lastChipDate = null;
+    function maybeAddDayChip(ts){
+      const d = new Date(ts);
+      const today = new Date(); today.setHours(0,0,0,0);
+      const yest  = new Date(today); yest.setDate(today.getDate()-1);
+      const dayKey = d.toISOString().slice(0,10);
+      if (dayKey === lastChipDate) return;
+      let label = d.toLocaleDateString();
+      if (d >= today) label = 'Сегодня'; else if (d >= yest) label = 'Вчера';
+      const chip = document.createElement('div'); chip.className='time-chip'; chip.textContent=label;
+      log.appendChild(chip); lastChipDate = dayKey;
+    }
+
+    // add message (with cascade for assistant)
     function add(role, text){
-      const wrap = document.createElement('div');
-      wrap.className = 'msg '+role;
+      const now = Date.now(); maybeAddDayChip(now);
+      const wrap = document.createElement('div'); wrap.className = 'msg ' + role;
+
+      let bubbleContent;
+      if (role === 'assistant') {
+        const safe = escapeHtml(text);
+        const lines = safe.split('\n').map((l,i)=>{
+          const content = l.length ? l : '&nbsp;';
+          return `<span class="line" style="animation-delay:${i*100}ms">${content}</span>`;
+        });
+        bubbleContent = lines.join('');
+      } else bubbleContent = escapeHtml(text);
+
       wrap.innerHTML =
         '<div class="avatar">'+(role==='user'?'🧑':'🤖')+'</div>'+
-        '<div class="bubble">'+escapeHtml(text)+'</div>';
-      log.appendChild(wrap);
-      log.scrollTop = log.scrollHeight;
+        '<div class="bubble">'+ bubbleContent +'<span class="meta-in">'+hhmm(now)+'</span></div>';
+
+      ensureNewWrap();
+      const atBottom = isNearBottom();
+      log.insertBefore(wrap, newWrap); // сообщение перед sticky-пилюлей
+      void wrap.offsetWidth;
+
+      const needScroll = atBottom || pinBottom;
+      if (needScroll) {
+        requestAnimationFrame(()=>scrollToBottom(true));
+        if (role==='assistant') setTimeout(()=>scrollToBottom(true), 350);
+      } else {
+        showNewBtn();
+      }
     }
 
     async function send(){
-      const text = input.value.trim();
-      if (!text) return;
-      input.value='';
+      const text = input.value.trim(); if (!text) return;
+      input.value=''; autoresize();
       add('user', text);
+      scrollToBottom(true);
       await ensureSession();
 
-      // читаем актуальный стиль (вдруг пользователь переключил)
-      const styleNow = (styleSel && styleSel.value) || localStorage.getItem('air4.style') || 'short';
+      const styleNow = localStorage.getItem('air4.style') || chatStyle;
       try{
         const r = await fetch('/send3', {
           method:'POST',
-          headers:{
-            'Content-Type':'application/json',
-            'X-Style': styleNow
-          },
-          body: JSON.stringify({ text, session_id, style: styleNow })
+          headers:{ 'Content-Type':'application/json', 'X-Style': styleNow, 'X-Model': chatModel },
+          body: JSON.stringify({ text, session_id, style: styleNow, model: chatModel })
         });
         const data = await r.json();
+        // reflect the actual model returned by /send3
+        if (data && data.model) {
+          setModel(data.model);
+        }
         if (data.session_id && data.session_id !== session_id){
           session_id = data.session_id; localStorage.setItem('air4.session_id', session_id);
         }
         add('assistant', data.reply || '(пусто)');
       }catch(e){
-        add('assistant', '⚠️ '+e.message);
+        add('assistant', '⚠️ '+escapeHtml(e.message));
       }
     }
 
-    // === events ===
-    if (styleSel) {
-      styleSel.addEventListener('change', () => {
-        chatStyle = styleSel.value;
-        localStorage.setItem('air4.style', chatStyle);
-      });
-    }
+    // toolbar: clear
+    if (btnClear) btnClear.addEventListener('click', ()=>{
+      log.innerHTML = ''; lastChipDate = null; add('assistant', 'Чат очищен.');
+    });
+
+    // events
     sendBtn.addEventListener('click', send);
     input.addEventListener('keydown', (e)=>{
+      if (e.isComposing) return;
       if (e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); }
     });
+
+    requestAnimationFrame(()=>{ scrollToBottom(true); });
   })();
   </script>
 {% endblock %}

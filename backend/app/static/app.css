@@ -45,14 +45,14 @@ a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
 
 /* ===== Particles canvas layer ===== */
 #particles{
-  position:fixed; inset:0; z-index:5; /* поверх стекла; клики не перехватывает */
+  position:fixed; inset:0; z-index:5;
   pointer-events:none; display:block;
 }
 
 /* ===== Shell layout ===== */
 .shell{display:grid;grid-template-columns:var(--sidebar) 1fr;gap:0;max-width:var(--shell-max);margin:0 auto;min-height:100dvh; position:relative; z-index:4}
 
-/* ===== Sidebar tidy (ровный) ===== */
+/* ===== Sidebar tidy ===== */
 .sidebar{
   display:flex;flex-direction:column;gap:14px;
   background:linear-gradient(180deg, rgba(15,19,32,.85), rgba(11,15,25,.85));
@@ -115,10 +115,9 @@ a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
   z-index:1; position:relative;
 }
 
-/* ===== Chat cards in Nokat-like style ===== */
+/* ===== Chat cards ===== */
 .messages{position:relative}
 .messages::before{
-  /* subtle dotted grid under messages */
   content:""; position:absolute; inset:0; z-index:0; pointer-events:none;
   background-image: radial-gradient(rgba(180,200,255,.08) 1px, transparent 1px);
   background-size: 18px 18px; opacity:.35;
@@ -144,22 +143,18 @@ a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
 .msg .toolbar button{background:transparent;border:1px solid rgba(120,140,200,.25);color:#cfd6ea;border-radius:10px;padding:6px 8px;cursor:pointer}
 .msg .toolbar button:hover{border-color:rgba(142,172,255,.5)}
 
-/* avatar circle like reference */
+/* avatar */
 .msg .avatar{width:28px;height:28px;border-radius:999px;background:#223054;color:#cfe0ff;display:flex;align-items:center;justify-content:center;margin-right:8px;flex-shrink:0}
+.msg{display:flex;align-items:flex-start;gap:8px}
 
-/* layout: avatar + card */
-.msg{
-  display:flex;align-items:flex-start;gap:8px;
-}
-
-/* time chip like "Today" */
+/* time chip */
 .time-chip{align-self:center;margin:10px auto;display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;
   background: rgba(18,24,38,.8);color:#cfe0ff;border:1px solid rgba(142,172,255,.2);box-shadow:0 6px 18px rgba(0,0,0,.35)}
 
-/* ===== Messages ===== */
+/* Messages */
 .messages{flex:1;overflow:auto;padding:14px 14px 120px 14px !important}
 
-/* ===== Composer fixed bottom (как ChatGPT) ===== */
+/* ===== Composer fixed bottom ===== */
 @media (max-width: 980px){ :root{ --sidebar:0px } }
 .composer{
   position:fixed; z-index:6;
@@ -169,7 +164,6 @@ a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
   display:flex; align-items:center; gap:10px;
   padding:8px 8px 8px 12px;
   border-radius:14px;
-  /* flatter, less intrusive */
   background: rgba(26, 31, 44, .90);
   border: 1px solid rgba(255,255,255,.06);
   box-shadow: 0 2px 10px rgba(0,0,0,.28);
@@ -177,21 +171,18 @@ a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
   transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
   box-sizing: border-box;
 }
-
 .composer:focus-within{
   border-color: rgba(142,172,255,.28);
   box-shadow: 0 0 0 2px rgba(142,172,255,.10);
 }
-
 .composer input[type=text],
 .composer textarea{
   flex:1; border:0; outline:0; background:transparent; color:var(--fg);
   padding:12px 48px 12px 0; font-size:15.5px; line-height:1.35;
 }
-
 .composer ::placeholder{ color:#9aa3b2; opacity:.95; }
 
-/* send button — compact, no glossy gradient */
+/* send button */
 .send-btn{
   position:absolute; right:8px; top:50%; transform:translateY(-50%);
   width:40px; height:40px; border-radius:12px;
@@ -206,106 +197,62 @@ a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
 .badge-ok{background:#17281f;color:#9bd59b}
 
 /* ===== Sidebar as card with viewport gutters ===== */
+@media (min-width: 768px){ body{ padding: 14px 14px 0 14px; } }
+@media (min-width: 1280px){ body{ padding: 16px 16px 0 16px; } }
 
-/* общий отступ от краёв окна; чтобы вся сцена «дышала» */
-@media (min-width: 768px){
-  body{ padding: 14px 14px 0 14px; }
-}
-@media (min-width: 1280px){
-  body{ padding: 16px 16px 0 16px; }
-}
-
-/* сам сайдбар — «плавающая карточка» внутри паддингов body */
 .sidebar{
   position: sticky;
-  top: clamp(12px, 2vh, 20px);                   /* отступ сверху */
-  height: calc(100vh - clamp(12px, 2vh, 20px)*2);/* адаптивная высота */
-  margin-left: clamp(6px, 1vw, 12px);            /* отступ от левого края */
+  top: clamp(12px, 2vh, 20px);
+  height: calc(100vh - clamp(12px, 2vh, 20px)*2);
+  margin-left: clamp(6px, 1vw, 12px);
   border-radius:16px;
-  overflow: hidden;                               /* скролл только в середине */
+  overflow: hidden;
   display:flex; flex-direction:column;
 }
-
-/* середина сайдбара, которая скроллится */
-.sb-body{
-  flex:1; min-height:0; overflow:auto;
-  padding-bottom:8px;
-}
-
-/* чтобы нижний профиль всегда на экране, а не уезжал при скролле */
+.sb-body{ flex:1; min-height:0; overflow:auto; padding-bottom:8px; }
 .sb-footer{
-  margin-top:12px;
-  padding-top:10px;
+  margin-top:12px; padding-top:10px;
   border-top:1px solid rgba(120,140,200,.14);
   background:linear-gradient(to top, rgba(11,15,25,.85), rgba(11,15,25,0));
 }
 
-/* ===== Bottom gutters & safe-area fixes ===== */
-
-/* общий вертикальный зазор снизу/сверху + поддержка iOS safe-area */
+/* Bottom gutters & safe-area */
 :root{ --gutterY: 16px; }
-@media (min-width:1280px){ :root{ --gutterY: 20px; }}
+@media (min-width:1280px){ :root{ --gutterY: 20px; } }
 
-
-
-/* Сайдбар — ровно в окне с верх/низ отступами */
 .sidebar{
   top: var(--gutterY);
-  /* высота с учётом нижнего safe-area и нижнего gutter + 10px для зазора */
   height: calc(100dvh - (var(--gutterY) * 2) - env(safe-area-inset-bottom, 0px) - 50px);
   margin-bottom: var(--gutterY);
-  padding-bottom: 10px; /* внутренний запас */
+  padding-bottom: 10px;
 }
-
-/* Нижний блок профиля — всегда виден, не прижат к краю */
 .sb-footer{
-  position: sticky;
-  bottom: calc(var(--gutterY) + 12px);
-  margin-top: 20px;
-  padding: 14px 6px 12px;
+  position: sticky; bottom: calc(var(--gutterY) + 12px);
+  margin-top: 20px; padding: 14px 6px 12px;
   border-top: 1px solid rgba(120,140,200,.14);
   background: linear-gradient(to top, rgba(11,15,25,.90), rgba(11,15,25,0));
   border-radius: 12px;
 }
 
-/* Composer — отступ от нижнего края, учитывая safe-area */
-/* (replaced above) */
-
-/* Сообщения — увеличим запас снизу, чтобы composer не перекрывал */
+/* Сообщения — побольше запас снизу */
 .messages{
   padding-bottom: calc(200px + env(safe-area-inset-bottom, 0px)) !important;
-}/* --- Slim mode: убираем тяжёлую «рамку» вокруг рабочей области --- */
-.glass{
-  background:transparent !important;
-  box-shadow:none !important;
-  outline:none !important;
-  border:none !important;
-}
-.glass .inner{
-  background:transparent !important;
-  border:none !important;
-  margin:0 !important;
-  padding:0 !important;
-  z-index:auto !important;
 }
 
-/* чуть увеличим «воздух» и оставим комфортные отступы у ленты */
+/* Slim mode: убираем тяжёлую рамку у рабочей области */
+.glass{ background:transparent !important; box-shadow:none !important; outline:none !important; border:none !important; }
+.glass .inner{ background:transparent !important; border:none !important; margin:0 !important; padding:0 !important; z-index:auto !important; }
 .stage{ gap:16px; }
 .messages{
   padding:12px 12px calc(150px + env(safe-area-inset-bottom,0px)) 12px !important;
-  background: transparent !important;  /* сетка/частицы останутся видимы */
+  background: transparent !important;
 }
-/* --- Sidebar scrolls with the page --- */
-.sidebar{
-  position: relative !important;
-  top: auto !important;
-  height: auto !important;
-  margin-bottom: 0 !important;
-}
-.sb-body{ overflow: visible !important; }
-.sb-footer{ position: static !important; bottom: auto !important; }
 
-/* === Fixed sidebar that always stays on the left === */
+/* Sidebar fixed on desktop */
+.sidebar{ position: relative !important; top:auto !important; height:auto !important; margin-bottom:0 !important; }
+.sb-body{ overflow: visible !important; }
+.sb-footer{ position: static !important; bottom:auto !important; }
+
 @media (min-width: 981px){
   .sidebar{
     position: fixed !important;
@@ -318,26 +265,22 @@ a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
     z-index: 10 !important;
     border-radius: 16px !important;
   }
-  /* main area shifts right so it doesn't slide under the fixed sidebar */
   .shell{
     grid-template-columns: 1fr !important;
     margin-left: calc(var(--sidebar) + var(--gutter)) !important;
   }
-  /* keep the middle part of the sidebar scrollable inside */
   .sb-body{ flex:1; min-height:0; overflow:auto !important; }
   .sb-footer{ position: static !important; bottom:auto !important; }
 }
-/* on small screens we already have :root{ --sidebar:0px } so nothing to do */
-/* === Composer look = assistant bubble 1:1 === */
+
+/* Composer look = assistant bubble */
 .composer{
-  /* как у .msg.assistant .bubble */
   background: linear-gradient(180deg, rgba(18,24,40,.92), rgba(16,22,38,.86)) !important;
   border: 1px solid rgba(142,172,255,.16) !important;
   border-radius: 14px !important;
   box-shadow: 0 10px 26px rgba(0,0,0,.35), 0 0 0 1px rgba(255,255,255,.02) inset !important;
   padding: 12px 14px !important;
 }
-
 .composer textarea,
 .composer input[type=text]{
   padding: 0 !important;
@@ -345,64 +288,119 @@ a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
   font-size: 15px !important;
   line-height: 1.5 !important;
   color: var(--fg);
+  font-family: 'Montserrat', Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif !important;
 }
-
 .composer ::placeholder{ color:#aeb7cb; opacity:.9; }
-
-/* кнопка отправки — аккуратная, в стиле карточек */
 .send-btn{
-  width: 38px; height: 38px;
-  border-radius: 12px;
+  width: 38px; height: 38px; border-radius: 12px;
   border: 1px solid rgba(142,172,255,.22);
-  background: var(--acc);
-  color: #fff;
+  background: var(--acc); color: #fff;
   box-shadow: 0 2px 10px rgba(0,0,0,.22);
 }
 .send-btn:hover{ filter: brightness(1.06); }
 
-.sb-item .ico {
-  width: 16px;
-  height: 16px;
-  margin-right: 6px;
-  vertical-align: middle;
-  opacity: .9;
-  stroke: currentColor;
-  fill: none;
-  stroke-width: 1.8;
-}
-
-/* sessions list: mono icon + flex link */
+/* sessions list polish */
 .sb-item a{display:flex;align-items:center;gap:8px}
-.sb-item .ico{
-  width:18px;height:18px;flex-shrink:0;
-  fill:none;stroke:currentColor;stroke-width:1.8;opacity:.92;
-}
-
-/* --- Sessions sections (Today/Yesterday/Date) --- */
+.sb-item .ico{ width:18px;height:18px;flex-shrink:0; fill:none;stroke:currentColor;stroke-width:1.8;opacity:.92; }
 .sb-section{padding:10px 8px 6px}
 .sb-section + .sb-section{border-top:1px dashed rgba(150,170,220,.18); margin-top:8px}
 .sb-section-title{
   font-size:11px; letter-spacing:.08em; text-transform:uppercase;
   color:rgba(207,224,255,.66); margin:0 0 6px 4px;
 }
-
-/* items */
 .sb-item{padding:8px 4px 10px; border-radius:10px}
 .sb-item:hover{background:rgba(255,255,255,.04)}
-.sb-item a{display:flex; align-items:center; gap:8px; color:#cfe0ff; text-decoration:none}
-.sb-item .ico{
-  width:18px; height:18px; flex-shrink:0;
-  fill:none; stroke:currentColor; stroke-width:1.8; opacity:.92;
-}
-.sb-item .sb-title-line{
-  display:block; font-weight:600; line-height:1.25;
-  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-}
+.sb-item .sb-title-line{ display:block; font-weight:600; line-height:1.25; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .sb-item .sb-sub{
-  margin-left:26px; /* выровнять под заголовок (с учётом иконки) */
-  font-size:12px; line-height:1.25; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;
-  color:var(--muted);
+  margin-left:26px; font-size:12px; line-height:1.25; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; color:var(--muted);
+}
+.sb-section .sb-item + .sb-item{border-top:1px solid rgba(140,160,200,.10)}
+
+/* === Animations === */
+@keyframes bubble-in-left {
+  from { opacity: 0; transform: translateX(-8px) translateY(6px) scale(.98); }
+  to   { opacity: 1; transform: translateX(0) translateY(0) scale(1); }
+}
+@keyframes bubble-in-right {
+  from { opacity: 0; transform: translateX(8px) translateY(6px) scale(.98); }
+  to   { opacity: 1; transform: translateX(0) translateY(0) scale(1); }
+}
+.msg.assistant .bubble { animation: bubble-in-left .22s ease-out both; transform-origin: bottom left; }
+.msg.user .bubble      { animation: bubble-in-right .22s ease-out both; transform-origin: bottom right; }
+
+@keyframes avatar-fade {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.msg .avatar { animation: avatar-fade .2s ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .msg.assistant .bubble,
+  .msg.user .bubble,
+  .msg .avatar { animation: none; }
 }
 
-/* тонкая линия между соседями внутри секции */
-.sb-section .sb-item + .sb-item{border-top:1px solid rgba(140,160,200,.10)}
+/* Cascade effect for assistant replies */
+.msg.assistant .bubble{ display:inline-block; white-space:pre-line; }
+.msg.assistant .bubble span.line{
+  display:block; opacity:0;
+  transform:translateX(-6px) translateY(4px);
+  animation:bubble-line-in .32s ease-out forwards;
+}
+@keyframes bubble-line-in{
+  to{ opacity:1; transform:translateX(0) translateY(0); }
+}
+
+/* toolbar above messages */
+.chat-toolbar{ display:flex; gap:8px; justify-content:flex-end; margin:4px 4px 8px 4px; }
+.chat-toolbar .btn.ghost{ padding:6px 10px; border-radius:10px; }
+
+/* timestamp inside bubble on hover */
+.msg .bubble{ position:relative; }
+.msg .bubble .meta-in{
+  position:absolute; right:8px; bottom:6px;
+  font-size:11px; color:rgba(200,210,235,.65);
+  opacity:0; transition:opacity .15s ease; pointer-events:none;
+}
+.msg:hover .bubble .meta-in{ opacity:.55; }
+
+/* Calm pass */
+.messages::before{ opacity:.22 !important; }
+.time-chip{ font-size:11px; padding:4px 10px; opacity:.9; }
+
+/* === Chat: align top area width to composer === */
+.chat-edges{
+  margin-left:  calc(max(20px, (100vw - var(--shell-max))/2) + var(--sidebar) + var(--gutter) + 22px + 12px - 1px);
+  margin-right: calc(max(20px, (100vw - var(--shell-max))/2) + var(--gutter) + 22px + 12px - 1px);
+}
+@media (max-width: 980px){
+  .chat-edges{ margin-left: 12px; margin-right: 12px; }
+}
+/* === Header actions: interactive pill buttons (hover/focus/active) === */
+.head-actions .ws-badge{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: background .12s ease, border-color .12s ease, box-shadow .12s ease, transform .06s ease;
+}
+.head-actions .ws-badge:hover{
+  background: rgba(255,255,255,.06);
+  border-color: rgba(142,172,255,.28);
+  box-shadow: 0 4px 14px rgba(0,0,0,.28), 0 0 0 1px rgba(255,255,255,.02) inset;
+}
+.head-actions .ws-badge:active{
+  transform: translateY(1px) scale(.99);
+}
+.head-actions .ws-badge:focus-visible{
+  outline: 2px solid rgba(142,172,255,.55);
+  outline-offset: 2px;
+}
+
+/* Open state highlight for dropdown triggers */
+.style-dd.open .style-trigger,
+.model-dd.open .model-trigger{
+  background: rgba(122,162,255,.14);
+  border-color: rgba(142,172,255,.28);
+  box-shadow: 0 4px 14px rgba(0,0,0,.28), 0 0 0 1px rgba(255,255,255,.02) inset;
+}
