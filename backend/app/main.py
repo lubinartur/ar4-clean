@@ -478,6 +478,13 @@ try:
 except Exception:
     pass
 
+# Mount profile router (phase-11)
+try:
+    from backend.app.routes_profile import router as profile_router  # noqa: E402
+    app.include_router(profile_router, tags=['memory-profile'])
+except Exception:
+    pass
+
 from fastapi import Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
