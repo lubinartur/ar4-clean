@@ -1,5 +1,7 @@
 # backend/app/main.py — AIr4 v0.12.1 (Phase-12 — UI/send3 + sessions + memory)
 from __future__ import annotations
+from dotenv import load_dotenv
+load_dotenv()
 
 import os
 import time
