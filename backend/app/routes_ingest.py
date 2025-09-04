@@ -77,3 +77,102 @@ async def ingest_url(request: Request, body: URLIn, tag: Optional[str] = "phase1
     else:
         mgr.collection.add(documents=[text], metadatas=[meta], ids=[_id])
     return {"ok": True, "saved": body.url}
+
+# --- ingest: server-side process queue ---
+from typing import List, Dict, Any
+from fastapi import Request
+
+@router.post("/process")
+async def ingest_process(request: Request) -> Dict[str, Any]:
+    """Обрабатывает очередь: читает data/ingest/store/queue.json,
+    извлекает текст и кладёт в память (meta.source=имя файла)."""
+    from pathlib import Path
+    import json
+
+    store = Path("data/ingest/store")
+    queue_path = store / "queue.json"
+    queue: List[Dict[str, Any]] = []
+    if queue_path.exists():
+        try:
+            raw = queue_path.read_text(encoding="utf-8")
+            queue = json.loads(raw) if raw.strip() else []
+        except Exception as e:
+            return {"ok": False, "error": f"queue read error: {e}"}  # экранировано
+
+    if not isinstance(queue, list):
+        return {"ok": False, "error": "queue.json is not a JSON list"}
+
+    def extract_text(p: Path) -> str:
+        ext = ''.join(p.suffixes).lower() or p.suffix.lower()
+        try:
+            if ext in (".txt", ".md", ".log", ".csv", ""):
+                try:  return p.read_text(encoding="utf-8", errors="ignore")
+                except Exception: return p.read_text(errors="ignore")
+            if ext == ".pdf":
+                try:
+                    from PyPDF2 import PdfReader  # type: ignore
+                    parts = []
+                    with p.open("rb") as fh:
+                        r = PdfReader(fh)
+                        pages = list(getattr(r, "pages", []) or [])
+                        for pg in pages[:5]:
+                            try: parts.append(pg.extract_text() or "")
+                            except Exception: parts.append("")
+                    return "\n".join(parts).strip()
+                except Exception as e:
+                    return f"[pdf extract error: {e}]"
+            if ext == ".docx":
+                try:
+                    import docx  # type: ignore
+                    d = docx.Document(str(p))
+                    return "\n".join(par.text for par in d.paragraphs).strip()
+                except Exception as e:
+                    return f"[docx extract error: {e}]"
+            try: return p.read_text(encoding="utf-8", errors="ignore")
+            except Exception: return ""
+        except Exception as e:
+            return f"[extract error: {e}]"
+
+    mgr = getattr(request.app.state, "memory_manager", None)
+    if mgr is None:
+        return {"ok": False, "error": "memory_manager not initialized in app.state"}
+
+    processed, errors = [], []
+    for item in queue:
+        fname = (item or {}).get("file")
+        if not fname:
+            errors.append({"item": item, "err": "no file field"})
+            continue
+        fpath = store / fname
+        if not fpath.exists() or not fpath.is_file():
+            errors.append({"file": fname, "err": "not found in store"})
+            continue
+
+        text = extract_text(fpath)
+        if not text.strip():
+            errors.append({"file": fname, "err": "empty text"})
+            continue
+
+        meta = {"source": fname, "tag": "ingest"}
+        try:
+            if hasattr(mgr, "add_texts"):
+                mgr.add_texts([text], [meta])
+            elif hasattr(mgr, "collection"):
+                mgr.collection.add(documents=[text], metadatas=[meta])
+            elif hasattr(mgr, "add_text"):
+                try:
+                    mgr.add_text(user_id="dev", text=text, session_id=None, source="ingest")
+                except TypeError:
+                    mgr.add_text("dev", text, None, "ingest")
+            else:
+                raise RuntimeError("No supported add method on memory manager")
+            processed.append(fname)
+        except Exception as e:
+            errors.append({"file": fname, "err": str(e)})
+
+    try:
+        queue_path.write_text("[]", encoding="utf-8")
+    except Exception as e:
+        errors.append({"queue_write": str(e)})
+
+    return {"ok": True, "processed": processed, "errors": errors, "store": str(store)}

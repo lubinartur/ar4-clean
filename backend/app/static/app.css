@@ -404,3 +404,20 @@ a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
   border-color: rgba(142,172,255,.28);
   box-shadow: 0 4px 14px rgba(0,0,0,.28), 0 0 0 1px rgba(255,255,255,.02) inset;
 }
+/* --- Ingest polish --- */
+.ing-shell .card{background:linear-gradient(180deg,rgba(20,26,40,.85),rgba(16,22,36,.82));border:1px solid rgba(142,172,255,.16);border-radius:14px;padding:14px;box-shadow:0 10px 26px rgba(0,0,0,.35),0 0 0 1px rgba(255,255,255,.02) inset}
+.ing-shell .row{display:flex;gap:10px;align-items:center}
+.ing-shell .muted{color:var(--muted);font-size:12px}
+.ing-shell .ing-input{flex:1;background:#151b29;border:1px solid rgba(255,255,255,.06);color:var(--fg);border-radius:12px;padding:12px 14px;outline:none}
+.ing-shell .ing-actions{display:flex;gap:8px;flex-wrap:wrap}
+.ws-badge{white-space:nowrap;font-size:12px;color:#cfe0ff;padding:8px 12px;border:1px solid #2a3348;border-radius:999px;background:#12192b;cursor:pointer}
+.ws-badge:hover{border-color:rgba(142,172,255,.28);filter:brightness(1.05)}
+.ws-badge.primary{background:linear-gradient(180deg,#4b84ff,#3b6dff)}
+.ws-badge.ghost{background:transparent}
+.ing-list{margin:8px 0 0 0;padding:0;list-style:none;display:grid;gap:8px}
+.ing-list li{display:grid;grid-template-columns:1fr auto auto auto;gap:10px;align-items:center}
+.ing-list code{font-size:13px}
+.ing-size{font-size:12px;opacity:.8}
+.ing-btns{display:flex;gap:6px}
+#upload-progress{height:8px;border:1px solid #2a354a;border-radius:8px;overflow:hidden}
+#upload-bar{height:100%;width:0%}

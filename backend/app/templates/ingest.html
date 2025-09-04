@@ -1,183 +1,84 @@
 {% extends "base.html" %}
+{% block title %}Ingest · AIr4{% endblock %}
+
 {% block content %}
-<h1>Ingest</h1>
+<style>
+/* ——— Ingest (scoped) ——— */
+.ing-wrap{max-width:1040px;margin:32px auto 56px;padding:0 20px}
+.ing-h{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:14px}
+.ing-h .t{font:600 26px/1.2 system-ui, -apple-system, Segoe UI, Inter, sans-serif}
+.ing-h .s{color:#a9b2c5;font-size:13px;margin-top:4px}
 
-<div class="stack">
-  <div class="card">
-    <h3 style="margin:0 0 8px 0">By URL</h3>
-    <p class="dim" style="margin:0 0 8px 0">Для загрузки веб-страницы нужно временно отключить оффлайн: <code>AIR4_OFFLINE=0</code>.</p>
-    <form id="urlForm" class="row" onsubmit="return false;" style="gap:8px; align-items:center">
-      <input id="urlInput" placeholder="https://example.com/article" style="flex:1" />
-      <button id="urlBtn" class="btn" type="button">Send</button>
+.ing-card{background:linear-gradient(180deg,rgba(23,30,48,.78),rgba(18,24,40,.78));
+  border:1px solid rgba(145,170,220,.16);border-radius:16px;
+  box-shadow:0 14px 38px rgba(0,0,0,.34),0 0 0 1px rgba(255,255,255,.04) inset;
+  padding:18px 20px;margin-bottom:18px}
+.ing-row{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px}
+.ing-muted{color:#bcc4d3;font-size:13px}
+.ing-actions{display:flex;gap:10px;flex-wrap:wrap}
+
+.ing-pill{border:1px solid rgba(145,170,220,.16);background:rgba(255,255,255,.08);color:#eaf0ff;
+  border-radius:999px;padding:8px 14px;font-size:13px;cursor:pointer;
+  transition:transform .08s, background .2s, box-shadow .2s}
+.ing-pill:hover{transform:translateY(-1px);background:rgba(255,255,255,.12)}
+
+.ing-pre{margin:0;padding:10px 12px;border-radius:12px;background:rgba(0,0,0,.22);
+  border:1px solid rgba(145,170,220,.16);font:12px/1.45 ui-monospace,Menlo,monospace;color:#eaf0ff}
+
+.ing-grid{display:grid;gap:14px}.ing-two{grid-template-columns:1fr 1fr}
+@media (max-width:980px){.ing-two{grid-template-columns:1fr}}
+
+.ing-label{font-size:12px;color:#a7b2c7;margin:6px 0}
+.ing-input{width:100%;height:42px;padding:0 12px;border-radius:12px;background:rgba(255,255,255,.07);
+  border:1px solid rgba(145,170,220,.16);color:#eaf0ff;outline:0}
+.ing-file{height:42px;display:inline-flex;align-items:center;padding:6px 8px;border-radius:12px;
+  background:rgba(255,255,255,.07);border:1px solid rgba(145,170,220,.16);color:#eaf0ff}
+
+.ing-row-input{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center}
+.ing-row-input .ing-input{border-top-right-radius:0;border-bottom-right-radius:0}
+.ing-row-input .ing-pill{height:42px;display:inline-flex;align-items:center;border-top-left-radius:0;border-bottom-left-radius:0}
+</style>
+
+<section class="ing-wrap">
+  <header class="ing-h">
+    <div>
+      <div class="t">Ingest</div>
+      <div class="s">Загрузка и отправка в память</div>
+    </div>
+  </header>
+
+  <!-- Inbox -->
+  <div class="ing-card">
+    <div class="ing-row">
+      <div class="ing-muted">Инбокс</div>
+      <div class="ing-actions">
+        <button class="ing-pill" hx-get="/ui/ingest/status" hx-target="#inbox" hx-swap="innerHTML">Обновить</button>
+        <button class="ing-pill" hx-post="/ui/ingest/commit-all" hx-target="#inbox" hx-swap="innerHTML">В память</button>
+        <button class="ing-pill" hx-delete="/ui/ingest/clear" hx-target="#inbox" hx-swap="innerHTML">Очистить</button>
+      </div>
+    </div>
+    <pre id="inbox" class="ing-pre">жду…</pre>
+  </div>
+
+  <!-- Upload -->
+  <div class="ing-card">
+    <form id="ingest-form" hx-post="/ingest" hx-encoding="multipart/form-data" hx-target="#upload-resp" hx-swap="innerHTML">
+      <div class="ing-grid ing-two" style="margin-bottom:10px">
+        <label>
+          <div class="ing-label">Файл(ы)</div>
+          <input type="file" id="files" name="files" class="ing-file" multiple> <button type="button" id="btn-upload" class="ws-badge" onclick="uploadFiles()">Загрузить файл(ы)</button>
+        </label>
+        <div>
+          <div class="ing-label">URL</div>
+          <div class="ing-row-input">
+            <input type="url" id="url" name="url" class="ing-input" placeholder="https://...">
+            <button type="submit" class="ing-pill">Загрузить</button>
+          </div>
+        </div>
+      </div>
+      <div class="ing-muted">Поддерживаемые: PDF, TXT, MD, DOCX</div>
     </form>
+    <div style="margin-top:10px"><pre id="upload-resp" class="ing-pre">готов к загрузке…</pre></div>
   </div>
-
-  <div class="card">
-    <h3 style="margin:0 0 8px 0">By File</h3>
-    <p class="dim" style="margin:0 0 8px 0">
-      Поддерживается: <code>.pdf</code>, <code>.txt</code>, <code>.md</code>, <code>.csv</code> (до ~15&nbsp;MB).
-      Для сканов PDF потребуется OCR (не входит в этот шаг).
-    </p>
-    <form id="fileForm" class="row" onsubmit="return false;" style="gap:8px; align-items:center">
-      <input id="fileInput" type="file" accept=".pdf,.txt,.md,.csv" />
-      <button id="fileBtn" class="btn" type="button">Upload</button>
-    </form>
-  </div>
-
-  <div id="result" class="card" style="display:none">
-    <div class="row" style="justify-content:space-between; align-items:center">
-      <div>
-        <div class="dim" style="font-size:.9em">session_id</div>
-        <code id="sid" style="font-size:1.05em"></code>
-      </div>
-      <div class="row" style="gap:8px">
-        <button id="copyBtn" class="btn ghost" type="button">Copy</button>
-        <a id="openBtn" class="btn" href="#" target="_self">Open summary</a>
-      </div>
-    </div>
-    <div id="hint" class="dim" style="margin-top:6px; font-size:.9em">
-      Теперь можно открыть <code>/ui/summaries?session_id=...</code>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="row" style="justify-content:space-between; align-items:center">
-      <h3 style="margin:0">Recent ingests</h3>
-      <div class="row" style="gap:8px">
-        <button id="refreshBtn" class="btn ghost small" type="button">Refresh</button>
-      </div>
-    </div>
-    <ul id="recent" style="margin:8px 0 0 0"></ul>
-  </div>
-
-  <div id="status" class="dim"></div>
-</div>
-
-<script>
-(function(){
-  const urlInput = document.getElementById('urlInput');
-  const urlBtn   = document.getElementById('urlBtn');
-
-  const fileInput= document.getElementById('fileInput');
-  const fileBtn  = document.getElementById('fileBtn');
-
-  const result  = document.getElementById('result');
-  const sidEl   = document.getElementById('sid');
-  const copyBtn = document.getElementById('copyBtn');
-  const openBtn = document.getElementById('openBtn');
-  const status  = document.getElementById('status');
-
-  const recent  = document.getElementById('recent');
-  const refreshBtn = document.getElementById('refreshBtn');
-
-  function setBusy(btn, v){ if (v) btn.setAttribute('aria-busy','true'); else btn.removeAttribute('aria-busy'); btn.disabled = !!v; }
-  function flash(t){ status.textContent = t; setTimeout(()=> status.textContent="", 1800); }
-  function trunc(s, n){ s = String(s||""); return s.length>n ? s.slice(0,n-1) + "…" : s; }
-
-  function showSid(sid){
-    sidEl.textContent = sid;
-    openBtn.href = `/ui/summaries?session_id=${encodeURIComponent(sid)}`;
-    result.style.display = 'block';
-    try { localStorage.setItem('air4.summary.sid', sid); } catch(e){}
-  }
-
-  copyBtn.addEventListener('click', async ()=>{
-    try { await navigator.clipboard.writeText(sidEl.textContent||""); flash('Скопировано'); }
-    catch { flash('Не удалось скопировать'); }
-  });
-
-  urlBtn.addEventListener('click', async ()=>{
-    const url = (urlInput.value || '').trim();
-    if (!url){ flash('Укажи URL'); return; }
-    setBusy(urlBtn, true);
-    try {
-      const r = await fetch('/ingest/url', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ url })
-      });
-      if (!r.ok){ flash(`Ошибка: ${r.status}`); return; }
-      const data = await r.json();
-      showSid(data.session_id);
-      flash('URL принят');
-      await loadRecent();
-    } catch(e){ flash(`Сеть: ${String(e)}`); }
-    finally { setBusy(urlBtn, false); }
-  });
-
-  fileBtn.addEventListener('click', async ()=>{
-    const f = fileInput.files && fileInput.files[0];
-    if (!f){ flash('Выбери файл'); return; }
-    // простой клиентский лимит ~15MB для раннего предупреждения
-    if (f.size > 15 * 1024 * 1024) { flash('Файл больше 15MB'); return; }
-
-    const fd = new FormData(); fd.append('file', f);
-    setBusy(fileBtn, true);
-    try {
-      const r = await fetch('/ingest/file', { method:'POST', body: fd });
-      if (!r.ok){
-        const text = await r.text();
-        flash(`Ошибка: ${r.status}`);
-        console.warn('ingest/file error:', text);
-        return;
-      }
-      const data = await r.json();
-      showSid(data.session_id);
-      flash('Файл принят');
-      await loadRecent();
-    } catch(e){ flash(`Сеть: ${String(e)}`); }
-    finally { setBusy(fileBtn, false); }
-  });
-
-  async function loadRecent(){
-    recent.innerHTML = '<li class="dim">Загрузка…</li>';
-    try{
-      const r = await fetch('/ingest/recent?limit=20');
-      if (!r.ok){ recent.innerHTML = `<li class="dim">Ошибка: ${r.status}</li>`; return; }
-      const list = await r.json();
-      if (!Array.isArray(list) || !list.length){
-        recent.innerHTML = '<li class="dim">Пусто</li>'; return;
-      }
-      recent.innerHTML = list.map(it => {
-        const sid = it.session_id;
-        const kind = it.type || '—';
-        const src  = trunc(it.source || '', 80);
-        const ts   = it.ts || '';
-        return `
-          <li class="row" style="gap:8px; align-items:center; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--border)">
-            <div style="display:flex; gap:8px; align-items:center; min-width:0">
-              <span class="tag">${kind}</span>
-              <code style="white-space:nowrap">${sid}</code>
-              <span class="dim" style="white-space:nowrap">• ${ts}</span>
-              <span class="dim" style="min-width:0; overflow:hidden; text-overflow:ellipsis">${src}</span>
-            </div>
-            <div class="row" style="gap:6px; flex-shrink:0">
-              <a class="btn small" href="/ui/summaries?session_id=${encodeURIComponent(sid)}">Open</a>
-              <button class="btn ghost small" data-action="recalc" data-sid="${sid}">Recalc</button>
-            </div>
-          </li>`;
-      }).join('');
-    }catch(e){
-      recent.innerHTML = '<li class="dim">NETWORK ERROR</li>';
-    }
-  }
-
-  recent.addEventListener('click', async (e)=>{
-    const btn = e.target.closest('button[data-action="recalc"]');
-    if (!btn) return;
-    const sid = btn.getAttribute('data-sid');
-    btn.setAttribute('aria-busy','true'); btn.disabled = true;
-    try{
-      const r = await fetch(`/memory/summarize/${encodeURIComponent(sid)}`, {method:'POST'});
-      if (r.ok) flash('Пересчитано'); else flash(`Ошибка: ${r.status}`);
-    }catch(err){ flash('Сеть: ошибка'); }
-    finally { btn.removeAttribute('aria-busy'); btn.disabled = false; }
-  });
-
-  refreshBtn.addEventListener('click', loadRecent);
-
-  // init
-  loadRecent();
-})();
-</script>
+</section>
 {% endblock %}

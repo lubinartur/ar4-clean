@@ -474,6 +474,350 @@ async def send3(payload: Send3In) -> Send3Out:
 # Mount phase-9 memory router if it exists (kept for tools)
 try:
     from backend.app.routes_memory import router as memory_router  # noqa: E402
-    app.include_router(memory_router, prefix="/memory", tags=["memory"])
+    app.include_router(memory_router)
 except Exception:
     pass
+
+from fastapi import Request, UploadFile, File, Form
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+from typing import List, Optional
+try:
+    templates
+except NameError:
+    templates = Jinja2Templates(directory="backend/app/templates")
+
+
+@app.on_event("startup")
+async def _wire_memory_to_state():
+    try:
+        app.state.memory_manager = MEMORY
+    except NameError:
+        pass
+# also set eagerly for dev reloads
+try:
+    app.state.memory_manager = MEMORY
+except NameError:
+    pass
+
+@app.get('/ui/ingest', response_class=HTMLResponse)
+async def ui_ingest(request: Request):
+    return templates.TemplateResponse('ingest.html', {'request': request, 'active': 'ingest'})
+
+@app.get('/ui/ingest/status', response_class=HTMLResponse)
+async def ui_ingest_status():
+    return HTMLResponse('<pre>OK: ingest status (stub)</pre>')
+
+@app.post('/ui/ingest/commit-all', response_class=HTMLResponse)
+async def ui_ingest_commit_all():
+    return HTMLResponse('<pre>OK: committed (stub)</pre>')
+
+@app.delete('/ui/ingest/clear', response_class=HTMLResponse)
+async def ui_ingest_clear():
+    return HTMLResponse('<pre>OK: cleared (stub)</pre>')
+
+@app.post('/ingest', response_class=HTMLResponse)
+async def ingest_endpoint(files: List[UploadFile] = File(default=[]), url: Optional[str] = Form(default=None)):
+    # сохраняем файлы в data/ingest/inbox и дописываем URL в urls.txt
+    from pathlib import Path
+    inbox = Path("data/ingest/inbox")
+    inbox.mkdir(parents=True, exist_ok=True)
+
+    saved = []
+    for f in (files or []):
+        base = (f.filename or "upload.bin")
+        name = base
+        i = 1
+        while (inbox / name).exists():
+            if "." in base:
+                stem, ext = ".".join(base.split(".")[:-1]), "." + base.split(".")[-1]
+            else:
+                stem, ext = base, ""
+            name = f"{stem}__{i}{ext}"
+            i += 1
+        (inbox / name).write_bytes(await f.read())
+        saved.append(name)
+
+    queued = None
+    if url:
+        queued = str(url).strip()
+        (inbox / "urls.txt").touch(exist_ok=True)
+        with (inbox / "urls.txt").open("a", encoding="utf-8") as fh:
+            fh.write(queued + "\n")
+
+    lines = [f"saved: {', '.join(saved) if saved else '—'}", f"url: {queued or '—'}"]
+    return HTMLResponse("<pre>" + "\n".join(lines) + "</pre>")
+    return HTMLResponse(f"<pre>uploaded: {", ".join(names) if names else "—"}; url: {url or "—"}</pre>")
+
+@app.get('/ingest/status')
+async def ingest_status():
+    """JSON: текущее содержимое инбокса (файлы + urls)."""
+    from pathlib import Path
+    inbox = Path("data/ingest/inbox")
+    inbox.mkdir(parents=True, exist_ok=True)
+
+    files = []
+    for f in sorted(inbox.iterdir()):
+        if f.is_file() and f.name != "urls.txt":
+            try:
+                sz = f.stat().st_size
+            except Exception:
+                sz = None
+            files.append({"name": f.name, "size": sz})
+
+    urls = []
+    utxt = inbox / "urls.txt"
+    if utxt.exists():
+        try:
+            urls = [line.strip() for line in utxt.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()]
+        except Exception:
+            urls = []
+
+    return {"ok": True, "inbox": str(inbox.resolve()), "files": files, "urls": urls}
+
+@app.post('/ingest/commit')
+async def ingest_commit(name: str):
+    """Перенос файла из data/ingest/inbox в data/ingest/store с SHA256-дедупликацией."""
+    import hashlib, json
+    from pathlib import Path
+
+    inbox = Path("data/ingest/inbox"); inbox.mkdir(parents=True, exist_ok=True)
+    store = Path("data/ingest/store"); store.mkdir(parents=True, exist_ok=True)
+    index_path = store / "index.json"
+
+    src = inbox / name
+    if not src.exists() or not src.is_file():
+        return {"ok": False, "error": "file not found in inbox", "asked": name, "inbox": str(inbox.resolve())}
+
+    # sha256 по потоку
+    h = hashlib.sha256()
+    with src.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024*1024), b""):
+            h.update(chunk)
+    digest = h.hexdigest()
+
+    # расширение (все суффиксы)
+    ext = "".join(src.suffixes) or ""
+    target = store / f"{digest}{ext}"
+
+    # загрузим/инициализируем индекс
+    try:
+        idx = json.loads(index_path.read_text()) if index_path.exists() else {}
+    except Exception:
+        idx = {}
+
+    dedup = False
+    if target.exists():
+        # уже есть такой контент — удаляем исходник, считаем как дубликат
+        try:
+            src.unlink()
+        except Exception:
+            pass
+        dedup = True
+        meta = idx.get(digest) or {"size": target.stat().st_size, "names": []}
+        if name not in meta["names"]:
+            meta["names"].append(name)
+        meta["size"] = meta.get("size") or target.stat().st_size
+        idx[digest] = meta
+    else:
+        # переносим
+        src.replace(target)
+        size = target.stat().st_size
+        meta = idx.get(digest) or {"size": size, "names": []}
+        if name not in meta["names"]:
+            meta["names"].append(name)
+        meta["size"] = size
+        idx[digest] = meta
+
+    # сохранить индекс
+    try:
+        index_path.write_text(json.dumps(idx, ensure_ascii=False, indent=2))
+    except Exception as e:
+        return {"ok": True, "digest": digest, "stored": target.name, "dedup": dedup, "index_write_error": str(e), "store": str(store.resolve())}
+
+    return {"ok": True, "digest": digest, "stored": target.name, "dedup": dedup, "store": str(store.resolve())}
+    
+    # --- enqueue for indexing ---
+    try:
+        qpath = store / "queue.json"
+        q = json.loads(qpath.read_text()) if qpath.exists() else []
+        q.append({"digest": digest, "file": target.name})
+        qpath.write_text(json.dumps(q, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+
+
+
+@app.post('/ingest/commit-all')
+async def ingest_commit_all():
+    """Коммитит все файлы из data/ingest/inbox в data/ingest/store с SHA256-дедупликацией."""
+    import hashlib, json
+    from pathlib import Path
+
+    inbox = Path("data/ingest/inbox"); inbox.mkdir(parents=True, exist_ok=True)
+    store = Path("data/ingest/store"); store.mkdir(parents=True, exist_ok=True)
+    index_path = store / "index.json"
+
+    # загрузим/инициализируем индекс
+    try:
+        idx = json.loads(index_path.read_text()) if index_path.exists() else {}
+    except Exception:
+        idx = {}
+
+    moved, duplicates, errors = [], [], []
+
+    for f in sorted(inbox.iterdir()):
+        if not f.is_file() or f.name == "urls.txt":
+            continue
+        try:
+            # sha256 по потоку
+            h = hashlib.sha256()
+            with f.open("rb") as fh:
+                for chunk in iter(lambda: fh.read(1024*1024), b""):
+                    h.update(chunk)
+            digest = h.hexdigest()
+
+            ext = "".join(f.suffixes) or ""
+            target = store / f"{digest}{ext}"
+
+            if target.exists():
+                try: f.unlink()
+                except Exception: pass
+                duplicates.append(f.name)
+                meta = idx.get(digest) or {"size": target.stat().st_size, "names": []}
+                if f.name not in meta["names"]:
+                    meta["names"].append(f.name)
+                meta["size"] = meta.get("size") or target.stat().st_size
+                idx[digest] = meta
+            else:
+                f.replace(target)
+                moved.append({"from": f.name, "to": target.name})
+                size = target.stat().st_size
+                meta = idx.get(digest) or {"size": size, "names": []}
+                if f.name not in meta["names"]:
+                    meta["names"].append(f.name)
+                meta["size"] = size
+                idx[digest] = meta
+        except Exception as e:
+            errors.append({"file": f.name, "err": str(e)})
+
+    # сохранить индекс
+    try:
+        index_path.write_text(json.dumps(idx, ensure_ascii=False, indent=2))
+    except Exception as e:
+        errors.append({"index_write_error": str(e)})
+
+    return {"ok": True, "store": str(store.resolve()), "moved": moved, "duplicates": duplicates, "errors": errors}
+
+
+@app.delete('/ingest/clear')
+async def ingest_clear():
+    """Очищает inbox: удаляет все файлы и обнуляет urls.txt."""
+    from pathlib import Path
+    inbox = Path("data/ingest/inbox"); inbox.mkdir(parents=True, exist_ok=True)
+
+    removed = []
+    for f in inbox.iterdir():
+        if f.is_file() and f.name != "urls.txt":
+            try:
+                f.unlink()
+                removed.append(f.name)
+            except Exception as e:
+                removed.append(f"{f.name}: {e}")
+
+    utxt = inbox / "urls.txt"
+    urls_cleared = False
+    try:
+        utxt.write_text("")  # создаст если не было
+        urls_cleared = True
+    except Exception:
+        urls_cleared = False
+
+    return {"ok": True, "cleared_files": removed, "urls_cleared": urls_cleared}
+
+@app.get('/ingest/queue')
+async def ingest_queue():
+    import json
+    from pathlib import Path
+    qfile = Path("data/ingest/store/queue.json")
+    if not qfile.exists():
+        return {"ok": True, "queue": []}
+    try:
+        data = json.loads(qfile.read_text())
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "queue": data}
+
+
+
+@app.get('/ingest/preview')
+async def ingest_preview(name: str):
+    # Предпросмотр: TXT/MD/LOG/CSV, PDF (первые 5 стр), DOCX.
+    try:
+        from pathlib import Path
+        inbox = Path("data/ingest/inbox")
+        store = Path("data/ingest/store")
+        path = inbox / name
+        if not path.exists() or not path.is_file():
+            alt = store / name
+            if alt.exists() and alt.is_file():
+                path = alt
+        if not path.exists() or not path.is_file():
+            return {"ok": False, "error": "file not found", "asked": name}
+
+        ext = "".join(path.suffixes).lower() or path.suffix.lower()
+        limit = 1200
+
+        # TXT-like
+        if ext in (".txt", ".md", ".log", ".csv"):
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                text = path.read_text(errors="ignore")
+            text = (text or "").replace("\r", "")
+            note = ""
+            if len(text) > limit:
+                text, note = text[:limit] + "...[truncated]", f"truncated to {limit} chars"
+            return {"ok": True, "name": path.name, "size": path.stat().st_size,
+                    "ext": ext, "text": text, "note": note}
+
+        # PDF
+        if ext == ".pdf":
+            try:
+                from PyPDF2 import PdfReader
+                parts = []
+                with path.open("rb") as fh:
+                    reader = PdfReader(fh)
+                    pages = list(getattr(reader, "pages", []) or [])
+                    for page in pages[:5]:
+                        try:
+                            parts.append(page.extract_text() or "")
+                        except Exception:
+                            parts.append("")
+                text = "\n".join(parts).replace("\r", "").strip()
+                note = ""
+                if len(text) > limit:
+                    text, note = text[:limit] + "...[truncated]", f"truncated to {limit} chars"
+                return {"ok": True, "name": path.name, "size": path.stat().st_size,
+                        "ext": ext, "text": text, "note": note}
+            except Exception as e:
+                return {"ok": False, "error": f"pdf extract error: {e}", "name": path.name}
+
+        # DOCX
+        if ext == ".docx":
+            try:
+                import docx
+                doc = docx.Document(str(path))
+                text = "\n".join(p.text for p in doc.paragraphs)
+                text = (text or "").replace("\r", "").strip()
+                note = ""
+                if len(text) > limit:
+                    text, note = text[:limit] + "...[truncated]", f"truncated to {limit} chars"
+                return {"ok": True, "name": path.name, "size": path.stat().st_size,
+                        "ext": ext, "text": text, "note": note}
+            except Exception as e:
+                return {"ok": False, "error": f"docx extract error: {e}", "name": path.name}
+
+        return {"ok": False, "error": f"unsupported extension: {ext or 'none'}", "name": path.name}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "name": name}
