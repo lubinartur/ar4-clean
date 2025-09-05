@@ -53,6 +53,11 @@
             Settings
           </a>
         </nav>
+      <div class="sb-title">Chats</div>
+      <div id="sessions"
+           hx-get="/ui/sessions"
+           hx-trigger="load, every 10s"
+           hx-swap="innerHTML">Loading…</div>
 
         <div class="sb-title">Chats</div>
         <div id="sessions" hx-get="/ui/sessions" hx-trigger="load, every 10s" hx-swap="innerHTML">Loading…</div>

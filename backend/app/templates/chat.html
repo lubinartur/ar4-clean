@@ -112,7 +112,7 @@
       <div class="stage-head head-sub-row">
         <div class="head-sub">Личный локальный интеллект</div>
         <div class="head-actions">
-          <span id="health-badge" class="ws-badge">Loading…</span> <span id="profile-badge" class="ws-badge">Profile: …</span>
+          <span id="health-badge" class="ws-badge">Loading…</span>
 
           <!-- ▼ Dropdown: style -->
           <div class="style-dd">
@@ -434,25 +434,4 @@
     requestAnimationFrame(()=>{ scrollToBottom(true); });
   })();
   </script>
-{% endblock %}<script>
-(async function(){
-  async function refreshProfile(){
-    try{
-      const r = await fetch('/memory/profile');
-      const j = await r.json();
-      const badge = document.getElementById('profile-badge');
-      if(!badge) return;
-      const name = j.name || j.display_name || j.user_id || 'dev';
-      const goals = Array.isArray(j.goals) ? j.goals : [];
-      const done = goals.filter(g => String(g.status||'').toLowerCase()==='done' || Number(g.progress||0)>=1).length;
-      const total = goals.length;
-      badge.textContent = total ? `Profile: ${name} · goals ${done}/${total}` : `Profile: ${name}`;
-    } catch(e){
-      const badge = document.getElementById('profile-badge');
-      if(badge) badge.textContent = 'Profile: n/a';
-    }
-  }
-  window.addEventListener('load', refreshProfile);
-  setInterval(refreshProfile, 10000);
-})();
-</script>
+{% endblock %}
