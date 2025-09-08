@@ -30,6 +30,8 @@ except Exception:
 # App + CORS
 # -----------------------------------------------------------------------------
 app = FastAPI(title="AIr4", version="0.12.1")
+from .routes_chat import router as router_chat
+app.include_router(router_chat, prefix="/chat")
 
 app.add_middleware(
     CORSMiddleware,
@@ -828,3 +830,37 @@ async def ingest_preview(name: str):
         return {"ok": False, "error": f"unsupported extension: {ext or 'none'}", "name": path.name}
     except Exception as e:
         return {"ok": False, "error": str(e), "name": name}
+
+@app.get("/ui/ingest/queue", response_class=HTMLResponse)
+def get_ingest_queue_partial(request: Request):
+    from .memory.queue import get_ingest_queue
+    queue = get_ingest_queue()
+    return templates.TemplateResponse("partials/ingest_queue.html", {"request": request, "queue": queue})
+
+@app.get("/ui/chat/stream", response_class=HTMLResponse)
+@app.get("/ui/chat/stream", response_class=HTMLResponse)
+
+@app.get("/ui/chat/stream", response_class=HTMLResponse)
+def get_chat_stream(request: Request):
+    from .main import _SESSIONS
+    if not _SESSIONS:
+        messages = []
+    else:
+        messages = list(_SESSIONS.values())[-1].messages[-20:]
+    return templates.TemplateResponse("partials/chat_stream.html", {
+        "request": request,
+        "messages": messages
+    })
+from backend.app.routes_todos import todos_router
+app.include_router(todos_router)
+from fastapi import Request
+@app.get('/ui/summary', response_class=HTMLResponse)
+async def ui_summary(request: Request):
+    return templates.TemplateResponse('base.html', {'request': request, 'page': 'summary_content'})
+@app.get('/ui/summaries', response_class=HTMLResponse)
+async def ui_summaries(request: Request):
+    return templates.TemplateResponse('base.html', {'request': request, 'page': 'summary_content'})
+@app.get("/ui/settings", response_class=HTMLResponse)
+@app.get("/ui/settings", response_class=HTMLResponse)
+def ui_settings(request: Request):
+    return templates.TemplateResponse("settings.html", {"request": request})
