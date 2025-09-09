@@ -1,0 +1,25 @@
+
+.page-edges {
+  padding: 64px 80px;
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+.stage-title {
+  font-size: 36px;
+  font-weight: 700;
+  color: #ffffff;
+  margin-bottom: 10px;
+}
+
+.stage-sub {
+  font-size: 18px;
+  color: #9ba2b2;
+  margin-bottom: 40px;
+}
+
+.stage-body {
+  font-size: 16px;
+  color: #cccccc;
+  line-height: 1.6;
+}

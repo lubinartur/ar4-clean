@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Search · AIr4{% endblock %}
+
+{% block content %}
+<section class="stage">
+  <div class="page-edges">
+    <div class="stage-head">
+      <div class="stage-title">Search</div>
+      <div class="stage-sub">Поиск по памяти</div>
+    </div>
+    <form method="get" action="/ui/search" class="search-form">
+      <input type="text" name="q" placeholder="Введите запрос..." value="{{ q or '' }}" />
+      <button type="submit">🔍</button>
+    </form>
+
+    {% if results %}
+      <div class="search-results">
+        {% for r in results %}
+          <div class="result">
+            <div class="source">[{{ r.source_type|capitalize }}] {{ r.source_name }}</div>
+            <div class="snippet">{{ r.text }}</div>
+          </div>
+        {% endfor %}
+      </div>
+    {% elif q %}
+      <p>Ничего не найдено.</p>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

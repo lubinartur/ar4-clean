@@ -864,3 +864,10 @@ async def ui_summaries(request: Request):
 @app.get("/ui/settings", response_class=HTMLResponse)
 def ui_settings(request: Request):
     return templates.TemplateResponse("settings.html", {"request": request})
+
+from backend.app.routes_ui_search import router as ui_search_router
+app.include_router(ui_search_router)
+from backend.app.routes_ui_chat_htmx import router as chat_htmx_router
+app.include_router(chat_htmx_router)
+from backend.app.routes_memory import router as memory_router
+app.include_router(memory_router)

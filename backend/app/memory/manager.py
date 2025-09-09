@@ -191,3 +191,6 @@ class MemoryManager:
                 rows.append(obj)
         rows.sort(key=lambda x: x.get("ts", 0), reverse=True)
         return rows[:limit]
+memory = MemoryManager()
+memory = MemoryManager()
+memory = MemoryManager()

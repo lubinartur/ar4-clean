@@ -1,0 +1,7 @@
+<ul class="queue-list">
+  {% for item in queue %}
+    <li>{{ item.filename }} ({{ item.status }})</li>
+  {% else %}
+    <li><em>Очередь пуста</em></li>
+  {% endfor %}
+</ul>

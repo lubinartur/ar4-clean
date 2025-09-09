@@ -1,0 +1,12 @@
+{% for msg in messages %}
+  <article class="msg {{ msg.role }}">
+    <div class="avatar">{{ "🧠" if msg.role == "assistant" else "🙂" }}</div>
+    <div class="bubble">
+      <div class="meta">
+        <span class="role">{{ msg.role }}</span>
+        <span class="time">{{ msg.ts.strftime('%H:%M') if msg.ts else "" }}</span>
+      </div>
+      <div class="content">{{ msg.text }}</div>
+    </div>
+  </article>
+{% endfor %}

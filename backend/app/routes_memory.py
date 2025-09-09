@@ -7,6 +7,7 @@ from fastapi import APIRouter, Request, Query, Header
 from pydantic import BaseModel, Field
 
 from backend.app.retrieval import Retriever
+import time
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 
@@ -35,10 +36,13 @@ async def memory_add(
     mgr = _mgr(request)
     meta = {"tag": body.tag or "note", "kind": "note", "user_id": x_user or "dev"}
     # пробуем современные пути
-    if hasattr(mgr, "add_texts"):
-        mgr.add_texts([body.text], [meta])
-    elif hasattr(mgr, "collection"):
-        mgr.collection.add(documents=[body.text], metadatas=[meta])
+    if hasattr(mgr, "collection"):
+        mgr.collection.add(
+            ids=[f"note-{int(time.time())}"],
+            documents=[body.text],
+            metadatas=[meta]
+        )
+        return {"ok": True, "via": "collection.add", "meta": meta}
     elif hasattr(mgr, "add_text"):
         try:
             mgr.add_text(user_id=x_user or "dev", text=body.text, session_id=None, source=meta.get("kind"))
