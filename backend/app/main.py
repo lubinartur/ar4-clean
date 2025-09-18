@@ -871,3 +871,9 @@ from backend.app.routes_ui_chat_htmx import router as chat_htmx_router
 app.include_router(chat_htmx_router)
 from backend.app.routes_memory import router as memory_router
 app.include_router(memory_router)
+
+@app.get("/ui/test", response_class=HTMLResponse)
+async def ui_test(request: Request):
+    return templates.TemplateResponse("test.html", {"request": request})
+from .routes_ingest import router as ingest_router
+app.include_router(ingest_router)

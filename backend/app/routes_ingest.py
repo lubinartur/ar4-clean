@@ -45,7 +45,7 @@ async def ingest_file(
             "source_path": file.filename or os.path.basename(tmp_path),
         }
 
-        added = ingest_path(mgr, tmp_path, base_metadata=base_metadata)
+        added = ingest_path(mgr, tmp_path, base_metadata=base_metadata, chunk_size=512, overlap=64)
         return {"ok": True, "chunks": added, "file": file.filename}
     finally:
         try:
