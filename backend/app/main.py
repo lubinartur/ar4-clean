@@ -31,7 +31,7 @@ except Exception:
 # -----------------------------------------------------------------------------
 app = FastAPI(title="AIr4", version="0.12.1")
 from .routes_chat import router as router_chat
-app.include_router(router_chat, prefix="/chat")
+app.include_router(router_chat)
 
 app.add_middleware(
     CORSMiddleware,
@@ -515,7 +515,16 @@ async def ui_ingest(request: Request):
 
 @app.get('/ui/ingest/status', response_class=HTMLResponse)
 async def ui_ingest_status():
-    return HTMLResponse('<pre>OK: ingest status (stub)</pre>')
+    from pathlib import Path
+    inbox = Path("data/ingest/inbox")
+    inbox.mkdir(parents=True, exist_ok=True)
+
+    files = sorted([f.name for f in inbox.iterdir() if f.is_file() and f.name != "urls.txt"])
+    if not files:
+        return HTMLResponse('<pre class="ing-pre">📭 Пусто</pre>')
+
+    html = "<pre class='ing-pre'>\n" + "\n".join(f"📄 {f}" for f in files) + "\n</pre>"
+    return HTMLResponse(html)
 
 @app.post('/ui/ingest/commit-all', response_class=HTMLResponse)
 async def ui_ingest_commit_all():
