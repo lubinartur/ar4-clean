@@ -1,65 +1,77 @@
-(()=> {
-  const origFetch = window.fetch;
-  window.fetch = async (input, init = {}) => {
-    try {
-      const url = (typeof input === 'string') ? input : input.url;
-      const m = (init.method || 'GET').toUpperCase();
+(() => {
+  const ORIG_FETCH = window.fetch;
 
-      // перехватываем POST /chat с JSON-телом
-      const isChat = /\/chat$/.test(url) && m === 'POST' && init.body;
-      if (!isChat) return origFetch(input, init);
+  const box = document.createElement('div');
+  box.id = 'ar4-stream-overlay';
+  box.style.cssText = [
+    'position:fixed','left:12px','bottom:12px','z-index:99999',
+    'max-width:40vw','padding:8px 10px','border-radius:10px',
+    'font:12px/1.4 ui-monospace,monospace','color:#cbd5e1',
+    'background:rgba(0,0,0,.35)','backdrop-filter:blur(6px)',
+    'white-space:pre-wrap','pointer-events:none'
+  ].join(';');
+  document.addEventListener('DOMContentLoaded', () => document.body.appendChild(box));
 
-      let payload = {};
-      try { payload = JSON.parse(init.body); } catch {}
+  function tidy(s) {
+    return s
+      .replace(/\s+/g, ' ')           // схлопываем длинные пробелы
+      .replace(/\s([,.!?;:])/g, '$1') // убираем пробелы перед знаками
+      .trim();
+  }
 
-      // идём на /chat/stream
-      const res = await origFetch(url + '/stream', {
-        ...init,
-        headers: {'Content-Type':'application/json', ...(init.headers||{})},
-        body: JSON.stringify({
-          text: payload.text ?? payload.q ?? '',
-          session_id: payload.session_id
-        })
-      });
+  async function streamToReply(text) {
+    box.textContent = '';
+    const res = await fetch('/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+    if (!res.body) return '';
 
-      // если по какой-то причине нет stream-тела — просто пробуем как JSON
-      if (!res.body) {
-        const j = await res.json().catch(()=>({reply:''}));
-        return new Response(JSON.stringify(j), {headers:{'Content-Type':'application/json'}});
-      }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '', full = '';
 
-      // парсим text/event-stream и собираем финальный текст
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let acc = '', buf = '';
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, {stream:true});
-        let i;
-        while ((i = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, i).trim();
-          buf = buf.slice(i+1);
-          if (!line) continue;
-          if (line.startsWith('data:')) {
-            const data = line.slice(5).trim();
-            if (data === '[DONE]') { buf = ''; break; }
-            if (data && data !== '•') {
-              acc += data;
-              // тут позже повесим live-обновление пузыря
-              // window.dispatchEvent(new CustomEvent('air4-stream-chunk',{detail:data}));
-            }
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+
+      let cut;
+      while ((cut = buf.indexOf('\n\n')) >= 0) {
+        const frame = buf.slice(0, cut);   // ВАЖНО: без .trim() !
+        buf = buf.slice(cut + 2);
+
+        if (frame.startsWith('data:')) {
+          let payload = frame.slice(5);    // оставляем ровно то, что прислал сервер
+          if (payload.startsWith(' ')) payload = payload.slice(1); // опционально срезаем только один ведущий пробел после "data: "
+          if (payload === '[DONE]') { buf = ''; break; }
+          if (!payload.startsWith('[error]') && payload !== '') {
+            box.textContent += payload; // живой поток как есть
+            full += payload;            // буфер для карточки
           }
         }
       }
-
-      // возвращаем ответ в том же формате, который ждёт UI
-      return new Response(JSON.stringify({reply: acc}), {
-        headers:{'Content-Type':'application/json'}
-      });
-    } catch (e) {
-      console.error('shim-stream error', e);
-      return origFetch(input, init);
     }
+    return tidy(full);
+  }
+
+  window.fetch = async (url, opts = {}) => {
+    try {
+      const method = (opts.method || 'GET').toUpperCase();
+      const isChat  = typeof url === 'string' && url.endsWith('/chat')  && method === 'POST';
+      const isSend3 = typeof url === 'string' && url.endsWith('/send3') && method === 'POST';
+      if (isChat || isSend3) {
+        const body = (() => { try { return JSON.parse(opts.body || '{}'); } catch { return {}; } })();
+        const text = body.q || body.text || '';
+        if (text) {
+          const reply = await streamToReply(text).catch(() => '');
+          return new Response(JSON.stringify({ reply }), {
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+      }
+    } catch {}
+    return ORIG_FETCH(url, opts);
   };
 })();
