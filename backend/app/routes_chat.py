@@ -2,12 +2,14 @@ from fastapi import APIRouter, Request, Body
 from fastapi.responses import JSONResponse
 import httpx
 import json
-import os
-# --- Session storage helpers ---
 import time
 from pathlib import Path
-SESS_DIR = Path("data/sessions"); SESS_DIR.mkdir(parents=True, exist_ok=True)
+
+# --- Session storage helpers ---
+SESS_DIR = Path("data/sessions")
+SESS_DIR.mkdir(parents=True, exist_ok=True)
 INDEX_PATH = SESS_DIR / "index.json"
+
 
 def _bump_session(session_id: str):
     try:
@@ -15,24 +17,39 @@ def _bump_session(session_id: str):
     except Exception:
         idx = {}
     now = int(time.time())
-    rec = idx.get(session_id) or {"id": session_id, "title": "New session", "created_at": now, "updated_at": now, "turns": 0}
+    rec = idx.get(session_id) or {
+        "id": session_id,
+        "title": "New session",
+        "created_at": now,
+        "updated_at": now,
+        "turns": 0,
+    }
     rec["updated_at"] = now
+    rec["turns"] = rec.get("turns", 0) + 1
     idx[session_id] = rec
     INDEX_PATH.write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
 
+
 def _append_msg(session_id: str, role: str, content: str):
-    if not session_id: return
+    if not session_id:
+        return
     _bump_session(session_id)
     f = SESS_DIR / f"{session_id}.jsonl"
-    line = json.dumps({"ts": int(time.time()), "role": role, "content": content}, ensure_ascii=False)
+    line = json.dumps(
+        {"ts": int(time.time()), "role": role, "content": content},
+        ensure_ascii=False,
+    )
     with f.open("a", encoding="utf-8") as fh:
         fh.write(line + "\n")
+
+
 # --- end helpers ---
 
 router = APIRouter()
 
-AGENT_PROFILE = {"priorities": ["финрезерв 10k","форма","AIR4/портфолио","ясность"]}
-FACTS_PROFILE = {"work_time":"10:00–19:00","gym_time":"19:30"}
+AGENT_PROFILE = {"priorities": ["финрезерв 10k", "форма", "AIR4/портфолио", "ясность"]}
+FACTS_PROFILE = {"work_time": "10:00–19:00", "gym_time": "19:30"}
+
 
 @router.post("/chat")
 async def chat(request: Request, q: str | None = Body(None, embed=True)):
@@ -43,9 +60,11 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
         "Если вопрос — small talk, ответь 1–2 короткими фразами. "
         "Если просят план — дай 3–5 пунктов без моралей."
     )
+
     # AIR4: подстройка стиля и языка ответа из профиля
     try:
         from .routes_profile import load_profile  # type: ignore
+
         prof = load_profile("dev")
         prefs = prof.preferences or {}
     except Exception:
@@ -70,36 +89,71 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
         lang_hint = "Выбирай язык ответа под вопрос."
 
     system_preamble = system_preamble + " " + style_hint + " " + lang_hint
+
+    # нормализуем q: тело может быть в text/q/messages
     if not q:
         try:
             payload = await request.json()
         except Exception:
             payload = {}
-        for k in ("q","text","input","prompt","message"):
+        for k in ("q", "text", "input", "prompt", "message"):
             v = payload.get(k)
             if isinstance(v, str) and v.strip():
-                q = v.strip(); break
+                q = v.strip()
+                break
         if not q and isinstance(payload.get("messages"), list):
             for msg in reversed(payload["messages"]):
-                if isinstance(msg, dict) and isinstance(msg.get("content"), str) and msg["content"].strip():
-                    q = msg["content"].strip(); break
+                if (
+                    isinstance(msg, dict)
+                    and isinstance(msg.get("content"), str)
+                    and msg["content"].strip()
+                ):
+                    q = msg["content"].strip()
+                    break
         if not q:
-            return JSONResponse({"reply":"empty"}, status_code=200)
+            return JSONResponse({"reply": "empty"}, status_code=200)
 
     q_l = q.lower().strip()
-    if any(tok in q_l for tok in ["#morning_check", "план на день", "план на сегодня", "что у нас по плану", "что по плану", "утро", "morning"]):
+
+    # быстрые режимы (#morning_check, #evening_check, #week_check)
+    if any(
+        tok in q_l
+        for tok in [
+            "#morning_check",
+            "план на день",
+            "план на сегодня",
+            "что у нас по плану",
+            "что по плану",
+            "утро",
+            "morning",
+        ]
+    ):
         work = FACTS_PROFILE.get("work_time", "10:00–19:00")
         gym = FACTS_PROFILE.get("gym_time", "19:30")
         reply = (
             f"План:\n"
             f"— Работа {work}.\n"
-            f"— Зал {gym} (45–60 мин): жим 3×5, тяга 3×8, пресс 3×12.\n"
+            f"— Зал {gym} (45–60 мин): базовые упражнения.\n"
             f"— Вечер 20 мин: AIR4 — один микрошаг (экран/фикс), без перфекционизма.\n"
             f"Финансы: резерва +600€ на неделе."
         )
+        try:
+            _append_msg("ui", "user", q)
+            _append_msg("ui", "assistant", reply)
+        except Exception:
+            pass
         return {"reply": reply}
 
-    if any(tok in q_l for tok in ["#evening_check", "итог дня", "вечер", "вечером", "закрыть день"]):
+    if any(
+        tok in q_l
+        for tok in [
+            "#evening_check",
+            "итог дня",
+            "вечер",
+            "вечером",
+            "закрыть день",
+        ]
+    ):
         reply = (
             "Итог дня:\n"
             "— Работа — закрыто, движ есть.\n"
@@ -107,41 +161,79 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
             "— AIR4 — +1 шаг, фиксанул без перфекционизма.\n"
             "— В целом — не идеально, но стабильно. Завтра дожмём."
         )
+        try:
+            _append_msg("ui", "user", q)
+            _append_msg("ui", "assistant", reply)
+        except Exception:
+            pass
         return {"reply": reply}
 
-    if any(tok in q_l for tok in ["#week_check", "итоги недели", "неделя", "неделю закрыть"]):
+    if any(
+        tok in q_l
+        for tok in [
+            "#week_check",
+            "итоги недели",
+            "неделя",
+            "неделю закрыть",
+        ]
+    ):
         reply = (
             "Неделя:\n"
             "— Финансы: +620€ (по плану).\n"
             "— Тренировки: 3 / 3 — стабильно.\n"
-            "— AIR4: 4 шага — идёт прогресс.\n"
+            "— AIR4: несколько шагов — идёт прогресс.\n"
             "— Общий вывод: ровно, без спешки, но в росте.\n"
             "— Следующая неделя — добавить 1 новый шаг или идею."
         )
+        try:
+            _append_msg("ui", "user", q)
+            _append_msg("ui", "assistant", reply)
+        except Exception:
+            pass
         return {"reply": reply}
 
     try:
+        # логируем запрос пользователя в сессию "ui"
+        try:
+            _append_msg("ui", "user", q)
+        except Exception:
+            pass
+
         # --- RAG auto-context ---
         rag_ctx = ""
         try:
             async with httpx.AsyncClient(timeout=10.0) as c:
-                r = await c.get("http://127.0.0.1:8000/memory/search", params={"q": q, "k": 3})
+                r = await c.get(
+                    "http://127.0.0.1:8000/memory/search",
+                    params={"q": q, "k": 3},
+                )
                 js = r.json()
                 hits = js.get("results", [])
-                if hits and isinstance(hits[0], dict) and hits[0].get("text") and hits[0].get("score", 0) >= 0.45:
+                if (
+                    hits
+                    and isinstance(hits[0], dict)
+                    and hits[0].get("text")
+                    and hits[0].get("score", 0) >= 0.45
+                ):
                     rag_ctx = hits[0]["text"][:1200]
         except Exception:
             rag_ctx = ""
+
         user_payload = q if not rag_ctx else f"{q}\n\n[MEMORY]\n{rag_ctx}"
-        # --- call LLM ---
+
+        # --- call LLM via Ollama chat ---
         async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream("POST", "http://localhost:11434/api/chat", json={
-                "model": "mistral",
-                "messages": [
-                    {"role": "system", "content": system_preamble},
-                    {"role": "user", "content": user_payload}
-                ]
-            }) as res:
+            async with client.stream(
+                "POST",
+                "http://localhost:11434/api/chat",
+                json={
+                    "model": "mistral",
+                    "messages": [
+                        {"role": "system", "content": system_preamble},
+                        {"role": "user", "content": user_payload},
+                    ],
+                },
+            ) as res:
                 chunks = []
                 async for line in res.aiter_lines():
                     if not line.strip():
@@ -149,10 +241,60 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
                     try:
                         json_line = json.loads(line)
                         content = json_line.get("message", {}).get("content", "")
-                        chunks.append(content)
+                        if content:
+                            chunks.append(content)
                     except Exception:
                         continue
                 answer = "".join(chunks)
-                return {"reply": answer, "rag_ctx_head": (rag_ctx or "")[:200]}
+
+        try:
+            _append_msg("ui", "assistant", answer)
+        except Exception:
+            pass
+
+        return {"reply": answer, "rag_ctx_head": (rag_ctx or "")[:200]}
     except Exception as e:
         return {"reply": f"echo: {q} (ollama failed: {e})"}
+
+
+@router.get("/sessions")
+def list_sessions():
+    """
+    AIR4: список сессий для UI.
+    Читаем index.json и возвращаем отсортированный список.
+    """
+    try:
+        idx = json.loads(INDEX_PATH.read_text(encoding="utf-8")) if INDEX_PATH.exists() else {}
+    except Exception:
+        idx = {}
+
+    sessions = list(idx.values())
+    sessions.sort(key=lambda r: r.get("updated_at", 0), reverse=True)
+    return {"ok": True, "sessions": sessions}
+
+
+@router.get("/sessions/{session_id}")
+def get_session(session_id: str):
+    """
+    AIR4: вернуть сообщения по сессии.
+    Берём JSONL data/sessions/<session_id>.jsonl
+    """
+    f = SESS_DIR / f"{session_id}.jsonl"
+    if not f.exists():
+        return {"ok": True, "messages": []}
+
+    messages = []
+    try:
+        with f.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    messages.append(json.loads(line))
+                except Exception:
+                    continue
+    except Exception as e:
+        return {"ok": False, "error": str(e), "messages": []}
+
+    return {"ok": True, "messages": messages}
