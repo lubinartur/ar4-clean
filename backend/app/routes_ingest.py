@@ -176,3 +176,36 @@ async def ingest_process(request: Request) -> Dict[str, Any]:
         errors.append({"queue_write": str(e)})
 
     return {"ok": True, "processed": processed, "errors": errors, "store": str(store)}
+
+
+from fastapi import UploadFile, File, Request, Query
+from pathlib import Path as _Path
+import httpx as _httpx
+
+@router.post("/ingest/file")
+async def ingest_file(request: Request, file: UploadFile = File(...), tag: str = Query(default="ui-upload")):
+    """
+    Save -> commit -> process. Возвращает {"ok":true, digest, stored,...}
+    """
+    inbox = _Path("data/ingest/inbox")
+    inbox.mkdir(parents=True, exist_ok=True)
+
+    name = _Path(file.filename).name
+    dst = inbox / name
+
+    with dst.open("wb") as fh:
+        while True:
+            chunk = await file.read(1024*1024)
+            if not chunk:
+                break
+            fh.write(chunk)
+
+    async with _httpx.AsyncClient(timeout=30.0) as c:
+        r_commit = await c.post("http://127.0.0.1:8000/ingest/commit", params={"name": name, "tag": request.query_params.get("tag","ui")})
+        try:
+            commit_json = r_commit.json()
+        except Exception:
+            commit_json = {"ok": False, "error": f"commit bad response: {r_commit.text}"}
+        await c.post("http://127.0.0.1:8000/ingest/process")
+
+    return {"ok": True, "saved": str(dst), **commit_json}
