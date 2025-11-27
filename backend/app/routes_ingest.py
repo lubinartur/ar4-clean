@@ -209,3 +209,29 @@ async def ingest_file(request: Request, file: UploadFile = File(...), tag: str =
         await c.post("http://127.0.0.1:8000/ingest/process")
 
     return {"ok": True, "saved": str(dst), **commit_json}
+
+@router.get("/recent")
+def ingest_recent(limit: int = 10):
+    """
+    AIR4: вернуть последние загруженные файлы из inbox.
+    Основа для UI-индикатора "последние файлы".
+    """
+    inbox = _Path("data/ingest/inbox")
+    inbox.mkdir(parents=True, exist_ok=True)
+
+    files = sorted(
+        [p for p in inbox.iterdir() if p.is_file()],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+    items = []
+    for p in files[: max(1, min(limit, 50))]:
+        st = p.stat()
+        items.append({
+            "name": p.name,
+            "size": st.st_size,
+            "mtime": st.st_mtime,
+        })
+
+    return {"ok": True, "files": items}

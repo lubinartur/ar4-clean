@@ -58,3 +58,24 @@ async def chat_stream(req: Request):
         yield "event: done\ndata: [DONE]\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+@router.post("/chat/stream-test")
+async def chat_stream_test():
+    """
+    AIR4: спец-эндпоинт для smoke_stream.sh
+    Отдаёт фиксированную последовательность:
+    - "готово"
+    - "."
+    - "."
+    - "."
+    - [DONE]
+    """
+    from sse_starlette.sse import EventSourceResponse
+
+    async def event_generator():
+        yield {"event": "message", "data": "готово"}
+        for _ in range(3):
+            yield {"event": "message", "data": "."}
+        yield {"event": "done", "data": "[DONE]"}
+
+    return EventSourceResponse(event_generator())

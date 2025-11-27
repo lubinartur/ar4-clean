@@ -75,3 +75,69 @@
     return ORIG_FETCH(url, opts);
   };
 })();
+
+// AIR4: SSE status banner + EventSource wrapper
+(function () {
+  if (typeof window === "undefined" || !window.EventSource) return;
+
+  const NativeEventSource = window.EventSource;
+
+  function ensureAir4Banner() {
+    let bar = document.getElementById("air4-stream-status");
+    if (!bar) {
+      bar = document.createElement("div");
+      bar.id = "air4-stream-status";
+      bar.textContent = "⚠️ Ошибка соединения с AIR4. Переподключаюсь…";
+      bar.style.position = "fixed";
+      bar.style.top = "0";
+      bar.style.left = "0";
+      bar.style.right = "0";
+      bar.style.zIndex = "9999";
+      bar.style.padding = "6px 12px";
+      bar.style.fontSize = "13px";
+      bar.style.fontFamily = "system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
+      bar.style.textAlign = "center";
+      bar.style.background = "#b91c1c";
+      bar.style.color = "#fff";
+      bar.style.display = "none";
+
+      document.addEventListener("DOMContentLoaded", function () {
+        if (!document.body.contains(bar)) {
+          document.body.appendChild(bar);
+        }
+      });
+
+      if (document.body && !document.body.contains(bar)) {
+        document.body.appendChild(bar);
+      }
+    }
+    return bar;
+  }
+
+  function showAir4Banner() {
+    const bar = ensureAir4Banner();
+    if (bar) bar.style.display = "block";
+  }
+
+  function hideAir4Banner() {
+    const bar = document.getElementById("air4-stream-status");
+    if (bar) bar.style.display = "none";
+  }
+
+  function Air4EventSource(url, config) {
+    const es = new NativeEventSource(url, config);
+
+    es.addEventListener("open", function () {
+      hideAir4Banner();
+    });
+
+    es.addEventListener("error", function () {
+      showAir4Banner();
+    });
+
+    return es;
+  }
+
+  Air4EventSource.prototype = NativeEventSource.prototype;
+  window.EventSource = Air4EventSource;
+})();
