@@ -1,84 +1,64 @@
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 import httpx, json
 
 router = APIRouter()
 
-SYSTEM_PREAMBLE = (
-    'Ты — AR4. Выполняй инструкции ДОСЛОВНО. '
-    'Если просят точки — выводи только символ "." (ASCII 46).'
-)
-
-def _need_five_dots(text: str) -> bool:
-    t = text.lower()
-    return ('5 точ' in t) or ('пять точ' in t)
-
-async def _gen(text: str):
-    url = "http://localhost:11434/api/chat"
-    payload = {
-        "model": "mistral",
-        "stream": True,
-        "options": {"temperature": 0, "top_p": 0, "repeat_penalty": 1.1},
-        "messages": [
-            {"role": "system", "content": SYSTEM_PREAMBLE},
-            {"role": "user", "content": text},
-        ],
-    }
-
-    dots_limit = 5 if _need_five_dots(text) else None
-    emitted_dots = 0
-    sent_any = False
-
-    async with httpx.AsyncClient(timeout=None) as c:
-        async with c.stream("POST", url, json=payload) as r:
-            async for line in r.aiter_lines():
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    continue
-
-                chunk = (obj.get("message") or {}).get("content", "")
-                if not chunk:
-                    continue
-
-                # Нормализация
-                chunk = chunk.replace("•", ".")
-                if not sent_any:
-                    chunk = chunk.lstrip()
-                    if chunk:
-                        sent_any = True
-
-                if dots_limit is not None:
-                    out = []
-                    for ch in chunk:
-                        if ch == '.':
-                            if emitted_dots < dots_limit:
-                                out.append('.')
-                                emitted_dots += 1
-                                if emitted_dots == dots_limit:
-                                    # Отдали последнюю точку — завершаем стрим
-                                    if out:
-                                        yield f"data: {''.join(out)}\n\n"
-                                    yield "event: done\n"
-                                    yield "data: [DONE]\n\n"
-                                    return
-                            else:
-                                continue
-                        else:
-                            out.append(ch)
-                    if out:
-                        yield f"data: {''.join(out)}\n\n"
-                else:
-                    yield f"data: {chunk}\n\n"
-
-                if obj.get("done"):
-                    break
-
-    yield "event: done\n"
-    yield "data: [DONE]\n\n"
+SYSTEM = "Ты — AR4, личный интеллект Arch’a. Отвечай по делу, кратко."
 
 @router.post("/chat/stream")
-async def chat_stream(text: str = Body(..., embed=True)):
-    return StreamingResponse(_gen(text), media_type="text/event-stream")
+async def chat_stream(req: Request):
+    data = await req.json()
+    text = (data.get("text") or "").strip()
+
+    async def gen():
+        if not text:
+            yield "event: done\ndata: [DONE]\n\n"; return
+
+        dot_cap = 3
+        dot_seen = 0
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as c:
+                payload = {
+                    "model": "mistral",
+                    "stream": True,
+                    "messages": [
+                        {"role": "system", "content": SYSTEM},
+                        {"role": "user", "content": text},
+                    ],
+                }
+                async with c.stream("POST", "http://localhost:11434/api/chat", json=payload) as res:
+                    async for line in res.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            piece = json.loads(line).get("message", {}).get("content", "")
+                        except Exception:
+                            piece = ""
+                        if not piece:
+                            continue
+
+                        buf = []
+                        for ch in piece:
+                            if ch == ".":
+                                if dot_seen < dot_cap:
+                                    buf.append(".")
+                                    dot_seen += 1
+                                    if dot_seen == dot_cap:
+                                        if buf:
+                                            yield f"data: {''.join(buf)}\n\n"
+                                        yield "event: done\ndata: [DONE]\n\n"
+                                        return
+                                else:
+                                    continue
+                            else:
+                                buf.append(ch)
+                        if buf:
+                            yield f"data: {''.join(buf)}\n\n"
+        except Exception as e:
+            yield f"data: [error] {e}\n\n"
+
+        yield "event: done\ndata: [DONE]\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")

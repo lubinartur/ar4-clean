@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 import httpx
 import json
 import os
+from backend.app.main import agent_profile, facts_profile
 # --- Session storage helpers ---
 import time
 from pathlib import Path
