@@ -40,3 +40,14 @@ storage/
 backend/app/storage/
 models/
 *.bak
+# local artifacts
+.DS_Store
+backups/**/*.tar.gz
+storage/**
+data/ingest/store/**
+data/profile/**
+# throwaway test files
+drop_test.txt
+ui_*.txt
+rag.md
+rag_check.md
