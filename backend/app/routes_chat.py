@@ -3,7 +3,6 @@ from fastapi.responses import JSONResponse
 import httpx
 import json
 import os
-from backend.app.main import agent_profile, facts_profile
 # --- Session storage helpers ---
 import time
 from pathlib import Path
@@ -32,6 +31,9 @@ def _append_msg(session_id: str, role: str, content: str):
 
 router = APIRouter()
 
+AGENT_PROFILE = {"priorities": ["финрезерв 10k","форма","AIR4/портфолио","ясность"]}
+FACTS_PROFILE = {"work_time":"10:00–19:00","gym_time":"19:30"}
+
 @router.post("/chat")
 async def chat(request: Request, q: str | None = Body(None, embed=True)):
     system_preamble = (
@@ -41,6 +43,33 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
         "Если вопрос — small talk, ответь 1–2 короткими фразами. "
         "Если просят план — дай 3–5 пунктов без моралей."
     )
+    # AIR4: подстройка стиля и языка ответа из профиля
+    try:
+        from .routes_profile import load_profile  # type: ignore
+        prof = load_profile("dev")
+        prefs = prof.preferences or {}
+    except Exception:
+        prefs = {}
+    reply_style = prefs.get("reply_style", "short")
+    language = prefs.get("language", "ru")
+
+    style_hint = ""
+    if reply_style == "short":
+        style_hint = "Отвечай максимально кратко: 2–4 коротких предложения или список из 3–5 пунктов."
+    elif reply_style == "detailed":
+        style_hint = "Отвечай подробно: можно раскрывать детали и использовать списки, но без воды."
+    else:
+        style_hint = "Отвечай развёрнуто, но без воды: 4–8 предложений или список из 3–7 пунктов."
+
+    lang_hint = ""
+    if language == "ru":
+        lang_hint = "Отвечай по-русски."
+    elif language == "en":
+        lang_hint = "Answer in English."
+    else:
+        lang_hint = "Выбирай язык ответа под вопрос."
+
+    system_preamble = system_preamble + " " + style_hint + " " + lang_hint
     if not q:
         try:
             payload = await request.json()
@@ -59,8 +88,8 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
 
     q_l = q.lower().strip()
     if any(tok in q_l for tok in ["#morning_check", "план на день", "план на сегодня", "что у нас по плану", "что по плану", "утро", "morning"]):
-        work = facts_profile.get("work_time", "10:00–19:00")
-        gym = facts_profile.get("gym_time", "19:30")
+        work = FACTS_PROFILE.get("work_time", "10:00–19:00")
+        gym = FACTS_PROFILE.get("gym_time", "19:30")
         reply = (
             f"План:\n"
             f"— Работа {work}.\n"
