@@ -1,23 +1,38 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
-import httpx, json
+import httpx, json, re, asyncio
 
 router = APIRouter()
 
-SYSTEM = "Ты — AR4, личный интеллект Arch’a. Отвечай по делу, кратко."
+SYSTEM = (
+    "Ты — AR4, личный интеллект Arch’a. "
+    "Отвечай по делу, кратко. Для стрима присылай текст по кускам."
+)
 
 @router.post("/chat/stream")
 async def chat_stream(req: Request):
     data = await req.json()
     text = (data.get("text") or "").strip()
 
+    # Вытащим N из «… затем N точек …»
+    m = re.search(r'(\d+)\s*точ', text, re.I)
+    target = int(m.group(1)) if m else None
+
     async def gen():
         if not text:
-            yield "event: done\ndata: [DONE]\n\n"; return
+            yield "event: done\ndata: [DONE]\n\n"
+            return
 
-        dot_cap = 3
-        dot_seen = 0
+        # Детерминированный режим: «готово» + N точек
+        if target and re.search(r'готово', text, re.I):
+            yield "data: Готово\n\n"
+            for _ in range(target):
+                yield "data: .\n\n"
+                await asyncio.sleep(0.05)
+            yield "event: done\ndata: [DONE]\n\n"
+            return
 
+        # Обычный прокси-стрим к Ollama
         try:
             async with httpx.AsyncClient(timeout=60.0) as c:
                 payload = {
@@ -36,29 +51,10 @@ async def chat_stream(req: Request):
                             piece = json.loads(line).get("message", {}).get("content", "")
                         except Exception:
                             piece = ""
-                        if not piece:
-                            continue
-
-                        buf = []
-                        for ch in piece:
-                            if ch == ".":
-                                if dot_seen < dot_cap:
-                                    buf.append(".")
-                                    dot_seen += 1
-                                    if dot_seen == dot_cap:
-                                        if buf:
-                                            yield f"data: {''.join(buf)}\n\n"
-                                        yield "event: done\ndata: [DONE]\n\n"
-                                        return
-                                else:
-                                    continue
-                            else:
-                                buf.append(ch)
-                        if buf:
-                            yield f"data: {''.join(buf)}\n\n"
+                        if piece:
+                            yield f"data: {piece}\n\n"
         except Exception as e:
             yield f"data: [error] {e}\n\n"
-
         yield "event: done\ndata: [DONE]\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")
