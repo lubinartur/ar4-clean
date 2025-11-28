@@ -11,7 +11,7 @@ SESS_DIR.mkdir(parents=True, exist_ok=True)
 INDEX_PATH = SESS_DIR / "index.json"
 
 
-def _bump_session(session_id: str):
+def _bump_session(session_id: str, title: str | None = None):
     try:
         idx = json.loads(INDEX_PATH.read_text(encoding="utf-8")) if INDEX_PATH.exists() else {}
     except Exception:
@@ -24,8 +24,12 @@ def _bump_session(session_id: str):
         "updated_at": now,
         "turns": 0,
     }
+    if title:
+        # обновляем заголовок только если он ещё дефолтный
+        if not rec.get("title") or rec.get("title") == "New session":
+            rec["title"] = title
     rec["updated_at"] = now
-    rec["turns"] = rec.get("turns", 0) + 1
+    rec["turns"] = int(rec.get("turns", 0)) + 1
     idx[session_id] = rec
     INDEX_PATH.write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
 
@@ -33,7 +37,14 @@ def _bump_session(session_id: str):
 def _append_msg(session_id: str, role: str, content: str):
     if not session_id:
         return
-    _bump_session(session_id)
+    title = None
+    if role == "user":
+        # первая строка сообщения, не длиннее 80 символов
+        first_line = (content or "").strip().splitlines()[0] if isinstance(content, str) else ""
+        snippet = first_line[:80].strip()
+        if snippet:
+            title = snippet
+    _bump_session(session_id, title)
     f = SESS_DIR / f"{session_id}.jsonl"
     line = json.dumps(
         {"ts": int(time.time()), "role": role, "content": content},
@@ -62,15 +73,20 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
     )
 
     # AIR4: подстройка стиля и языка ответа из профиля
+    prefs: dict = {}
     try:
-        from .routes_profile import load_profile  # type: ignore
-
-        prof = load_profile("dev")
-        prefs = prof.preferences or {}
+        async with httpx.AsyncClient(timeout=2.0) as c:
+            r_prof = await c.get(
+                "http://127.0.0.1:8000/memory/profile",
+                params={"user_id": "dev"},
+            )
+            pj = r_prof.json()
+            if isinstance(pj, dict):
+                prefs = pj.get("preferences", {}) or {}
     except Exception:
         prefs = {}
-    reply_style = prefs.get("reply_style", "short")
-    language = prefs.get("language", "ru")
+    reply_style = str(prefs.get("reply_style", "short") or "").lower()
+    language = str(prefs.get("language", "ru") or "").lower()
 
     style_hint = ""
     if reply_style == "short":
@@ -90,7 +106,8 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
 
     system_preamble = system_preamble + " " + style_hint + " " + lang_hint
 
-    # нормализуем q: тело может быть в text/q/messages
+    # нормализуем q + вынимаем payload
+    payload = {}
     if not q:
         try:
             payload = await request.json()
@@ -112,6 +129,17 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
                     break
         if not q:
             return JSONResponse({"reply": "empty"}, status_code=200)
+
+    # session_id из payload (если есть), иначе "ui"
+    sess_id = "ui"
+    if isinstance(payload, dict):
+        sid = (
+            payload.get("session_id")
+            or payload.get("session")
+            or payload.get("sid")
+        )
+        if isinstance(sid, str) and sid.strip():
+            sess_id = sid.strip()
 
     q_l = q.lower().strip()
 
@@ -138,8 +166,8 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
             f"Финансы: резерва +600€ на неделе."
         )
         try:
-            _append_msg("ui", "user", q)
-            _append_msg("ui", "assistant", reply)
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
         except Exception:
             pass
         return {"reply": reply}
@@ -162,8 +190,8 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
             "— В целом — не идеально, но стабильно. Завтра дожмём."
         )
         try:
-            _append_msg("ui", "user", q)
-            _append_msg("ui", "assistant", reply)
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
         except Exception:
             pass
         return {"reply": reply}
@@ -186,40 +214,48 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
             "— Следующая неделя — добавить 1 новый шаг или идею."
         )
         try:
-            _append_msg("ui", "user", q)
-            _append_msg("ui", "assistant", reply)
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
         except Exception:
             pass
         return {"reply": reply}
 
     try:
-        # логируем запрос пользователя в сессию "ui"
+        # логируем запрос пользователя в текущую сессию
         try:
-            _append_msg("ui", "user", q)
+            _append_msg(sess_id, "user", q)
         except Exception:
             pass
 
-        # --- RAG auto-context ---
+        # --- RAG auto‑context (safe mode) ---
         rag_ctx = ""
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as c:
-                r = await c.get(
-                    "http://127.0.0.1:8000/memory/search",
-                    params={"q": q, "k": 3},
-                )
-                js = r.json()
-                hits = js.get("results", [])
-                if (
-                    hits
-                    and isinstance(hits[0], dict)
-                    and hits[0].get("text")
-                    and hits[0].get("score", 0) >= 0.45
-                ):
-                    rag_ctx = hits[0]["text"][:1200]
-        except Exception:
-            rag_ctx = ""
+        use_rag = len(q.split()) >= 4  # RAG only for meaningful queries
 
-        user_payload = q if not rag_ctx else f"{q}\n\n[MEMORY]\n{rag_ctx}"
+        if use_rag:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as c:
+                    r = await c.get(
+                        "http://127.0.0.1:8000/memory/search",
+                        params={"q": q, "k": 3},
+                    )
+                    js = r.json()
+                    hits = js.get("results", [])
+                    # More strict score threshold
+                    if (
+                        hits
+                        and isinstance(hits[0], dict)
+                        and hits[0].get("text")
+                        and hits[0].get("score", 0) >= 0.60
+                    ):
+                        rag_ctx = hits[0]["text"][:1200]
+            except Exception:
+                rag_ctx = ""
+
+        # user payload (RAG only if available)
+        if rag_ctx:
+            user_payload = f"{q}\n\n[MEMORY]\n{rag_ctx}"
+        else:
+            user_payload = q
 
         # --- call LLM via Ollama chat ---
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -248,7 +284,7 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
                 answer = "".join(chunks)
 
         try:
-            _append_msg("ui", "assistant", answer)
+            _append_msg(sess_id, "assistant", answer)
         except Exception:
             pass
 
@@ -298,3 +334,32 @@ def get_session(session_id: str):
         return {"ok": False, "error": str(e), "messages": []}
 
     return {"ok": True, "messages": messages}
+
+
+@router.post("/sessions/{session_id}/clear")
+def clear_session(session_id: str):
+    """
+    AIR4: очистить историю сессии.
+    Удаляет JSONL-файл и запись из index.json.
+    """
+    # удалить файл истории
+    f = SESS_DIR / f"{session_id}.jsonl"
+    if f.exists():
+        try:
+            f.unlink()
+        except Exception:
+            pass
+
+    # обновить индекс
+    try:
+        idx = json.loads(INDEX_PATH.read_text(encoding="utf-8")) if INDEX_PATH.exists() else {}
+    except Exception:
+        idx = {}
+    if session_id in idx:
+        idx.pop(session_id, None)
+        try:
+            INDEX_PATH.write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    return {"ok": True, "session_id": session_id}

@@ -16,7 +16,7 @@ SESS_DIR.mkdir(parents=True, exist_ok=True)
 INDEX_PATH = SESS_DIR / "index.json"
 
 
-def _bump_session(session_id: str) -> None:
+def _bump_session(session_id: str, title: str | None = None) -> None:
     try:
         idx = json.loads(INDEX_PATH.read_text(encoding="utf-8")) if INDEX_PATH.exists() else {}
     except Exception:
@@ -29,15 +29,27 @@ def _bump_session(session_id: str) -> None:
         "updated_at": now,
         "turns": 0,
     }
+    if title:
+        # только если заголовок ещё дефолтный
+        if not rec.get("title") or rec.get("title") == "New session":
+            rec["title"] = title
     rec["updated_at"] = now
     rec["turns"] = int(rec.get("turns", 0)) + 1
+    idx[session_id] = rec
     INDEX_PATH.write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
 
 
 def _append_msg(session_id: str | None, role: str, content: str) -> None:
     if not session_id:
         return
-    _bump_session(session_id)
+    title = None
+    if role == "user":
+        # первая строка сообщения, не длиннее 80 символов
+        first_line = (content or "").strip().splitlines()[0] if isinstance(content, str) else ""
+        snippet = first_line[:80].strip()
+        if snippet:
+            title = snippet
+    _bump_session(session_id, title)
     f = SESS_DIR / f"{session_id}.jsonl"
     line = json.dumps(
         {"ts": int(time.time()), "role": role, "content": content},
