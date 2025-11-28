@@ -1,81 +1,136 @@
+from __future__ import annotations
+
 from fastapi import APIRouter, Request
-from fastapi.responses import StreamingResponse
-import httpx, json, re, asyncio
+from sse_starlette.sse import EventSourceResponse
+import httpx
+import json
+import time
+from pathlib import Path
+from typing import AsyncGenerator
 
 router = APIRouter()
 
-SYSTEM = (
-    "Ты — AR4, личный интеллект Arch’a. "
-    "Отвечай по делу, кратко. Для стрима присылай текст по кускам."
-)
+# --- Session storage helpers (локальные, без импортов из routes_chat) ---
+SESS_DIR = Path("data/sessions")
+SESS_DIR.mkdir(parents=True, exist_ok=True)
+INDEX_PATH = SESS_DIR / "index.json"
 
+
+def _bump_session(session_id: str) -> None:
+    try:
+        idx = json.loads(INDEX_PATH.read_text(encoding="utf-8")) if INDEX_PATH.exists() else {}
+    except Exception:
+        idx = {}
+    now = int(time.time())
+    rec = idx.get(session_id) or {
+        "id": session_id,
+        "title": "New session",
+        "created_at": now,
+        "updated_at": now,
+        "turns": 0,
+    }
+    rec["updated_at"] = now
+    rec["turns"] = int(rec.get("turns", 0)) + 1
+    INDEX_PATH.write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
+
+
+def _append_msg(session_id: str | None, role: str, content: str) -> None:
+    if not session_id:
+        return
+    _bump_session(session_id)
+    f = SESS_DIR / f"{session_id}.jsonl"
+    line = json.dumps(
+        {"ts": int(time.time()), "role": role, "content": content},
+        ensure_ascii=False,
+    )
+    with f.open("a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+
+
+# --- Обёртка: внутренний вызов /chat ---
+async def _call_internal_chat(text: str, session_id: str | None) -> str:
+    payload: dict[str, object] = {"text": text}
+    if session_id:
+        payload["session_id"] = session_id
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post("http://127.0.0.1:8000/chat", json=payload)
+
+    try:
+        js = r.json()
+    except Exception:
+        return r.text
+
+    if isinstance(js, dict):
+        return str(js.get("reply", ""))
+    return str(js)
+
+
+# --- Основной SSE-стрим ---
 @router.post("/chat/stream")
-async def chat_stream(req: Request):
-    data = await req.json()
-    text = (data.get("text") or "").strip()
+async def chat_stream(request: Request):
+    """
+    Стрим поверх /chat:
+    - читает text + session_id из тела
+    - логирует user/assistant в data/sessions/*.jsonl
+    - стримит ответ по символам
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
 
-    # Вытащим N из «… затем N точек …»
-    m = re.search(r'(\d+)\s*точ', text, re.I)
-    target = int(m.group(1)) if m else None
+    raw_text = payload.get("text") or payload.get("q") or ""
+    text = raw_text.strip() if isinstance(raw_text, str) else ""
+    session_id = (
+        payload.get("session_id")
+        or payload.get("session")
+        or payload.get("sid")
+        or "ui"
+    )
 
-    async def gen():
-        if not text:
-            yield "event: done\ndata: [DONE]\n\n"
-            return
+    if not text:
+        async def empty_gen() -> AsyncGenerator[str, None]:
+            yield "data: \n\n"
+            yield "data: [DONE]\n\n"
+        return EventSourceResponse(empty_gen())
 
-        # Детерминированный режим: «готово» + N точек
-        if target and re.search(r'готово', text, re.I):
-            yield "data: Готово\n\n"
-            for _ in range(target):
-                yield "data: .\n\n"
-                await asyncio.sleep(0.05)
-            yield "event: done\ndata: [DONE]\n\n"
-            return
+    # логируем вход пользователя
+    _append_msg(str(session_id), "user", text)
 
-        # Обычный прокси-стрим к Ollama
-        try:
-            async with httpx.AsyncClient(timeout=60.0) as c:
-                payload = {
-                    "model": "mistral",
-                    "stream": True,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM},
-                        {"role": "user", "content": text},
-                    ],
-                }
-                async with c.stream("POST", "http://localhost:11434/api/chat", json=payload) as res:
-                    async for line in res.aiter_lines():
-                        if not line.strip():
-                            continue
-                        try:
-                            piece = json.loads(line).get("message", {}).get("content", "")
-                        except Exception:
-                            piece = ""
-                        if piece:
-                            yield f"data: {piece}\n\n"
-        except Exception as e:
-            yield f"data: [error] {e}\n\n"
-        yield "event: done\ndata: [DONE]\n\n"
+    # получаем полный ответ от /chat
+    reply = await _call_internal_chat(text, str(session_id))
+    if not isinstance(reply, str):
+        reply = str(reply)
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    async def event_gen() -> AsyncGenerator[str, None]:
+        acc = ""
+        for ch in reply:
+            acc += ch
+            # UI склеит всё в одну строку
+            yield f"data: {ch}\n\n"
+        # после окончания — логируем ассистента и шлём [DONE]
+        _append_msg(str(session_id), "assistant", acc)
+        yield "data: [DONE]\n\n"
 
+    return EventSourceResponse(event_gen())
+
+
+# --- Тестовый эндпоинт для scripts/smoke_stream.sh ---
 @router.post("/chat/stream-test")
 async def chat_stream_test():
     """
-    AIR4: спец-эндпоинт для smoke_stream.sh
-    Отдаёт фиксированную последовательность:
-    - "готово"
-    - "."
-    - "."
-    - "."
-    - [DONE]
+    Возвращает ровно:
+      data: готово
+      data: .
+      data: .
+      data: .
+      data: [DONE]
     """
-    from sse_starlette.sse import EventSourceResponse
-
-    async def event_generator():
-        yield {"event": "message", "data": "готово"}
+    async def gen() -> AsyncGenerator[str, None]:
+        yield "data: готово\n\n"
         for _ in range(3):
-            yield {"event": "message", "data": "."}
-        yield {"event": "done", "data": "[DONE]"}
+            yield "data: .\n\n"
+        yield "data: [DONE]\n\n"
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(gen())
