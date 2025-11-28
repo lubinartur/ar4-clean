@@ -6,10 +6,18 @@ import { Send, Mic, Paperclip, BrainCircuit, Cpu, Sparkles } from 'lucide-react'
 interface ChatProps {
     initialQuery?: string;
     clearInitialQuery?: () => void;
+    activeSessionId?: string | null;
 }
 
-const Chat: React.FC<ChatProps> = ({ initialQuery, clearInitialQuery }) => {
-  const [messages, setMessages] = useState<Message[]>([
+const Chat: React.FC<ChatProps> = ({ initialQuery, clearInitialQuery, activeSessionId }) => {
+  const [input, setInput] = useState('');
+  const [isThinking, setIsThinking] = useState(false);
+  const [routerState, setRouterState] = useState<RouterDecision | null>(null);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const defaultWelcome: Message[] = [
     {
       id: 'init',
       role: 'assistant',
@@ -18,11 +26,9 @@ const Chat: React.FC<ChatProps> = ({ initialQuery, clearInitialQuery }) => {
       modelUsed: 'Mistral-7B',
       domain: 'general'
     }
-  ]);
-  const [input, setInput] = useState('');
-  const [isThinking, setIsThinking] = useState(false);
-  const [routerState, setRouterState] = useState<RouterDecision | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  ];
+
+  const [messages, setMessages] = useState<Message[]>(defaultWelcome);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -42,6 +48,44 @@ const Chat: React.FC<ChatProps> = ({ initialQuery, clearInitialQuery }) => {
       }
   }, [initialQuery]);
 
+  useEffect(() => {
+    if (!activeSessionId) return;
+    console.log('[Chat] loading history for session', activeSessionId);
+
+    let cancelled = false;
+
+    const loadHistory = async () => {
+      try {
+        setIsHistoryLoading(true);
+        const res = await fetch(`/sessions/${activeSessionId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        console.log('[Chat] /sessions response', data);
+        if (cancelled || !data || !Array.isArray(data.messages)) return;
+
+        const history: Message[] = data.messages.map((m: any, idx: number) => ({
+          id: `${activeSessionId}-${m.ts ?? idx}`,
+          role: m.role === 'assistant' ? 'assistant' : 'user',
+          content: m.content || '',
+          timestamp: (m.ts as number) || Date.now(),
+        }));
+        console.log('[Chat] mapped history messages', history);
+
+        setMessages(history.length ? history : defaultWelcome);
+      } catch (err) {
+        console.error('Failed to load session history', err);
+      } finally {
+        if (!cancelled) setIsHistoryLoading(false);
+      }
+    };
+
+    loadHistory();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSessionId]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isThinking) return;
@@ -60,6 +104,15 @@ const Chat: React.FC<ChatProps> = ({ initialQuery, clearInitialQuery }) => {
 
     try {
       const stream = air4.streamChat([...messages, userMsg]);
+
+      // Логируем сообщение в /chat, чтобы бэкенд создал/обновил сессию
+      if (activeSessionId) {
+        try {
+          air4.sendMessage(userMsg.content, activeSessionId).catch(() => {});
+        } catch {
+          // игнорируем ошибки логирования, стрим остаётся источником ответа
+        }
+      }
       
       const botMsgId = (Date.now() + 1).toString();
       // Placeholder for bot message
@@ -131,6 +184,9 @@ const Chat: React.FC<ChatProps> = ({ initialQuery, clearInitialQuery }) => {
 
       {/* Messages Area */}
       <div className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6 custom-scrollbar">
+        {isHistoryLoading && (
+          <div className="text-[10px] text-slate-500 mb-2 px-1">Загружаю историю сессии…</div>
+        )}
         {messages.map((msg) => (
           <div key={msg.id} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
             
