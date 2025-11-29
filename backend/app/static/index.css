@@ -1,0 +1,73 @@
+/* Глубокий фон с ореолами */
+body {
+  background-color: #020617;
+  background-image:
+    radial-gradient(circle at 15% 50%, rgba(234, 88, 12, 0.08), transparent 25%),
+    radial-gradient(circle at 85% 30%, rgba(124, 45, 18, 0.1), transparent 25%);
+  color: #e2e8f0;
+}
+
+/* Стеклянные панели (основные контейнеры) */
+.glass-panel {
+  background: rgba(15, 23, 42, 0.7);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Стеклянные карточки */
+.glass-card {
+  background: linear-gradient(
+    145deg,
+    rgba(30, 41, 59, 0.4) 0%,
+    rgba(15, 23, 42, 0.6) 100%
+  );
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+}
+
+/* Инпуты */
+.glass-input {
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+/* Скроллбар */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.4);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(249, 115, 22, 0.7);
+}
+
+/* Лёгкий глитч-эффект по ховеру (если используется класс glitch-text) */
+.glitch-text {
+  position: relative;
+}
+.glitch-text:hover::before {
+  content: attr(data-text);
+  position: absolute;
+  left: 2px;
+  top: 0;
+  text-shadow: -1px 0 #ea580c;
+  color: #fff;
+  background: #020617;
+  clip: rect(0, 900px, 0, 0);
+  animation: noise-anim 2s infinite linear alternate-reverse;
+}
+@keyframes noise-anim {
+  0% { clip: rect(10px, 9999px, 30px, 0); }
+  50% { clip: rect(60px, 9999px, 80px, 0); }
+  100% { clip: rect(20px, 9999px, 90px, 0); }
+}

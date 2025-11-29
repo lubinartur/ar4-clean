@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { air4 } from '../services/air4Service';
+import { air4, Fact } from '../services/air4Service';
 import { MemoryItem } from '../types';
 import { Search, RefreshCw, Zap } from 'lucide-react';
 
@@ -8,6 +8,10 @@ const Memory: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [activeTab, setActiveTab] = useState<'all' | 'facts' | 'sessions' | 'docs' | 'profile'>('all');
   const [loading, setLoading] = useState(false);
+
+  const [facts, setFacts] = useState<Fact[]>([]);
+  const [factsLoading, setFactsLoading] = useState(false);
+  const [factsError, setFactsError] = useState<string | null>(null);
 
   const doSearch = async (query: string) => {
       setLoading(true);
@@ -26,6 +30,29 @@ const Memory: React.FC = () => {
       }, 600);
       return () => clearTimeout(timer);
   }, [searchTerm]);
+
+  useEffect(() => {
+      if (activeTab !== 'facts') return;
+
+      let cancelled = false;
+      setFactsLoading(true);
+      setFactsError(null);
+
+      air4.getFacts('Arch')
+        .then(data => {
+            if (!cancelled) setFacts(data);
+        })
+        .catch(err => {
+            if (!cancelled) setFactsError(err.message || 'Failed to load facts');
+        })
+        .finally(() => {
+            if (!cancelled) setFactsLoading(false);
+        });
+
+      return () => {
+          cancelled = true;
+      };
+  }, [activeTab]);
 
   const filteredMemories = memories.filter(m => activeTab === 'all' || m.namespace === activeTab);
   const tabs = [
@@ -70,29 +97,73 @@ const Memory: React.FC = () => {
       </div>
 
       <div className="flex-1 overflow-y-auto space-y-3 custom-scrollbar">
-        {filteredMemories.length === 0 ? (
-            <div className="text-center text-slate-600 py-20 text-sm">
-                {loading ? 'Scanning...' : 'No memories found.'}
-            </div>
-        ) : (
-            filteredMemories.map((memory) => (
-            <div key={memory.id} className="glass-card p-4 rounded-xl hover:bg-white/5 transition-colors group">
-                <div className="flex items-start justify-between mb-2">
+        {activeTab === 'facts' ? (
+          <>
+            {factsLoading && (
+              <div className="text-center text-slate-600 py-20 text-sm">
+                Loading facts...
+              </div>
+            )}
+            {factsError && !factsLoading && (
+              <div className="text-center text-red-400 py-20 text-sm">
+                {factsError}
+              </div>
+            )}
+            {!factsLoading && !factsError && facts.length === 0 && (
+              <div className="text-center text-slate-600 py-20 text-sm">
+                No stored facts yet.
+              </div>
+            )}
+            {!factsLoading && !factsError && facts.length > 0 && (
+              facts.map((fact) => (
+                <div
+                  key={fact.id || `${fact.subject}-${fact.predicate}-${fact.object}-${fact.timestamp}`}
+                  className="glass-card p-4 rounded-xl hover:bg-white/5 transition-colors group"
+                >
+                  <div className="flex items-start justify-between mb-2">
                     <span className="text-[10px] uppercase tracking-wider font-bold text-air-500 bg-air-500/10 px-2 py-0.5 rounded">
-                        {memory.namespace}
+                      Fact
+                    </span>
+                    <span className="text-[10px] text-slate-500">
+                      {new Date(fact.timestamp * 1000).toLocaleString()}
+                    </span>
+                  </div>
+                  <p className="text-slate-300 text-sm leading-relaxed">
+                    <span className="font-semibold">{fact.subject}</span>{' '}
+                    <span className="text-slate-400">{fact.predicate}</span>{' '}
+                    <span>{fact.object}</span>
+                  </p>
+                </div>
+              ))
+            )}
+          </>
+        ) : (
+          <>
+            {filteredMemories.length === 0 ? (
+              <div className="text-center text-slate-600 py-20 text-sm">
+                {loading ? 'Scanning...' : 'No memories found.'}
+              </div>
+            ) : (
+              filteredMemories.map((memory) => (
+                <div key={memory.id} className="glass-card p-4 rounded-xl hover:bg-white/5 transition-colors group">
+                  <div className="flex items-start justify-between mb-2">
+                    <span className="text-[10px] uppercase tracking-wider font-bold text-air-500 bg-air-500/10 px-2 py-0.5 rounded">
+                      {memory.namespace}
                     </span>
                     {memory.relevanceScore !== undefined && (
-                        <span className="flex items-center gap-1 text-[10px] text-slate-500">
-                           <Zap className="w-3 h-3 text-amber-500" /> {(memory.relevanceScore * 100).toFixed(0)}% Match
-                        </span>
+                      <span className="flex items-center gap-1 text-[10px] text-slate-500">
+                        <Zap className="w-3 h-3 text-amber-500" /> {(memory.relevanceScore * 100).toFixed(0)}% Match
+                      </span>
                     )}
-                </div>
-                <p className="text-slate-300 text-sm leading-relaxed">{memory.content}</p>
-                <div className="mt-2 text-[10px] text-slate-600">
+                  </div>
+                  <p className="text-slate-300 text-sm leading-relaxed">{memory.content}</p>
+                  <div className="mt-2 text-[10px] text-slate-600">
                     Source: {memory.source || 'System'} • {new Date(memory.timestamp).toLocaleDateString()}
+                  </div>
                 </div>
-            </div>
-            ))
+              ))
+            )}
+          </>
         )}
       </div>
     </div>

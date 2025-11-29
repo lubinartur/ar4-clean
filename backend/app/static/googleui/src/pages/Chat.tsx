@@ -1,6 +1,5 @@
 
-import React, { useState, useEffect, useRef } from "react";
-import { useSettings } from "../hooks/useSettings";
+import React, { useState, useRef, useEffect } from 'react';
 import { air4 } from '../services/air4Service';
 import { Message, MemoryItem, RouterDecision, SystemStats, ResponseStyle } from '../types';
 import { Send, Mic, Paperclip, BrainCircuit, Cpu, Sparkles, Activity, Database, Circle, ChevronDown, Check, Star, Copy, ClipboardCheck } from 'lucide-react';
@@ -12,8 +11,6 @@ interface ChatProps {
 }
 
 const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery }) => {
-  const { settings } = useSettings();
-
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isThinking, setIsThinking] = useState(false);
@@ -28,8 +25,6 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery 
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const styleMenuRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  const autoBrainstormRef = useRef(false);
 
   // Load session messages when ID changes
   useEffect(() => {
@@ -92,32 +87,6 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery 
       if (initialQuery) {
           setInput(initialQuery);
           if (clearInitialQuery) clearInitialQuery();
-          if (inputRef.current) {
-              const len = initialQuery.length;
-              inputRef.current.focus();
-              try {
-                  inputRef.current.setSelectionRange(len, len);
-              } catch (e) {
-                  // ignore selection errors
-              }
-          }
-      }
-  }, [initialQuery, clearInitialQuery]);
-
-
-  useEffect(() => {
-      if (initialQuery) {
-          setInput(initialQuery);
-          if (inputRef.current) {
-              const len = initialQuery.length;
-              inputRef.current.focus();
-              try {
-                  inputRef.current.setSelectionRange(len, len);
-              } catch (e) {
-                  // ignore selection errors
-              }
-          }
-          if (clearInitialQuery) clearInitialQuery();
       }
   }, [initialQuery]);
 
@@ -169,10 +138,10 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery 
     setRouterState(null);
 
     try {
-      const stream = air4.streamChat(newMessages, sessionId, settings);
+      const stream = air4.streamChat(newMessages, sessionId);
       
       const botMsgId = (Date.now() + 1).toString();
-      // Placeholder for bot message — контент появится по мере прихода чанков
+      // Placeholder for bot message
       setMessages(prev => [...prev, {
         id: botMsgId,
         role: 'assistant',
@@ -229,19 +198,12 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery 
       )
   }
 
-    // Determine display values for header
+  // Determine display values for header
   const isOffline = stats?.isOffline ?? false;
-
-  // Что показывать в шапке как имя модели
-  const headerModelName =
-    routerState?.model ||
-    stats?.modelName ||
-    air4.getActiveModel() ||
-    (isOffline ? 'Demo / Offline' : 'Mistral-7B');
-
-  // Жива ли память
-  const memoryActive = !isOffline;
-
+  // Use router decision if active, otherwise fallback to stats (backend) or user config preference
+  const modelName = routerState?.model || stats?.modelName || air4.getActiveModel() || 'Mistral-7B';
+  const memoryStatus = isOffline ? 'Inactive' : 'Active';
+  
   const styles: { id: ResponseStyle; label: string }[] = [
       { id: 'short', label: 'Short' },
       { id: 'normal', label: 'Normal' },
@@ -250,122 +212,102 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery 
 
   return (
     <div className="flex flex-col h-full relative">
-            {/* Enhanced System Status Header */}
-            {/* Minimal top status bar */}
-      <div className="h-14 flex items-center justify-between px-4 md:px-6 border-b border-white/5 bg-black/30 backdrop-blur-md">
-        {/* Left: лёгкий лейбл диалога + ID */}
-        <div className="flex items-center gap-2 text-[11px] text-slate-400">
-          <span className="hidden sm:inline text-slate-200 font-medium">
-            Core Dialog
-          </span>
-          <span className="hidden md:inline-block text-[10px] font-mono text-slate-600">
-            ID: {sessionId.slice(-8)}
-          </span>
+      {/* Enhanced System Status Header */}
+      <div className="h-16 flex items-center justify-between px-6 border-b border-white/5 bg-black/20 backdrop-blur-md">
+        
+        {/* Left: Title */}
+        <div className="flex items-center gap-3">
+            <div className={`w-2 h-8 rounded-full shadow-[0_0_10px_rgba(249,115,22,0.4)] ${isOffline ? 'bg-red-500' : 'bg-air-500'}`}></div>
+            <div>
+                <h2 className="text-sm font-bold text-white tracking-wide uppercase">Core Dialog</h2>
+                <div className="flex items-center gap-2 text-[10px] text-slate-500 font-mono">
+                    <span>ID: {sessionId.slice(-8)}</span>
+                </div>
+            </div>
         </div>
 
-        {/* Right: компактные баджи */}
-        <div className="flex items-center gap-1 md:gap-3">
-          {/* 1. Style Selector */}
-          <div className="relative px-2 md:px-4" ref={styleMenuRef}>
-            <button
-              onClick={() => setShowStyleMenu(!showStyleMenu)}
-              className="flex items-center gap-1.5 text-[11px] font-medium text-slate-400 hover:text-white transition-colors"
-            >
-              <span className="text-slate-200">
-                {responseStyle.charAt(0).toUpperCase() + responseStyle.slice(1)}
-              </span>
-              <ChevronDown className="w-3 h-3 text-slate-500" />
-            </button>
+        {/* Right: Detailed Status Bar */}
+        <div className="flex items-center gap-4 md:gap-6">
+            
+            {/* Style Selector */}
+            <div className="relative" ref={styleMenuRef}>
+                 <button 
+                    onClick={() => setShowStyleMenu(!showStyleMenu)}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors border border-white/5"
+                 >
+                     <div className="flex flex-col items-start">
+                         <span className="text-[9px] text-slate-500 uppercase font-bold tracking-wider leading-none mb-0.5">Style</span>
+                         <span className="text-[10px] text-air-400 font-mono font-bold capitalize">{responseStyle}</span>
+                     </div>
+                     <ChevronDown className="w-3 h-3 text-slate-500" />
+                 </button>
 
-            {showStyleMenu && (
-              <div className="absolute top-full right-0 mt-2 w-32 bg-[#0a0f1e] border border-white/10 rounded-xl shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-100">
-                {styles.map((s) => (
-                  <button
-                    key={s.id}
-                    onClick={() => handleStyleChange(s.id)}
-                    className={`w-full flex items-center justify-between px-3 py-2 text-[11px] font-medium hover:bg-white/5 transition-colors ${
-                      responseStyle === s.id
-                        ? 'text-air-500 bg-air-500/5'
-                        : 'text-slate-400'
-                    }`}
-                  >
-                    {s.label}
-                    {responseStyle === s.id && <Check className="w-3 h-3" />}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+                 {showStyleMenu && (
+                     <div className="absolute top-full right-0 mt-2 w-32 bg-[#0a0f1e] border border-white/10 rounded-xl shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-100">
+                         {styles.map(s => (
+                             <button
+                                key={s.id}
+                                onClick={() => handleStyleChange(s.id)}
+                                className={`w-full flex items-center justify-between px-3 py-2 text-[11px] font-medium hover:bg-white/5 transition-colors ${responseStyle === s.id ? 'text-air-500 bg-air-500/5' : 'text-slate-400'}`}
+                             >
+                                 {s.label}
+                                 {responseStyle === s.id && <Check className="w-3 h-3" />}
+                             </button>
+                         ))}
+                     </div>
+                 )}
+            </div>
 
-          {/* 2. Core Status */}
-          <div className="hidden md:flex items-center gap-2 px-3">
-            <div
-              className={`w-2 h-2 rounded-full ${
-                isOffline
-                  ? 'bg-red-500'
-                  : 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.4)]'
-              }`}
-            />
-            <span
-              className={`text-[11px] font-medium ${
-                isOffline ? 'text-red-400' : 'text-emerald-400'
-              }`}
-            >
-              {isOffline ? 'Offline' : 'Online'}
-            </span>
-          </div>
+            <div className="h-4 w-[1px] bg-white/10 hidden md:block"></div>
 
-          {/* 3. Model Info */}
-          <div className="hidden md:flex items-center gap-2 px-3">
-            <Cpu className="w-3.5 h-3.5 text-air-500" />
-            <span className="text-[11px] font-mono text-slate-200">
-              {headerModelName}
-            </span>
-          </div>
+            {/* 1. Core Status */}
+            <div className="flex items-center gap-2">
+                <div className={`relative flex h-2 w-2`}>
+                  <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${isOffline ? 'bg-red-500' : 'bg-emerald-500'}`}></span>
+                  <span className={`relative inline-flex rounded-full h-2 w-2 ${isOffline ? 'bg-red-500' : 'bg-emerald-500'}`}></span>
+                </div>
+                <div className="flex flex-col">
+                    <span className={`text-[10px] font-bold ${isOffline ? 'text-red-400' : 'text-emerald-400'}`}>
+                        {isOffline ? 'Offline' : stats ? 'Local Core Online' : 'Loading...'}
+                    </span>
+                </div>
+            </div>
 
-          {/* 4. Memory Status */}
-          <div className="hidden md:flex items-center gap-2 px-3">
-            <Database
-              className={`w-3.5 h-3.5 ${
-                memoryActive ? 'text-indigo-400' : 'text-slate-600'
-              }`}
-            />
-            <span
-              className={`text-[11px] font-medium ${
-                memoryActive ? 'text-indigo-300' : 'text-slate-500'
-              }`}
-            >
-              {memoryActive ? 'ChromaDB' : 'Inactive'}
-            </span>
-          </div>
+            <div className="h-4 w-[1px] bg-white/10 hidden md:block"></div>
 
-          {/* 5. Index Update */}
-          <div className="hidden xl:flex items-center gap-2 px-3">
-            <Activity className="w-3.5 h-3.5 text-slate-500" />
-            <span className="text-[11px] font-mono text-slate-400">
-              {stats ? `${timeAgo}s ago` : '...'}
-            </span>
-          </div>
+            {/* 2. Model */}
+            <div className="hidden md:flex flex-col items-start">
+                 <span className="text-[9px] text-slate-500 uppercase font-bold tracking-wider">Model</span>
+                 <span className="text-[10px] text-air-400 font-mono flex items-center gap-1">
+                    <Cpu className="w-3 h-3" /> {modelName}
+                 </span>
+            </div>
+
+            <div className="h-4 w-[1px] bg-white/10 hidden md:block"></div>
+
+            {/* 3. Memory Status */}
+            <div className="hidden md:flex flex-col items-start">
+                 <span className="text-[9px] text-slate-500 uppercase font-bold tracking-wider">Memory</span>
+                 <span className={`text-[10px] font-mono flex items-center gap-1 ${isOffline ? 'text-red-400' : 'text-indigo-400'}`}>
+                    <Database className="w-3 h-3" /> ChromaDB: {memoryStatus}
+                 </span>
+            </div>
+
+            <div className="h-4 w-[1px] bg-white/10 hidden md:block"></div>
+
+             {/* 4. Index Update */}
+             <div className="hidden md:flex flex-col items-start min-w-[80px]">
+                 <span className="text-[9px] text-slate-500 uppercase font-bold tracking-wider">Index Update</span>
+                 <span className="text-[10px] text-slate-400 font-mono flex items-center gap-1">
+                    <Activity className="w-3 h-3" /> {stats ? `${timeAgo} sec ago` : '...'}
+                 </span>
+            </div>
         </div>
       </div>
 
       {/* Messages Area */}
       <div className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6 custom-scrollbar scroll-smooth">
-        {messages.map((msg) => {
-          const isAssistant = msg.role === 'assistant';
-
-          let displayContent = msg.content as string;
-          let modelFromPrefix: string | null = null;
-
-          if (isAssistant && typeof msg.content === 'string') {
-              const m = msg.content.match(/^\[([^\]]+)\]\s?(.*)$/s);
-              if (m) {
-                  modelFromPrefix = m[1];
-                  displayContent = m[2] || '';
-              }
-          }
-
-          return (
+        {messages.map((msg) => (
           <div 
             key={msg.id} 
             className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'} animate-message-in`}
@@ -387,24 +329,6 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery 
                   : 'glass-card text-slate-200 rounded-bl-sm border-white/5 shadow-[0_4px_20px_rgba(0,0,0,0.2)]'
             }`}>
                 
-                {/* Model badge */}
-                {isAssistant && (modelFromPrefix || msg.modelUsed) && (
-                    <div className="mb-2 flex items-center gap-2">
-                        <span className="
-  inline-flex items-center gap-1.5 
-  px-3 py-1 
-  rounded-lg
-  bg-black/20
-  border border-air-500/40
-  text-air-400
-  font-mono text-[12px] font-semibold
-">
-  <Cpu className="w-4 h-4 text-air-400" />
-  {modelFromPrefix || msg.modelUsed}
-</span>
-                    </div>
-                )}
-
                 {/* RAG Context */}
                 {msg.role === 'assistant' && msg.contextUsed && msg.contextUsed.length > 0 && (
                     <div className="mb-3 flex flex-col gap-1 pb-3 border-b border-white/5">
@@ -420,16 +344,7 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery 
                     </div>
                 )}
                 
-                {isAssistant && !displayContent && isThinking ? (
-                    <div className="flex items-center gap-1">
-                        <span className="w-1.5 h-1.5 bg-air-400 rounded-full dot-pulse"></span>
-                        <span className="w-1.5 h-1.5 bg-air-400 rounded-full dot-pulse" style={{ animationDelay: '0.15s' }}></span>
-                        <span className="w-1.5 h-1.5 bg-air-400 rounded-full dot-pulse" style={{ animationDelay: '0.30s' }}></span>
-                        <span className="text-[10px] text-air-300/70 font-mono ml-2">Processing...</span>
-                    </div>
-                ) : (
-                    displayContent
-                )}
+                {msg.content}
 
                 {/* AI Actions Footer */}
                 {msg.role === 'assistant' && !isThinking && (
@@ -456,9 +371,20 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery 
                 )}
             </div>
           </div>
-        ); })}
+        ))}
 
-        
+        {isThinking && (
+           <div className="flex justify-start animate-message-in">
+             <div className="glass-card px-4 py-3 rounded-2xl rounded-bl-sm flex items-center gap-3 border border-air-500/20">
+                <div className="flex gap-1">
+                    <span className="w-1.5 h-1.5 bg-air-500 rounded-full animate-bounce"></span>
+                    <span className="w-1.5 h-1.5 bg-air-500 rounded-full animate-bounce delay-75"></span>
+                    <span className="w-1.5 h-1.5 bg-air-500 rounded-full animate-bounce delay-150"></span>
+                </div>
+                <span className="text-xs text-air-400 font-mono tracking-wide">Processing...</span>
+             </div>
+           </div>
+        )}
         <div ref={messagesEndRef} />
       </div>
 
@@ -479,7 +405,6 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery 
           <div className="flex-1 py-3">
             <input
                 type="text"
-                    ref={inputRef}
                 value={input}
                 onChange={(e) => {
                     setInput(e.target.value);

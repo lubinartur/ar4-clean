@@ -1,0 +1,128 @@
+[
+  {
+    "id": "45bbaba9-c83b-40a7-bdf0-e5b49ea8a012",
+    "subject": "Arch",
+    "predicate": "тестирует_память",
+    "object": "FACTS_001",
+    "timestamp": 1764449650.7697449,
+    "source_session": null,
+    "source_message_id": null
+  },
+  {
+    "id": "616c4f10-e610-441b-84ad-a95196c9ef11",
+    "subject": "Arch",
+    "predicate": "любит",
+    "object": "ducati panigale v4 и мне нравится салмон поке",
+    "timestamp": 1764449718.94494,
+    "source_session": "test_session",
+    "source_message_id": null
+  },
+  {
+    "id": "4a2f4b71-454c-4e30-aa33-0d865849087c",
+    "subject": "Arch",
+    "predicate": "нравится",
+    "object": "салмон поке",
+    "timestamp": 1764449718.9449742,
+    "source_session": "test_session",
+    "source_message_id": null
+  },
+  {
+    "id": "7307bbd2-b9cf-49bb-b30a-42e80575411f",
+    "subject": "Arch",
+    "predicate": "любит",
+    "object": "bmw 840d и мне нравится суши",
+    "timestamp": 1764450144.419899,
+    "source_session": null,
+    "source_message_id": null
+  },
+  {
+    "id": "768dcbcb-d6d0-4f0b-b5a8-875e2c302eb6",
+    "subject": "Arch",
+    "predicate": "нравится",
+    "object": "суши",
+    "timestamp": 1764450144.42001,
+    "source_session": null,
+    "source_message_id": null
+  },
+  {
+    "id": "0a819d17-c814-4283-81b6-eaf69863107b",
+    "subject": "Arch",
+    "predicate": "любит",
+    "object": "стейки и мне нравится португалия",
+    "timestamp": 1764452919.7589781,
+    "source_session": null,
+    "source_message_id": null
+  },
+  {
+    "id": "ec470a5f-191a-4f9a-a950-0fe67768bdcd",
+    "subject": "Arch",
+    "predicate": "нравится",
+    "object": "португалия",
+    "timestamp": 1764452919.759089,
+    "source_session": null,
+    "source_message_id": null
+  },
+  {
+    "id": "5cf8776f-a7f8-45b5-95b6-6590c9fe7b97",
+    "subject": "Arch",
+    "predicate": "любит",
+    "object": "пиццу и мне нравится япония",
+    "timestamp": 1764453500.251897,
+    "source_session": null,
+    "source_message_id": null
+  },
+  {
+    "id": "f68d6af6-8c9b-4ce3-a0f0-1bbb46b57f38",
+    "subject": "Arch",
+    "predicate": "нравится",
+    "object": "япония",
+    "timestamp": 1764453500.25203,
+    "source_session": null,
+    "source_message_id": null
+  },
+  {
+    "id": "7b3d6bb5-ca47-498c-a708-f237ff89d1e3",
+    "subject": "Arch",
+    "predicate": "любит",
+    "object": "пасту и мне нравится италия",
+    "timestamp": 1764453940.292865,
+    "source_session": null,
+    "source_message_id": null
+  },
+  {
+    "id": "cae40731-c76b-42b9-a034-a090e6408244",
+    "subject": "Arch",
+    "predicate": "нравится",
+    "object": "италия",
+    "timestamp": 1764453940.2929962,
+    "source_session": null,
+    "source_message_id": null
+  },
+  {
+    "id": "b1deea41-cb39-4ec3-8a06-397d542ce001",
+    "subject": "Arch",
+    "predicate": "любит",
+    "object": "зеленое яблоко",
+    "timestamp": 1764456173.3032188,
+    "source_session": null,
+    "source_message_id": null
+  },
+  {
+    "id": "552a7f50-8083-4bc7-a684-d345b80d5d35",
+    "subject": "Arch",
+    "predicate": "любит",
+    "object": "яблоко зеленое",
+    "timestamp": 1764456223.319006,
+    "source_session": null,
+    "source_message_id": null
+  },
+  {
+    "id": "d95eab76-869a-45a2-bd68-df54edced83b",
+    "subject": "Arch",
+    "predicate": "живёт_в",
+    "object": "эстонии",
+    "timestamp": 1764458399.859864,
+    "source_session": null,
+    "source_message_id": null
+  }
+]

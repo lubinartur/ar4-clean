@@ -1,4 +1,4 @@
-# backend/app/chat.py — AIr4 v0.11.3 (Profile + RAG + styles)
+# backend/app/chat.py — AIr4 v0.11.3 (Profile + RAG + styles + DeepSeek fix)
 from __future__ import annotations
 
 import os
@@ -46,17 +46,35 @@ STYLES: Dict[str, Dict[str, Any]] = {
             "Если нужен код/формула — дай минимально достаточный фрагмент. "
             "Не повторяй вопрос и не извиняйся."
         ),
-        "options": {"temperature": 0.2, "top_p": 0.9, "repeat_penalty": 1.15, "num_ctx": 4096, "num_predict": 128},
+        "options": {
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "repeat_penalty": 1.15,
+            "num_ctx": 4096,
+            "num_predict": 128,
+        },
     },
     "normal": {
         "prompt": "Отвечай по-русски, понятно и без воды.",
-        "options": {"temperature": 0.35, "top_p": 0.95, "repeat_penalty": 1.1, "num_ctx": 4096, "num_predict": 256},
+        "options": {
+            "temperature": 0.35,
+            "top_p": 0.95,
+            "repeat_penalty": 1.1,
+            "num_ctx": 4096,
+            "num_predict": 256,
+        },
     },
     "detailed": {
         "prompt": (
             "Отвечай развёрнуто по-русски. Структурируй ответ, используй подзаголовки/списки по мере необходимости."
         ),
-        "options": {"temperature": 0.6, "top_p": 0.97, "repeat_penalty": 1.05, "num_ctx": 6144, "num_predict": 512},
+        "options": {
+            "temperature": 0.6,
+            "top_p": 0.97,
+            "repeat_penalty": 1.05,
+            "num_ctx": 6144,
+            "num_predict": 512,
+        },
     },
 }
 
@@ -72,7 +90,7 @@ class ChatBody(BaseModel):
     use_rag: bool = True
     k_memory: int = Field(4, ge=1, le=50)
     style: Optional[str] = Field(STYLE_DEFAULT, description="short | normal | detailed")
-    model_override: Optional[str] = None
+    settings: Optional[Dict[str, Any]] = None
     model_override: Optional[str] = Field(None, description="Preferred model from UI")
 
 
@@ -103,7 +121,13 @@ async def _memory_search_http(query: str, k: int) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for it in results:
         rid = it.get("id") or it.get("h") or it.get("hash") or ""
-        txt = it.get("text") or it.get("chunk") or it.get("content") or it.get("value") or ""
+        txt = (
+            it.get("text")
+            or it.get("chunk")
+            or it.get("content")
+            or it.get("value")
+            or ""
+        )
         scr = it.get("score", 0.0)
         if isinstance(txt, dict):
             txt = txt.get("text") or txt.get("content") or ""
@@ -134,16 +158,31 @@ def _profile_block_from_request(headers: Dict[str, str]) -> str:
     if getattr(prof, "name", None):
         parts.append(f"name={prof.name}")
     if prefs:
-        parts.append("prefs=" + ",".join([f"{k}:{v}" for k, v in list(prefs.items())[:5]]))
+        parts.append(
+            "prefs=" + ",".join([f"{k}:{v}" for k, v in list(prefs.items())[:5]])
+        )
     if facts:
-        parts.append("facts=" + ",".join([f"{k}:{v}" for k, v in list(facts.items())[:6]]))
+        parts.append(
+            "facts=" + ",".join([f"{k}:{v}" for k, v in list(facts.items())[:6]])
+        )
     if goals:
-        parts.append("goals=" + "; ".join([getattr(g, 'title', getattr(g, 'id', '')) for g in goals][:3]))
+        parts.append(
+            "goals="
+            + "; ".join(
+                [getattr(g, "title", getattr(g, "id", "")) for g in goals][:3]
+            )
+        )
 
     return "USER_PROFILE: " + " | ".join(parts) if parts else ""
 
 
-def build_messages(system: Optional[str], memory_blocks: List[str], user_text: str, headers: Dict[str, str], style_prompt: Optional[str]) -> List[dict]:
+def build_messages(
+    system: Optional[str],
+    memory_blocks: List[str],
+    user_text: str,
+    headers: Dict[str, str],
+    style_prompt: Optional[str],
+) -> List[dict]:
     # Merge profile block
     profile_block = _profile_block_from_request(headers)
     if profile_block:
@@ -151,13 +190,15 @@ def build_messages(system: Optional[str], memory_blocks: List[str], user_text: s
 
     # Prepend style prompt if provided
     if style_prompt:
-        system = (style_prompt + ("\n" + system if system else ""))
+        system = style_prompt + ("\n" + system if system else "")
 
     messages: List[dict] = []
     if system:
         messages.append({"role": "system", "content": str(system)})
     if memory_blocks:
-        messages.append({"role": "system", "content": _format_sources_for_system(memory_blocks)})
+        messages.append(
+            {"role": "system", "content": _format_sources_for_system(memory_blocks)}
+        )
     messages.append({"role": "user", "content": str(user_text)})
     return messages
 
@@ -170,12 +211,138 @@ def _summarize_for_sources_display(text: str, limit: int = 220) -> str:
 # -----------------------------------------------------------------------------
 # Ollama call
 # -----------------------------------------------------------------------------
+async def call_ollama(
+    messages: List[dict],
+    session_id: Optional[str],
+    options: Optional[Dict[str, Any]] = None,
+    model: Optional[str] = None,
+) -> str:
+    import httpx
+    import json
+
+    # Базовые опции из стиля
+    options = options or STYLES[STYLE_DEFAULT]["options"]
+
+    # Нормализуем имя модели
+    resolved_model = _resolve_model_name(model)
+    print(f"[LLM DEBUG] override={model!r} -> resolved={resolved_model!r}")
+
+    # Для DeepSeek R1 даём минимум 256 токенов, чтобы было чем отвечать
+    if resolved_model.startswith("deepseek-r1"):
+        try:
+            opts = dict(options)
+        except Exception:
+            opts = {"num_predict": 512}
+        num_pred = int(opts.get("num_predict", 128))
+        if num_pred < 512:
+            opts["num_predict"] = 512
+        options = opts
+
+    url = f"{OLLAMA_BASE_URL}/api/chat"
+
+    payload = {
+        "model": resolved_model,
+        "messages": messages,
+        "stream": False,
+        "options": options,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            r = await client.post(url, json=payload)
+        r.raise_for_status()
+
+        raw = (r.text or "").strip()
+        msg_text = ""
+        obj: Optional[dict] = None
+
+        # 1) Пытаемся прочитать как NDJSON (несколько JSON-строк)
+        if raw:
+            last_obj = None
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    parsed = json.loads(line)
+                except Exception:
+                    continue
+                last_obj = parsed
+
+                # если по пути нашли контент — обновим msg_text
+                m_obj = (parsed.get("message") or {}) if isinstance(parsed, dict) else {}
+                candidate = (
+                    m_obj.get("content")
+                    or parsed.get("response")
+                    or parsed.get("output_text")
+                    or ""
+                )
+                if isinstance(candidate, str) and candidate.strip():
+                    msg_text = candidate.strip()
+
+            if isinstance(last_obj, dict):
+                obj = last_obj
+
+        # 2) Если NDJSON не дал результата — обычный JSON
+        if not msg_text:
+            try:
+                obj = r.json() or {}
+            except Exception:
+                obj = None
+
+            if isinstance(obj, dict):
+                m_obj = obj.get("message") or {}
+                candidate = (
+                    m_obj.get("content")
+                    or m_obj.get("response")
+                    or obj.get("response")
+                    or obj.get("output_text")
+                    or ""
+                )
+                if isinstance(candidate, str) and candidate.strip():
+                    msg_text = candidate.strip()
+
+        # 3) Если DeepSeek вернул только thinking — берём первую содержательную строку
+        if not msg_text and isinstance(obj, dict) and resolved_model.startswith(
+            "deepseek-r1"
+        ):
+            m_obj = obj.get("message") or {}
+            thinking = m_obj.get("thinking")
+            if isinstance(thinking, str) and thinking.strip():
+                # Берём первую более-менее вменяемую строку
+                for line in thinking.splitlines():
+                    line = line.strip()
+                    if line:
+                        msg_text = line
+                        break
+
+        # 4) Фолбэк — аккуратное сообщение об ошибке контента
+        if not msg_text:
+            msg_text = (
+                "Модель не вернула явного текста ответа. "
+                "Попробуй ещё раз или переформулируй запрос."
+            )
+
+        clean = str(msg_text).strip()
+
+        # --- DeepSeek R1 cleanup: убираем мысли и служебные рассуждения ---
+        resolved_model.startswith("deepseek-r1")
+        return f"[{resolved_model}] " + clean
+
+    except Exception as e:
+        return f"[{resolved_model}] Ошибка при вызове Ollama: {str(e)}"
+
+
 def _resolve_model_name(requested: Optional[str]) -> str:
+    """
+    Нормализует имя модели из UI/override в конкретный ID для Ollama.
+    """
     if not requested:
         return OLLAMA_MODEL_DEFAULT
 
     key = str(requested).strip().lower()
 
+    # LLaMA 3.1 family / default
     if key in {
         OLLAMA_MODEL_DEFAULT.lower(),
         "llama3.1:8b",
@@ -186,9 +353,11 @@ def _resolve_model_name(requested: Optional[str]) -> str:
     }:
         return "llama3.1:8b"
 
+    # Mistral
     if key in {"mistral-7b", "mistral", "mistral 7b"}:
         return "mistral:latest"
 
+    # Hermes / Mixtral
     if key in {
         "hermes-7b",
         "nous-hermes",
@@ -198,85 +367,49 @@ def _resolve_model_name(requested: Optional[str]) -> str:
     }:
         return "nous-hermes2-mixtral:8x7b"
 
-    return OLLAMA_MODEL_DEFAULT
-    # UI labels → Ollama model ids
-    if key in {"mistral-7b", "mistral"}:
-        return "mistral:latest"
+    # DeepSeek 14B
+    if key in {"deepseek-r1:14b", "deepseek-14b", "deepseek 14b"}:
+        return "deepseek-r1:14b"
 
-    if key in {"llama-3.1-8b", "llama 3.1 8b"}:
-        return "llama3.1:8b"
-
-    if key in {"hermes-7b", "nous-hermes", "mixtral-8x7b", "mixtral"}:
-        return "nous-hermes2-mixtral:8x7b"
+    # DeepSeek 32B / generic
+    if key in {
+        "deepseek-r1:32b",
+        "deepseek",
+        "deepseek-r1",
+        "deepseek-32b",
+        "deepseek 32b",
+    }:
+        return "deepseek-r1:32b"
 
     # Fallback
     return OLLAMA_MODEL_DEFAULT
 
 
-async def call_ollama(
-    messages: List[dict],
-    session_id: Optional[str],
-    options: Optional[Dict[str, Any]] = None,
-    model: Optional[str] = None,
-) -> str:
-    import httpx
-
-    options = options or STYLES[STYLE_DEFAULT]["options"]
-    resolved_model = _resolve_model_name(model)
-
-    payload = {
-        "model": resolved_model,
-        "messages": messages,
-        "stream": False,
-        "options": options,
-    }
-    timeout = httpx.Timeout(60.0, read=300.0, connect=10.0)
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload)
-        r.raise_for_status()
-        obj = r.json() or {}
-        msg = (obj.get("message") or {}).get("content") or ""
-        return f"[{resolved_model}] " + str(msg).strip()
-    except Exception as e:
-        last_user = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-        return f"echo: {last_user} (ollama failed: {e})"
-
-
-def generate_session_id() -> str:
-    return str(uuid.uuid4())[:12]
-
-
 # -----------------------------------------------------------------------------
-# Public entry
+# High-level endpoint helper
 # -----------------------------------------------------------------------------
 async def chat_endpoint_call(body: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
     data = ChatBody(**body)
 
-    # Resolve style from body or headers
-    style_key = (data.style or headers.get("X-Style") or STYLE_DEFAULT).lower()
+    style_key = (data.style or STYLE_DEFAULT).lower()
     cfg = STYLES.get(style_key, STYLES[STYLE_DEFAULT])
+    style_prompt = cfg["prompt"]
 
+    # RAG
     memory_blocks: List[str] = []
     if data.use_rag and not _is_greeting(data.message):
-        try:
-            rel = await _memory_search_http(data.message, data.k_memory)
-            threshold = _min_score()
-            rel = [r for r in rel if float(r.get("score", 0.0)) >= threshold]
-            seen = set()
-            for r in rel:
-                t = r.get("text") or ""
-                tnorm = " ".join(str(t).split())
-                if tnorm in seen:
-                    continue
-                seen.add(tnorm)
-                memory_blocks.append(t)
-        except Exception:
-            memory_blocks = []
+        memory_results = await _memory_search_http(data.message, data.k_memory)
+        memory_blocks = [
+            res["text"] for res in memory_results if res["score"] >= _min_score()
+        ]
 
-    messages = build_messages(data.system, memory_blocks, data.message, headers, cfg.get("prompt"))
-    # Resolve model from UI override (if any)
-    model_name = _resolve_model_name(getattr(data, "model_override", None))
+    messages = build_messages(
+        data.system,
+        memory_blocks,
+        data.message,
+        headers,
+        style_prompt,
+    )
 
     reply_text = await call_ollama(
         messages,
@@ -285,12 +418,9 @@ async def chat_endpoint_call(body: Dict[str, Any], headers: Dict[str, str]) -> D
         model=data.model_override,
     )
 
-    session_id = data.session_id or generate_session_id()
-    memory_used = [_summarize_for_sources_display(t) for t in memory_blocks] if memory_blocks else []
-
     return {
         "ok": True,
         "reply": reply_text,
-        "session_id": session_id,
-        "memory_used": memory_used,
+        "session_id": data.session_id or str(uuid.uuid4()),
+        "memory_used": [b[:100] for b in memory_blocks] if memory_blocks else None,
     }

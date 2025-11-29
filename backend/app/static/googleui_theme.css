@@ -1,0 +1,8 @@
+      body {
+        background-color: #020617;
+        background-image:
+          radial-gradient(circle at 15% 50%, rgba(234, 88, 12, 0.08), transparent 25%),
+          radial-gradient(circle at 85% 30%, rgba(124, 45, 18, 0.1), transparent 25%);
+        color: #e2e8f0;
+        overflow: hidden;
+      }

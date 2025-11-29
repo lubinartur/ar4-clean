@@ -20,6 +20,11 @@ try:
     from backend.app.memory.manager_chroma import ChromaMemoryManager  # Phase-9 backend
 except Exception:
     from .memory.manager_chroma import ChromaMemoryManager  # type: ignore
+try:
+    from backend.app.memory.facts import extract_facts_from_text_v3, add_fact, get_facts_for_subject
+except Exception:
+    from .memory.facts import extract_facts_from_text_v3, add_fact, get_facts_for_subject  # type: ignore
+
 
 try:
     from backend.app import chat as chat_mod
@@ -53,6 +58,27 @@ templates = Jinja2Templates(directory=TEMPLATES_DIR)
 # Helpers
 # -----------------------------------------------------------------------------
 _now = lambda: int(time.time())
+def strip_think(text: str) -> str:
+    """Режем блок <think>...</think> от DeepSeek R1, оставляем только ответ."""
+    if not text:
+        return text
+    start = text.find("<think>")
+    end = text.find("</think>")
+    if start != -1 and end != -1 and end > start:
+        return text[end + len("</think>"):].strip()
+    return text.strip()
+
+# POV normalization helper for Arch/Ты
+def _normalize_pov(text: str) -> str:
+    """Convert 'Арч ...' at sentence start → 'Ты ...' (simple POV normalization)."""
+    if not text:
+        return text
+    t = text.lstrip()
+    # если ответ начинается с "Арч "
+    if t.startswith("Арч "):
+        # заменить только первое вхождение
+        return text.replace("Арч ", "Ты ", 1)
+    return text
 
 # -----------------------------------------------------------------------------
 # Sessions (in-memory dict; persisted messages live in Chroma via memory manager)
@@ -404,6 +430,18 @@ async def send3(payload: Send3In) -> Send3Out:
     sess = ensure_session(payload.session_id)
 
     user_text = (payload.text or "").strip()
+
+    # Long-term semantic memory (Knowledge Graph seed)
+    try:
+        facts = extract_facts_from_text_v3(
+            user_text,
+            subject="Arch",
+        )
+        for f in facts:
+            add_fact(f)
+    except Exception as e:
+        print(f"[FACTS] error while extracting/storing facts: {e}")
+
     if not user_text:
         raise HTTPException(status_code=400, detail="text is empty")
 
@@ -422,17 +460,36 @@ async def send3(payload: Send3In) -> Send3Out:
             print(f"[WARN] memory add_text (user) failed: {e}")
 
     # 4) call chat module (prefers your async chat_endpoint_call)
+    # 4) call chat module (prefers your async chat_endpoint_call)
+    # Build system prompt from long-term facts (Knowledge Graph)
+    system_prompt = None
+    try:
+        facts_kg = get_facts_for_subject("Arch", limit=32)
+        if facts_kg:
+            lines = [f"- {f.subject} {f.predicate} {f.object}" for f in facts_kg]
+            prefix = """YOU ARE A MEMORY-ENABLED ASSISTANT.
+The following facts describe the HUMAN USER Arch, not you (the assistant).
+Arch is the user. You are NOT Arch.
+NEVER say "я Арч" or otherwise speak as if you are Arch.
+Always talk TO Arch in second person ("ты") and describe his life, preferences and habits from your own assistant perspective.
+Use the facts below only as background knowledge about Arch when answering personal questions, preferences, habits, tastes and lifestyle.
+Known long-term facts about Arch:
+"""
+            system_prompt = prefix + "\n".join(lines)
+    except Exception as e:
+        print(f"[FACTS] error while reading facts: {e}")
+
     reply: Optional[str] = None
     try:
         if hasattr(chat_mod, "chat_endpoint_call"):
             body = {
                 "message": user_text,
                 "session_id": sess.id,
-                "system": None,
+                "system": system_prompt,
                 "stream": False,
                 "use_rag": True,
                 "k_memory": 4,
-                "style": payload.style,   # pass-through from UI
+                "style": payload.style,
                 "settings": payload.settings or None,
                 "model_override": payload.model_override or None,
             }
@@ -445,6 +502,11 @@ async def send3(payload: Send3In) -> Send3Out:
                 print(f"[WARN] chat_mod.chat_endpoint_call failed: {e}")
     except Exception as e:
         print(f"[WARN] chat_mod wrapper failed: {e}")
+
+    # 🔪 режем мысли DeepSeek всегда, если ответ есть
+    if reply:
+        reply = strip_think(reply)
+        reply = _normalize_pov(reply)
 
     if not reply:
         # last resort — readable fallback
@@ -461,183 +523,22 @@ async def send3(payload: Send3In) -> Send3Out:
                     mem_ids.append(str(rid2))
             summary = reply[:320]
             MEMORY.add_text(user_id="dev", text=f"summary: {summary}", session_id=sess.id, source="summary")
+            # Auto-extract facts from assistant replies
+            try:
+                assistant_facts = extract_facts_from_text_v3(
+                    reply,
+                    subject="Arch",
+                )
+                for f in assistant_facts:
+                    add_fact(f)
+            except Exception as e:
+                print(f"[FACTS] assistant extract error: {e}")
         except Exception as e:
             print(f"[WARN] memory add_text (assistant) failed: {e}")
 
     sess.updated_at = _now()
     _SESSIONS[sess.id] = sess
     return Send3Out(session_id=sess.id, reply=reply, usage={}, memory_ids=mem_ids)
-
-
-# -----------------------------------------------------------------------------
-# Health
-# -----------------------------------------------------------------------------
-@app.get("/health")
-async def health() -> dict:
-    backend = "chroma" if "ChromaMemoryManager" in str(type(MEMORY)) else "fallback"
-    model = os.getenv("OLLAMA_MODEL_DEFAULT", "llama3.1:8b")
-    return {
-        "ok": True,
-        "ts": _now(),
-        "sessions": len(_SESSIONS),
-        "memory_backend": backend,
-        "model": model,
-        "offline": False,
-    }
-
-
-# -----------------------------------------------------------------------------
-# UI routes (match base.html: /ui/*)
-# -----------------------------------------------------------------------------
-@app.get("/", response_class=RedirectResponse)
-async def ui_root_redirect() -> RedirectResponse:
-    return RedirectResponse(url="/ui/chat", status_code=307)
-
-
-@app.get("/ui/chat")
-async def ui_chat(request: Request):
-    return templates.TemplateResponse("chat.html", {"request": request, "active": "chat"})
-
-
-@app.get("/ui/sessions", response_class=HTMLResponse)
-async def ui_sessions() -> HTMLResponse:
-    import datetime as _dt
-
-    def _label(ts: int) -> str:
-        dt = _dt.datetime.fromtimestamp(ts)
-        today = _dt.datetime.now().date()
-        if dt.date() == today:
-            return "Today"
-        if dt.date() == (today - _dt.timedelta(days=1)):
-            return "Yesterday"
-        return dt.strftime("%b %d, %Y")
-
-    groups: Dict[str, List[Session]] = {}
-    for s in sorted(_SESSIONS.values(), key=lambda x: x.updated_at, reverse=True):
-        groups.setdefault(_label(s.updated_at), []).append(s)
-
-    parts: List[str] = []
-    for label, items in groups.items():
-        parts.append(f'<div class="sb-section"><div class="sb-section-title">{label}</div>')
-        for it in items:
-            title = (it.title or it.id).strip()
-            sub = f"{it.turns} turns"
-            parts.append(
-                '<div class="sb-item">'
-                '  <a href="/ui/chat" hx-get="/ui/chat" hx-push-url="true">'
-                '    <svg class="ico" viewBox="0 0 24 24"><path d="M21 15V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14l4-4h12a2 2 0 0 0 2-2Z"/></svg>'
-                f'    <span class="sb-title-line" title="{title}">{title}</span>'
-                '  </a>'
-                f'  <div class="sb-sub">{sub}</div>'
-                '</div>'
-            )
-        parts.append('</div>')
-    html = "\n".join(parts) if parts else '<div class="sb-section"><div class="sb-sub">No sessions yet</div></div>'
-    return HTMLResponse(content=html)
-
-
-# -----------------------------------------------------------------------------
-# Sessions endpoints (minimal set used by UI)
-# -----------------------------------------------------------------------------
-@app.get("/sessions")
-async def list_sessions() -> List[Session]:
-    return sorted(_SESSIONS.values(), key=lambda s: s.updated_at, reverse=True)
-
-
-@app.post("/sessions")
-async def create_session() -> Session:
-    return ensure_session(None)
-
-
-@app.get("/sessions/{session_id}")
-async def get_session(session_id: str) -> Session:
-    if session_id not in _SESSIONS:
-        raise HTTPException(status_code=404, detail="No such session")
-    return _SESSIONS[session_id]
-
-
-# -----------------------------------------------------------------------------
-# Core: /send3 — single-shot send used by new UI
-# -----------------------------------------------------------------------------
-@app.post("/send3", response_model=Send3Out)
-async def send3(payload: Send3In) -> Send3Out:
-    sess = ensure_session(payload.session_id)
-
-    user_text = (payload.text or "").strip()
-    if not user_text:
-        raise HTTPException(status_code=400, detail="text is empty")
-
-    mem_ids: List[str] = []
-    if MEMORY is not None and hasattr(MEMORY, 'add_text'):
-        try:
-            res = MEMORY.add_text(user_id="dev", text=user_text, session_id=sess.id, source="user")
-            # normalize optional ids
-            if isinstance(res, dict):
-                rid = res.get("id") or res.get("ids")
-                if isinstance(rid, list):
-                    mem_ids.extend([str(x) for x in rid])
-                elif rid:
-                    mem_ids.append(str(rid))
-        except Exception as e:
-            print(f"[WARN] memory add_text (user) failed: {e}")
-
-    # 4) call chat module (prefers your async chat_endpoint_call)
-    reply: Optional[str] = None
-    try:
-        if hasattr(chat_mod, "chat_endpoint_call"):
-            body = {
-                "message": user_text,
-                "session_id": sess.id,
-                "system": None,
-                "stream": False,
-                "use_rag": True,
-                "k_memory": 4,
-                "style": payload.style,   # <-- pass-through from UI
-                "settings": payload.settings or None,
-                "model_override": payload.model_override or None,
-            }
-            headers = {"X-User": "dev", "X-Style": payload.style or ""}
-            try:
-                obj = await chat_mod.chat_endpoint_call(body, headers)  # type: ignore[arg-type]
-                if isinstance(obj, dict):
-                    reply = obj.get("reply") or obj.get("text")
-            except Exception as e:
-                print(f"[WARN] chat_mod.chat_endpoint_call failed: {e}")
-    except Exception as e:
-        print(f"[WARN] chat_mod wrapper failed: {e}")
-
-    if not reply:
-        # last resort — readable fallback
-        reply = f"Принял. {user_text}"
-
-    if MEMORY is not None and hasattr(MEMORY, 'add_text'):
-        try:
-            res2 = MEMORY.add_text(user_id="dev", text=reply, session_id=sess.id, source="assistant")
-            if isinstance(res2, dict):
-                rid2 = res2.get("id") or res2.get("ids")
-                if isinstance(rid2, list):
-                    mem_ids.extend([str(x) for x in rid2])
-                elif rid2:
-                    mem_ids.append(str(rid2))
-            summary = reply[:320]
-            MEMORY.add_text(user_id="dev", text=f"summary: {summary}", session_id=sess.id, source="summary")
-        except Exception as e:
-            print(f"[WARN] memory add_text (assistant/summary) failed: {e}")
-
-    sess.turns += 1
-    sess.updated_at = _now()
-    if sess.title == "New session":
-        t = user_text.replace("\n", " ")[:48].strip()
-        sess.title = t or "New session"
-
-    return Send3Out(
-        session_id=sess.id,
-        reply=reply,
-        usage={},
-        memory_ids=mem_ids,
-        updated_at=sess.updated_at,
-    )
-
 
 # Mount phase-9 memory router if it exists (kept for tools)
 try:
@@ -731,7 +632,6 @@ async def ingest_endpoint(files: List[UploadFile] = File(default=[]), url: Optio
 
     lines = [f"saved: {', '.join(saved) if saved else '—'}", f"url: {queued or '—'}"]
     return HTMLResponse("<pre>" + "\n".join(lines) + "</pre>")
-    return HTMLResponse(f"<pre>uploaded: {", ".join(names) if names else "—"}; url: {url or "—"}</pre>")
 
 @app.get('/ingest/status')
 async def ingest_status():
@@ -1013,9 +913,6 @@ def get_ingest_queue_partial(request: Request):
     return templates.TemplateResponse("partials/ingest_queue.html", {"request": request, "queue": queue})
 
 @app.get("/ui/chat/stream", response_class=HTMLResponse)
-@app.get("/ui/chat/stream", response_class=HTMLResponse)
-
-@app.get("/ui/chat/stream", response_class=HTMLResponse)
 def get_chat_stream(request: Request):
     from .main import _SESSIONS
     if not _SESSIONS:
@@ -1036,7 +933,6 @@ async def ui_summary(request: Request):
 async def ui_summaries(request: Request):
     return templates.TemplateResponse('base.html', {'request': request, 'page': 'summary_content'})
 @app.get("/ui/settings", response_class=HTMLResponse)
-@app.get("/ui/settings", response_class=HTMLResponse)
 def ui_settings(request: Request):
     return templates.TemplateResponse("settings.html", {"request": request})
 
@@ -1044,6 +940,18 @@ from backend.app.routes_ui_search import router as ui_search_router
 app.include_router(ui_search_router)
 from backend.app.routes_ui_chat_htmx import router as chat_htmx_router
 app.include_router(chat_htmx_router)
+
+# Facts API router (for Memory Bank / Facts tab)
+try:
+    from backend.app.routes_facts import router as facts_router  # noqa: E402
+    app.include_router(facts_router)
+except Exception:
+    try:
+        from .routes_facts import router as facts_router  # type: ignore
+        app.include_router(facts_router)
+    except Exception:
+        pass
+
 from backend.app.routes_memory import router as memory_router
 app.include_router(memory_router)
 

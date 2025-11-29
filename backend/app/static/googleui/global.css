@@ -1,0 +1,22 @@
+
+@keyframes dotPulse {
+  0%   { transform: scale(1); opacity: .4; }
+  50%  { transform: scale(1.4); opacity: .9; }
+  100% { transform: scale(1); opacity: .4; }
+}
+
+.dot-pulse {
+  animation: dotPulse 1s infinite ease-in-out;
+}
+
+
+@keyframes dotPulse {
+  0%   { transform: scale(1); opacity: .4; }
+  50%  { transform: scale(1.4); opacity: .9; }
+  100% { transform: scale(1); opacity: .4; }
+}
+
+.dot-pulse {
+  animation: dotPulse 1s infinite ease-in-out;
+}
+

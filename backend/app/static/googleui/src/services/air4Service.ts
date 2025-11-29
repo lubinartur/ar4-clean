@@ -5,16 +5,6 @@ const API_BASE = 'http://127.0.0.1:8000';
 const STORAGE_KEY_CONFIG = 'air4_config';
 const STORAGE_KEY_SESSIONS = 'air4_sessions';
 
-export interface Fact {
-  id?: string;
-  subject: string;
-  predicate: string;
-  object: string;
-  timestamp: number;
-  source_session?: string | null;
-  source_message_id?: string | null;
-}
-
 // Initial Agents / Modules aligned with Domains
 export const AVAILABLE_AGENTS: Agent[] = [
   { id: 'general', name: 'Prime Core', description: 'General logic, reasoning.', icon: 'Cpu', systemPrompt: 'You are AIr4.', domain: 'general', enabled: true },
@@ -28,9 +18,7 @@ export const AVAILABLE_MODELS: ModelName[] = [
     'Hermes-7B',
     'LLaMA-3.1-8B',
     'Qwen-2.5-14B',
-    'Mixtral-8x7B',
-    'DeepSeek-32B',
-    'DeepSeek-14B'
+    'Mixtral-8x7B'
 ];
 
 interface Air4Config {
@@ -80,21 +68,10 @@ class Air4Service {
 
     const savedSessions = localStorage.getItem(STORAGE_KEY_SESSIONS);
     if (savedSessions) {
-      try {
-        const parsed = JSON.parse(savedSessions);
-        this.sessions = Array.isArray(parsed) ? parsed : [];
-      } catch (e) {
-        console.warn('Failed to parse stored sessions, resetting.', e);
-        this.sessions = [];
-        localStorage.removeItem(STORAGE_KEY_SESSIONS);
-      }
+        this.sessions = JSON.parse(savedSessions);
     } else {
-      this.sessions = [];
-    }
-
-    // If after loading there are no sessions, create an initial one
-    if (this.sessions.length === 0) {
-      this.createSession('Local Core Online');
+        // Create initial session if none exists
+        this.createSession('Local Core Online');
     }
   }
 
@@ -366,31 +343,6 @@ class Air4Service {
         return [];
     }
   }
-
-  async getFacts(subject: string = "Arch", limit: number = 64): Promise<Fact[]> {
-      if (this.appState === AppState.PANIC) return [];
-      if (this.isOfflineMode) return [];
-      try {
-          const res = await fetch(`${API_BASE}/facts?subject=${encodeURIComponent(subject)}&limit=${limit}`);
-          if (!res.ok) throw new Error("Facts fetch failed");
-          const data = await res.json();
-          if (Array.isArray(data)) {
-              return data.map((item: any) => ({
-                  id: item.id,
-                  subject: item.subject,
-                  predicate: item.predicate,
-                  object: item.object,
-                  timestamp: item.timestamp,
-                  source_session: item.source_session,
-                  source_message_id: item.source_message_id,
-              }));
-          }
-          return [];
-      } catch (e) {
-          console.error("Failed to load facts", e);
-          return [];
-      }
-  }
   
   async addManualMemory(content: string, source: string = 'user-selection'): Promise<boolean> {
       if (this.isOfflineMode) return false;
@@ -474,7 +426,7 @@ class Air4Service {
 
   // --- CHAT LOGIC ---
 
-  async *streamChat(messages: Message[], sessionId: string, coreSettings?: { temperature?: number; responseTone?: string; outputDensity?: string; interfaceLanguage?: string; activeModel?: string }): AsyncGenerator<{ chunk?: string, context?: MemoryItem[], decision?: RouterDecision }, void, unknown> {
+  async *streamChat(messages: Message[], sessionId: string): AsyncGenerator<{ chunk?: string, context?: MemoryItem[], decision?: RouterDecision }, void, unknown> {
     if (this.appState === AppState.PANIC) {
        yield { chunk: "SYSTEM LOCKED. ACCESS DENIED." };
        return;
@@ -541,25 +493,16 @@ class Air4Service {
 
     try {
         // 2. Call Real Backend
-    const settingsPayload = coreSettings ? {
-        temperature: coreSettings.temperature,
-        response_tone: coreSettings.responseTone,
-        output_density: coreSettings.outputDensity,
-        interface_language: coreSettings.interfaceLanguage,
-        active_model: coreSettings.activeModel || selectedModel
-    } : undefined;
-
-    const res = await fetch(`${API_BASE}/send3`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            text: lastMessage.content,
-            session_id: sessionId,
-            style: currentStyle, // Pass current response style
-            model_override: selectedModel, // Send preferred model to backend
-            ...(settingsPayload ? { settings: settingsPayload } : {})
-        })
-    });
+        const res = await fetch(`${API_BASE}/send3`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                text: lastMessage.content,
+                session_id: sessionId,
+                style: currentStyle, // Pass current response style
+                model_override: selectedModel // Send preferred model to backend
+            })
+        });
 
         if (!res.ok) {
             throw new Error(`Server responded with status ${res.status}`);
@@ -639,24 +582,4 @@ class Air4Service {
   }
 }
 
-const air4Instance = new Air4Service();
-
-export const air4 = air4Instance;
-
-// Legacy helper exports for compatibility with older UI code
-// Allow imports like `import * as se from '../services/air4Service'` and calls
-// se.getLanguage(), se.createSession(), se.getSessions(), etc.
-export const getLanguage = () => air4Instance.getLanguage();
-export const setLanguage = (lang: Language) => air4Instance.setLanguage(lang);
-
-export const getResponseStyle = () => air4Instance.getResponseStyle();
-export const setResponseStyle = (style: ResponseStyle) => air4Instance.setResponseStyle(style);
-
-export const getIngestMode = () => air4Instance.getIngestMode();
-export const setIngestMode = (mode: IngestMode) => air4Instance.setIngestMode(mode);
-
-export const getAutoTitle = () => air4Instance.getAutoTitle();
-export const setAutoTitle = (enabled: boolean) => air4Instance.setAutoTitle(enabled);
-
-export const getSessions = () => air4Instance.getSessions();
-export const createSession = (initialTitle?: string) => air4Instance.createSession(initialTitle);
+export const air4 = new Air4Service();

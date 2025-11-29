@@ -51,3 +51,27 @@ drop_test.txt
 ui_*.txt
 rag.md
 rag_check.md
+
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+dist/
+
+# Backups
+*.bak
+*backup*
+*broken*
+
+# Build artifacts
+backend/app/static/googleui/node_modules/
+backend/app/static/googleui/dist/
+
+# Sessions (runtime data)
+data/sessions/
+
+
+# macOS
+.DS_Store
+
