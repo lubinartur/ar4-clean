@@ -1,9 +1,11 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
   <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta charset="UTF-8" />
     <title>AIr4 | Personal Local Intelligence</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- Tailwind CDN (как у тебя было) -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
@@ -23,12 +25,12 @@
             },
             colors: {
               air: {
-                50: '#fff7ed',
+                50:  '#fff7ed',
                 100: '#ffedd5',
                 200: '#fed7aa',
                 300: '#fdba74',
                 400: '#fb923c',
-                500: '#f97316',  /* Primary Orange */
+                500: '#f97316',
                 600: '#ea580c',
                 700: '#c2410c',
                 800: '#9a3412',
@@ -42,98 +44,54 @@
               }
             },
             fontFamily: {
-              mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', "Liberation Mono", "Courier New", 'monospace'],
-              sans: ['ui-sans-serif', 'system-ui', '-apple-system', "Segoe UI", 'Roboto', "Helvetica Neue", 'Arial', "Noto Sans", 'sans-serif'],
+              mono: ['ui-monospace','SFMono-Regular','Menlo','Monaco','Consolas','Liberation Mono','Courier New','monospace'],
+              sans: ['ui-sans-serif','system-ui','-apple-system','Segoe UI','Roboto','Helvetica Neue','Arial','Noto Sans','sans-serif'],
             }
           }
         }
-      }
+      };
     </script>
+
     <style>
       body {
-        /* Deep atmospheric background */
         background-color: #020617;
-        background-image: 
+        background-image:
           radial-gradient(circle at 15% 50%, rgba(234, 88, 12, 0.08), transparent 25%),
           radial-gradient(circle at 85% 30%, rgba(124, 45, 18, 0.1), transparent 25%);
         color: #e2e8f0;
         overflow: hidden;
       }
-      
-      /* Glassmorphism Utilities */
       .glass-panel {
         background: rgba(15, 23, 42, 0.6);
         backdrop-filter: blur(12px);
         -webkit-backdrop-filter: blur(12px);
         border: 1px solid rgba(255, 255, 255, 0.08);
       }
-      
       .glass-card {
         background: linear-gradient(145deg, rgba(30, 41, 59, 0.4) 0%, rgba(15, 23, 42, 0.4) 100%);
         backdrop-filter: blur(8px);
         border: 1px solid rgba(255, 255, 255, 0.05);
         box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
       }
-      
       .glass-input {
         background: rgba(2, 6, 23, 0.5);
         border: 1px solid rgba(255, 255, 255, 0.1);
         backdrop-filter: blur(4px);
       }
-
-      /* Custom Scrollbar */
-      ::-webkit-scrollbar {
-        width: 6px;
-      }
-      ::-webkit-scrollbar-track {
-        background: transparent; 
-      }
+      ::-webkit-scrollbar { width: 6px; }
+      ::-webkit-scrollbar-track { background: transparent; }
       ::-webkit-scrollbar-thumb {
-        background: rgba(255,255,255,0.1); 
+        background: rgba(255,255,255,0.1);
         border-radius: 3px;
       }
       ::-webkit-scrollbar-thumb:hover {
-        background: rgba(249, 115, 22, 0.5); 
-      }
-      
-      .glitch-text {
-        position: relative;
-      }
-      /* Simplified Glitch for cleaner look */
-      .glitch-text:hover::before {
-        content: attr(data-text);
-        position: absolute;
-        left: 2px;
-        text-shadow: -1px 0 #ea580c;
-        top: 0;
-        color: white;
-        background: #020617;
-        overflow: hidden;
-        clip: rect(0, 900px, 0, 0);
-        animation: noise-anim 2s infinite linear alternate-reverse;
-      }
-      @keyframes noise-anim {
-        0% { clip: rect(10px, 9999px, 30px, 0); }
-        50% { clip: rect(60px, 9999px, 80px, 0); }
-        100% { clip: rect(20px, 9999px, 90px, 0); }
+        background: rgba(249, 115, 22, 0.5);
       }
     </style>
-  <script type="importmap">
-{
-  "imports": {
-    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.554.0",
-    "recharts": "https://aistudiocdn.com/recharts@^3.4.1",
-    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
-    "react/": "https://aistudiocdn.com/react@^19.2.0/",
-    "react": "https://aistudiocdn.com/react@^19.2.0",
-    "react-router-dom": "https://aistudiocdn.com/react-router-dom@^7.9.6"
-  }
-}
-</script>
-<link rel="stylesheet" href="/index.css">
-</head>
+  </head>
   <body>
     <div id="root"></div>
-  <script type="module" src="/index.tsx"></script>
-</body>
+    <!-- Vite будет собирать из этого entry -->
+    <script type="module" src="/index.tsx"></script>
+  </body>
 </html>

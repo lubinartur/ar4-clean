@@ -1,12 +1,23 @@
 
 export type Domain = 'general' | 'code' | 'finance' | 'fitness' | 'creative' | 'long-docs';
-export type ModelName = 'Mistral-7B' | 'Hermes-7B' | 'LLaMA-3.1-8B' | 'Qwen-2.5-14B' | 'Mixtral-8x7B';
+export type ModelName = 'Mistral-7B' | 'Hermes-7B' | 'LLaMA-3.1-8B' | 'Qwen-2.5-14B' | 'Mixtral-8x7B' | 'Offline-Demo';
+export type ResponseStyle = 'short' | 'normal' | 'detailed';
+export type Language = 'ru' | 'en' | 'auto';
+export type IngestMode = 'fast' | 'smart' | 'high-precision';
 
 export interface RouterDecision {
   domain: Domain;
   model: ModelName;
   confidence: number;
   reason: string;
+}
+
+export interface ChatSession {
+  id: string;
+  title: string;
+  lastMessage: string;
+  timestamp: number;
+  messages: Message[];
 }
 
 export interface Message {

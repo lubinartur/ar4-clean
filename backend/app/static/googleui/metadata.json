@@ -1,4 +1,5 @@
 {
-  "name": "AIr4 - Local Intelligence",
-  "description": "A private, offline-first personal intelligence system acting as an external brain for memory, analysis, and strategic assistance."
+  "name": "AIr4 - Локальный Интеллект",
+  "description": "Приватная, оффлайн-ориентированная система персонального интеллекта, действующая как внешний мозг для памяти, анализа и стратегической помощи.",
+  "requestFramePermissions": []
 }

@@ -72,6 +72,8 @@ class ChatBody(BaseModel):
     use_rag: bool = True
     k_memory: int = Field(4, ge=1, le=50)
     style: Optional[str] = Field(STYLE_DEFAULT, description="short | normal | detailed")
+    model_override: Optional[str] = None
+    model_override: Optional[str] = Field(None, description="Preferred model from UI")
 
 
 class ChatResult(BaseModel):
@@ -168,11 +170,66 @@ def _summarize_for_sources_display(text: str, limit: int = 220) -> str:
 # -----------------------------------------------------------------------------
 # Ollama call
 # -----------------------------------------------------------------------------
-async def call_ollama(messages: List[dict], session_id: Optional[str], options: Optional[Dict[str, Any]] = None) -> str:
+def _resolve_model_name(requested: Optional[str]) -> str:
+    if not requested:
+        return OLLAMA_MODEL_DEFAULT
+
+    key = str(requested).strip().lower()
+
+    if key in {
+        OLLAMA_MODEL_DEFAULT.lower(),
+        "llama3.1:8b",
+        "llama3.1-8b",
+        "llama3",
+        "llama3-8b",
+        "llama 3.1 8b",
+    }:
+        return "llama3.1:8b"
+
+    if key in {"mistral-7b", "mistral", "mistral 7b"}:
+        return "mistral:latest"
+
+    if key in {
+        "hermes-7b",
+        "nous-hermes",
+        "nous-hermes2-mixtral:8x7b",
+        "mixtral-8x7b",
+        "mixtral",
+    }:
+        return "nous-hermes2-mixtral:8x7b"
+
+    return OLLAMA_MODEL_DEFAULT
+    # UI labels → Ollama model ids
+    if key in {"mistral-7b", "mistral"}:
+        return "mistral:latest"
+
+    if key in {"llama-3.1-8b", "llama 3.1 8b"}:
+        return "llama3.1:8b"
+
+    if key in {"hermes-7b", "nous-hermes", "mixtral-8x7b", "mixtral"}:
+        return "nous-hermes2-mixtral:8x7b"
+
+    # Fallback
+    return OLLAMA_MODEL_DEFAULT
+
+
+async def call_ollama(
+    messages: List[dict],
+    session_id: Optional[str],
+    options: Optional[Dict[str, Any]] = None,
+    model: Optional[str] = None,
+) -> str:
     import httpx
 
     options = options or STYLES[STYLE_DEFAULT]["options"]
-    payload = {"model": OLLAMA_MODEL_DEFAULT, "messages": messages, "stream": False, "options": options}
+    resolved_model = _resolve_model_name(model)
+
+    payload = {
+        "model": resolved_model,
+        "messages": messages,
+        "stream": False,
+        "options": options,
+    }
     timeout = httpx.Timeout(60.0, read=300.0, connect=10.0)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -180,7 +237,7 @@ async def call_ollama(messages: List[dict], session_id: Optional[str], options: 
         r.raise_for_status()
         obj = r.json() or {}
         msg = (obj.get("message") or {}).get("content") or ""
-        return str(msg).strip()
+        return f"[{resolved_model}] " + str(msg).strip()
     except Exception as e:
         last_user = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
         return f"echo: {last_user} (ollama failed: {e})"
@@ -218,7 +275,15 @@ async def chat_endpoint_call(body: Dict[str, Any], headers: Dict[str, str]) -> D
             memory_blocks = []
 
     messages = build_messages(data.system, memory_blocks, data.message, headers, cfg.get("prompt"))
-    reply_text = await call_ollama(messages, session_id=data.session_id, options=cfg.get("options"))
+    # Resolve model from UI override (if any)
+    model_name = _resolve_model_name(getattr(data, "model_override", None))
+
+    reply_text = await call_ollama(
+        messages,
+        session_id=data.session_id,
+        options=cfg.get("options"),
+        model=data.model_override,
+    )
 
     session_id = data.session_id or generate_session_id()
     memory_used = [_summarize_for_sources_display(t) for t in memory_blocks] if memory_blocks else []

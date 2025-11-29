@@ -130,6 +130,53 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
         if not q:
             return JSONResponse({"reply": "empty"}, status_code=200)
 
+    # настройки из payload (фронтовый Settings)
+    settings: dict = {}
+    if isinstance(payload, dict):
+        raw_settings = payload.get("settings") or {}
+        if isinstance(raw_settings, dict):
+            settings = raw_settings
+
+    tone = str(settings.get("response_tone", "") or "").lower()
+    density = str(settings.get("output_density", "") or "").lower()
+    temp = settings.get("temperature", None)
+    ui_lang = str(settings.get("interface_language", "") or "").lower()
+
+    extra_parts: list[str] = []
+
+    if tone == "bro":
+        extra_parts.append(
+            "Стиль: токсично-доброжелательный брат. Говори честно, прямо, иногда жёстко, но с уважением и поддержкой. Без лишних извинений и подлизывания."
+        )
+    elif tone == "strict":
+        extra_parts.append(
+            "Стиль: строгий, деловой, без лишних эмоций и без воды."
+        )
+    elif tone == "neutral":
+        extra_parts.append(
+            "Стиль: спокойный, нейтральный, без излишней эмоциональности."
+        )
+
+    if density == "short":
+        extra_parts.append(
+            "Отвечай максимально кратко: 2–4 коротких предложения или список из 3–5 пунктов."
+        )
+    elif density == "deep":
+        extra_parts.append(
+            "Отвечай подробно и глубоко: разбирай по шагам, добавляй примеры и выводы, но без воды."
+        )
+
+    if ui_lang in ("ru", "ru-ru", "russian"):
+        extra_parts.append("Отвечай по-русски.")
+    elif ui_lang in ("en", "en-us", "en-gb", "english"):
+        extra_parts.append("Answer in English.")
+
+    if temp is not None:
+        extra_parts.append(f"Держи уровень креативности примерно на уровне {temp}.")
+
+    if extra_parts:
+        system_preamble = system_preamble + " " + " ".join(extra_parts)
+
     # session_id из payload (если есть), иначе "ui"
     sess_id = "ui"
     if isinstance(payload, dict):

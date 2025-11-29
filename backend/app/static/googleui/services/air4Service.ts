@@ -1,9 +1,9 @@
 
-import { Agent, MemoryItem, Message, SystemStats, RouterDecision, AppState, Domain, IngestItem, Send3Out } from '../types';
+import { Agent, MemoryItem, Message, SystemStats, RouterDecision, AppState, Domain, IngestItem, Send3Out, ChatSession, ModelName, ResponseStyle, Language, IngestMode } from '../types';
 
 const API_BASE = 'http://127.0.0.1:8000';
 const STORAGE_KEY_CONFIG = 'air4_config';
-const STORAGE_KEY_SESSION_ID = 'air4_session_id';
+const STORAGE_KEY_SESSIONS = 'air4_sessions';
 
 // Initial Agents / Modules aligned with Domains
 export const AVAILABLE_AGENTS: Agent[] = [
@@ -13,21 +13,165 @@ export const AVAILABLE_AGENTS: Agent[] = [
   { id: 'code', name: 'Dev-Ops', description: 'Code & debugging.', icon: 'Terminal', systemPrompt: 'Focus on code.', domain: 'code', enabled: false },
 ];
 
+export const AVAILABLE_MODELS: ModelName[] = [
+    'Mistral-7B',
+    'Hermes-7B',
+    'LLaMA-3.1-8B',
+    'Qwen-2.5-14B',
+    'Mixtral-8x7B'
+];
+
+interface Air4Config {
+    setupComplete: boolean;
+    agents: Agent[];
+    userName: string;
+    activeModel: ModelName;
+    responseStyle: ResponseStyle;
+    language: Language;
+    ingestMode: IngestMode;
+    autoTitleSessions: boolean;
+}
+
 class Air4Service {
-  private config: { setupComplete: boolean; agents: Agent[]; userName: string };
+  private config: Air4Config;
   private appState: AppState = AppState.ACTIVE;
-  private ingestQueue: IngestItem[] = [];
   private isOfflineMode: boolean = false;
   private lastHealthCheck: number = 0;
+  private sessions: ChatSession[] = [];
 
   constructor() {
     const savedConfig = localStorage.getItem(STORAGE_KEY_CONFIG);
     if (savedConfig) {
-      this.config = JSON.parse(savedConfig);
+      const parsed = JSON.parse(savedConfig);
+      this.config = {
+          setupComplete: parsed.setupComplete || false,
+          agents: parsed.agents || AVAILABLE_AGENTS,
+          userName: parsed.userName || '',
+          activeModel: parsed.activeModel || 'Mistral-7B',
+          responseStyle: parsed.responseStyle || 'normal',
+          language: parsed.language || 'auto',
+          ingestMode: parsed.ingestMode || 'smart',
+          autoTitleSessions: parsed.autoTitleSessions !== undefined ? parsed.autoTitleSessions : true
+      };
     } else {
-      this.config = { setupComplete: false, agents: AVAILABLE_AGENTS, userName: '' };
+      this.config = { 
+          setupComplete: false, 
+          agents: AVAILABLE_AGENTS, 
+          userName: '', 
+          activeModel: 'Mistral-7B', 
+          responseStyle: 'normal',
+          language: 'auto',
+          ingestMode: 'smart',
+          autoTitleSessions: true
+      };
+    }
+
+    const savedSessions = localStorage.getItem(STORAGE_KEY_SESSIONS);
+    if (savedSessions) {
+      try {
+        const parsed = JSON.parse(savedSessions);
+        this.sessions = Array.isArray(parsed) ? parsed : [];
+      } catch (e) {
+        console.warn('Failed to parse stored sessions, resetting.', e);
+        this.sessions = [];
+        localStorage.removeItem(STORAGE_KEY_SESSIONS);
+      }
+    } else {
+      this.sessions = [];
+    }
+
+    // If after loading there are no sessions, create an initial one
+    if (this.sessions.length === 0) {
+      this.createSession('Local Core Online');
     }
   }
+
+  // --- SESSION MANAGEMENT ---
+
+  getSessions(): ChatSession[] {
+      return this.sessions.sort((a, b) => b.timestamp - a.timestamp);
+  }
+
+  getSession(id: string): ChatSession | undefined {
+      return this.sessions.find(s => s.id === id);
+  }
+
+  createSession(initialTitle: string = 'New Session'): ChatSession {
+      const newSession: ChatSession = {
+          id: Date.now().toString(),
+          title: initialTitle,
+          lastMessage: '',
+          timestamp: Date.now(),
+          messages: [{
+            id: 'init',
+            role: 'assistant',
+            content: 'Local Core Online. How can I assist you today?',
+            timestamp: Date.now(),
+            modelUsed: this.config.activeModel,
+            domain: 'general'
+          }]
+      };
+      this.sessions.unshift(newSession);
+      this.saveSessions();
+      return newSession;
+  }
+
+  deleteSession(id: string) {
+      this.sessions = this.sessions.filter(s => s.id !== id);
+      this.saveSessions();
+  }
+
+  deleteAllSessions() {
+      this.sessions = [];
+      this.saveSessions();
+      // Immediately create a fresh one so the UI isn't empty
+      this.createSession();
+  }
+
+  renameSession(id: string, newTitle: string) {
+      this.updateSession(id, { title: newTitle });
+  }
+
+  duplicateSession(id: string) {
+      const original = this.getSession(id);
+      if (original) {
+          const newSession = {
+              ...original,
+              id: Date.now().toString(),
+              title: `${original.title} (Copy)`,
+              timestamp: Date.now()
+          };
+          this.sessions.unshift(newSession);
+          this.saveSessions();
+      }
+  }
+
+  exportSession(id: string) {
+      const session = this.getSession(id);
+      if (session) {
+          const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(session, null, 2));
+          const downloadAnchorNode = document.createElement('a');
+          downloadAnchorNode.setAttribute("href", dataStr);
+          downloadAnchorNode.setAttribute("download", `air4_session_${id}.json`);
+          document.body.appendChild(downloadAnchorNode);
+          downloadAnchorNode.click();
+          downloadAnchorNode.remove();
+      }
+  }
+
+  private saveSessions() {
+      localStorage.setItem(STORAGE_KEY_SESSIONS, JSON.stringify(this.sessions));
+  }
+
+  private updateSession(id: string, updates: Partial<ChatSession>) {
+      const index = this.sessions.findIndex(s => s.id === id);
+      if (index !== -1) {
+          this.sessions[index] = { ...this.sessions[index], ...updates };
+          this.saveSessions();
+      }
+  }
+
+  // --- CONFIG ---
 
   isSetupComplete(): boolean {
     return this.config.setupComplete;
@@ -35,6 +179,56 @@ class Air4Service {
   
   getUserName(): string {
       return this.config.userName || 'Operator';
+  }
+
+  setUserName(name: string) {
+      this.config.userName = name;
+      this.persistConfig();
+  }
+
+  getActiveModel(): ModelName {
+      return this.config.activeModel || 'Mistral-7B';
+  }
+
+  setActiveModel(model: ModelName) {
+      this.config.activeModel = model;
+      this.persistConfig();
+  }
+
+  getResponseStyle(): ResponseStyle {
+      return this.config.responseStyle || 'normal';
+  }
+
+  setResponseStyle(style: ResponseStyle) {
+      this.config.responseStyle = style;
+      this.persistConfig();
+  }
+
+  getLanguage(): Language {
+      return this.config.language || 'auto';
+  }
+
+  setLanguage(lang: Language) {
+      this.config.language = lang;
+      this.persistConfig();
+  }
+
+  getIngestMode(): IngestMode {
+      return this.config.ingestMode || 'smart';
+  }
+
+  setIngestMode(mode: IngestMode) {
+      this.config.ingestMode = mode;
+      this.persistConfig();
+  }
+
+  getAutoTitle(): boolean {
+      return this.config.autoTitleSessions;
+  }
+
+  setAutoTitle(enabled: boolean) {
+      this.config.autoTitleSessions = enabled;
+      this.persistConfig();
   }
 
   getAppState(): AppState {
@@ -48,17 +242,19 @@ class Air4Service {
   
   resetSystem(): void {
       localStorage.removeItem(STORAGE_KEY_CONFIG);
-      localStorage.removeItem(STORAGE_KEY_SESSION_ID);
+      localStorage.removeItem(STORAGE_KEY_SESSIONS);
       window.location.reload();
   }
 
   saveConfig(agents: Agent[], userName: string) {
-    this.config = { setupComplete: true, agents, userName };
-    localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(this.config));
+    this.config.agents = agents;
+    this.config.userName = userName;
+    this.config.setupComplete = true;
+    this.persistConfig();
   }
 
-  resetChatSession(): void {
-    localStorage.removeItem(STORAGE_KEY_SESSION_ID);
+  private persistConfig() {
+      localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(this.config));
   }
 
   private getOfflineStats(): SystemStats {
@@ -120,7 +316,7 @@ class Air4Service {
         ltmHitRate: 0.7,
         ingestQueueLength: qLength,
         isOffline: false,
-        modelName: data.model || 'Unknown'
+        modelName: data.model || this.config.activeModel || 'Unknown'
       };
     } catch (e) {
       this.isOfflineMode = true;
@@ -159,6 +355,30 @@ class Air4Service {
     }
   }
   
+  async addManualMemory(content: string, source: string = 'user-selection'): Promise<boolean> {
+      if (this.isOfflineMode) return false;
+      try {
+          const res = await fetch(`${API_BASE}/memory/add`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ 
+                  text: content, 
+                  metadata: { 
+                      kind: 'note', 
+                      source: source,
+                      ts: Math.floor(Date.now() / 1000)
+                  }
+              })
+          });
+          if (!res.ok) return false;
+          const data = await res.json();
+          return data.ok;
+      } catch (e) {
+          console.error("Failed to add memory", e);
+          return false;
+      }
+  }
+
   private mapMetadataToNamespace(meta: any): MemoryItem['namespace'] {
       if (!meta) return 'facts';
       if (meta.kind === 'file' || meta.source === 'file' || meta.source_path) return 'docs';
@@ -177,7 +397,7 @@ class Air4Service {
       formData.append('file', file);
       
       try {
-          const res = await fetch(`${API_BASE}/ingest/file?tag=ui-upload`, {
+          const res = await fetch(`${API_BASE}/ingest/file?tag=ui-upload&mode=${this.config.ingestMode}`, {
               method: 'POST',
               body: formData
           });
@@ -204,8 +424,8 @@ class Air4Service {
                 filename: q.file || 'Unknown',
                 size: 0,
                 type: 'detected',
-                status: 'processing',
-                progress: 50,
+                status: q.status || 'processing', // Use backend status if available
+                progress: typeof q.progress === 'number' ? q.progress : 50,
                 timestamp: Date.now()
             }));
         }
@@ -215,116 +435,108 @@ class Air4Service {
       }
   }
 
-  async getSessions(): Promise<any[]> {
-    if (this.appState === AppState.PANIC) return [];
-    if (this.isOfflineMode) return [];
-
-    try {
-      const res = await fetch(`${API_BASE}/sessions`);
-      if (!res.ok) throw new Error('Failed to fetch sessions');
-      const data = await res.json();
-      if (Array.isArray(data)) return data;
-      if (Array.isArray(data?.sessions)) return data.sessions;
-      return [];
-    } catch (e) {
-      console.warn('getSessions failed', e);
-      return [];
-    }
-  }
-
   // --- CHAT LOGIC ---
 
-  async sendMessage(text: string, sessionId?: string | null): Promise<any> {
-    if (this.appState === AppState.PANIC) {
-      return { reply: 'SYSTEM LOCKED. ACCESS DENIED.' };
-    }
-
-    if (this.isOfflineMode) {
-      return {
-        reply: '⚠️ CORE OFFLINE: UI работает, но соединения с 127.0.0.1:8000 нет. Проверь Uvicorn и Ollama.'
-      };
-    }
-
-    const payload: any = { text };
-    if (sessionId) {
-      payload.session_id = sessionId;
-    }
-
-    const res = await fetch(`${API_BASE}/chat`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!res.ok) {
-      throw new Error(`Failed to send message: ${res.status} ${res.statusText}`);
-    }
-
-    return res.json();
-  }
-
-  async *streamChat(messages: Message[]): AsyncGenerator<{ chunk?: string, context?: MemoryItem[], decision?: RouterDecision }, void, unknown> {
+  async *streamChat(messages: Message[], sessionId: string, coreSettings?: { temperature?: number; responseTone?: string; outputDensity?: string; interfaceLanguage?: string; activeModel?: string }): AsyncGenerator<{ chunk?: string, context?: MemoryItem[], decision?: RouterDecision }, void, unknown> {
     if (this.appState === AppState.PANIC) {
        yield { chunk: "SYSTEM LOCKED. ACCESS DENIED." };
        return;
     }
 
-    const lastMessage = messages[messages.length - 1].content;
-    let storedSessionId = localStorage.getItem(STORAGE_KEY_SESSION_ID) || undefined;
+    const lastMessage = messages[messages.length - 1];
+    
+    // Update local session immediately with user message
+    const session = this.getSession(sessionId);
+    if (session) {
+        // Auto-title logic: if it's the first real user message and enabled
+        let titleUpdate = session.title;
+        if (this.config.autoTitleSessions && session.messages.length <= 1) {
+            titleUpdate = lastMessage.content.slice(0, 30) + (lastMessage.content.length > 30 ? '...' : '');
+        }
 
-    // 1. Simulate Router (UI only)
-    const simulatedDomain = this.guessDomain(lastMessage);
+        this.updateSession(sessionId, {
+            messages: messages,
+            lastMessage: lastMessage.content,
+            timestamp: Date.now(),
+            title: titleUpdate
+        });
+    }
+
+    // 1. Simulate Router (UI only) - Use configured Active Model
+    const simulatedDomain = this.guessDomain(lastMessage.content);
+    const selectedModel = this.config.activeModel || 'Mistral-7B';
+    const currentStyle = this.config.responseStyle || 'normal';
+    
     yield { 
         decision: { 
             domain: simulatedDomain, 
-            model: this.isOfflineMode ? 'Offline-Demo' : 'Mistral-7B', 
+            model: this.isOfflineMode ? 'Offline-Demo' : selectedModel, 
             confidence: 0.85, 
-            reason: 'Routed via local rules' 
+            reason: `Routed via local rules (Style: ${currentStyle})`
         } 
     };
 
     // If we already know we are offline, skip fetch to prevent error
     if (this.isOfflineMode) {
-        const mockReply = "I am currently unable to reach the local backend (127.0.0.1:8000). I am operating in Offline Demo Mode. I can visualize the UI, but I cannot process real data or retrieve memories until the connection is restored.";
+        const mockReply = `[${selectedModel} DEMO MODE - ${currentStyle.toUpperCase()}]\n\nI am currently unable to reach the local backend (127.0.0.1:8000). I am operating in Offline Demo Mode. I can visualize the UI, but I cannot process real data or retrieve memories until the connection is restored.`;
         const chunkSize = 4;
+        let fullMock = "";
         for (let i = 0; i < mockReply.length; i += chunkSize) {
-            yield { chunk: mockReply.slice(i, i + chunkSize) };
+            const chunk = mockReply.slice(i, i + chunkSize);
+            fullMock += chunk;
+            yield { chunk };
             await new Promise(r => setTimeout(r, 15));
+        }
+
+        // Save AI response to session
+        if (session) {
+             const updatedMsgs = [...messages, {
+                 id: Date.now().toString(),
+                 role: 'assistant' as const,
+                 content: fullMock,
+                 timestamp: Date.now(),
+                 modelUsed: 'Offline-Demo' as const
+             }];
+             this.updateSession(sessionId, { messages: updatedMsgs });
         }
         return;
     }
 
     try {
         // 2. Call Real Backend
-        const res = await fetch(`${API_BASE}/send3`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                text: lastMessage,
-                session_id: storedSessionId,
-                style: 'normal'
-            })
-        });
+    const settingsPayload = coreSettings ? {
+        temperature: coreSettings.temperature,
+        response_tone: coreSettings.responseTone,
+        output_density: coreSettings.outputDensity,
+        interface_language: coreSettings.interfaceLanguage,
+        active_model: coreSettings.activeModel || selectedModel
+    } : undefined;
+
+    const res = await fetch(`${API_BASE}/send3`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            text: lastMessage.content,
+            session_id: sessionId,
+            style: currentStyle, // Pass current response style
+            model_override: selectedModel, // Send preferred model to backend
+            ...(settingsPayload ? { settings: settingsPayload } : {})
+        })
+    });
 
         if (!res.ok) {
             throw new Error(`Server responded with status ${res.status}`);
         }
 
         const data: Send3Out = await res.json();
-        
-        if (data.session_id) {
-            localStorage.setItem(STORAGE_KEY_SESSION_ID, data.session_id);
-        }
 
         if (data.memory_ids && data.memory_ids.length > 0) {
              yield { 
                  context: data.memory_ids.map(id => ({
                      id, 
                      content: `Ref: ${id.substring(0, 8)}...`, 
-                     category: 'fact', 
-                     namespace: 'facts', 
+                     category: 'fact' as const, 
+                     namespace: 'facts' as const, 
                      timestamp: Date.now()
                  }))
              };
@@ -332,11 +544,36 @@ class Air4Service {
 
         const reply = data.reply || "[No response payload]";
         const chunkSize = 5;
+        let fullReply = "";
         
         for (let i = 0; i < reply.length; i += chunkSize) {
             const chunk = reply.slice(i, i + chunkSize);
+            fullReply += chunk;
             yield { chunk };
             await new Promise(r => setTimeout(r, 10));
+        }
+
+        // Save complete interaction to local history
+        if (session) {
+            // Re-fetch session to get any state updates
+            const currentSession = this.getSession(sessionId);
+            if(currentSession) {
+                 const updatedMsgs = [...messages, {
+                    id: Date.now().toString(),
+                    role: 'assistant' as const,
+                    content: fullReply,
+                    timestamp: Date.now(),
+                    modelUsed: selectedModel,
+                    contextUsed: data.memory_ids.length > 0 ? [{
+                        id: '1', 
+                        content: 'Context used', 
+                        category: 'fact' as const, 
+                        namespace: 'facts' as const, 
+                        timestamp: 0
+                    }] : undefined
+                }];
+                this.updateSession(sessionId, { messages: updatedMsgs });
+            }
         }
 
     } catch (e) {
@@ -365,4 +602,24 @@ class Air4Service {
   }
 }
 
-export const air4 = new Air4Service();
+const air4Instance = new Air4Service();
+
+export const air4 = air4Instance;
+
+// Legacy helper exports for compatibility with older UI code
+// Allow imports like `import * as se from '../services/air4Service'` and calls
+// se.getLanguage(), se.createSession(), se.getSessions(), etc.
+export const getLanguage = () => air4Instance.getLanguage();
+export const setLanguage = (lang: Language) => air4Instance.setLanguage(lang);
+
+export const getResponseStyle = () => air4Instance.getResponseStyle();
+export const setResponseStyle = (style: ResponseStyle) => air4Instance.setResponseStyle(style);
+
+export const getIngestMode = () => air4Instance.getIngestMode();
+export const setIngestMode = (mode: IngestMode) => air4Instance.setIngestMode(mode);
+
+export const getAutoTitle = () => air4Instance.getAutoTitle();
+export const setAutoTitle = (enabled: boolean) => air4Instance.setAutoTitle(enabled);
+
+export const getSessions = () => air4Instance.getSessions();
+export const createSession = (initialTitle?: string) => air4Instance.createSession(initialTitle);

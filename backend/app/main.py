@@ -12,26 +12,28 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 # Phase-9+: memory + chat modules
 try:
     from backend.app.memory.manager_chroma import ChromaMemoryManager  # Phase-9 backend
 except Exception:
-    from app.memory.manager_chroma import ChromaMemoryManager  # type: ignore
+    from .memory.manager_chroma import ChromaMemoryManager  # type: ignore
 
 try:
     from backend.app import chat as chat_mod
 except Exception:
-    import app.chat as chat_mod  # type: ignore
+    from . import chat as chat_mod  # type: ignore
 
 # -----------------------------------------------------------------------------
 # App + CORS
 # -----------------------------------------------------------------------------
 app = FastAPI(title="AIr4", version="0.12.1")
 from .routes_chat import router as router_chat
+from .routes_stream import router as stream_router
 app.include_router(router_chat)
+app.include_router(stream_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -295,6 +297,8 @@ class Send3In(BaseModel):
     session_id: Optional[str] = Field(None, description="Existing session id, or omitted for new")
     context: Optional[List[MsgIn]] = Field(None, description="Optional prior turns for UI echo")
     style: Optional[str] = Field(None, description="short | normal | detailed")
+    settings: Optional[dict] = Field(None, description="Optional core settings from UI")
+    model_override: Optional[str] = Field(None, description="Preferred model name from UI (e.g. Mistral-7B)")
 
 
 class Send3Out(BaseModel):
@@ -303,6 +307,166 @@ class Send3Out(BaseModel):
     usage: dict = Field(default_factory=dict)
     memory_ids: List[str] = Field(default_factory=list)
     updated_at: int = Field(default_factory=_now)
+
+
+# -----------------------------------------------------------------------------
+# Health
+# -----------------------------------------------------------------------------
+@app.get("/health")
+async def health() -> dict:
+    backend = "chroma" if "ChromaMemoryManager" in str(type(MEMORY)) else "fallback"
+    model = os.getenv("OLLAMA_MODEL_DEFAULT", "llama3.1:8b")
+    return {
+        "ok": True,
+        "ts": _now(),
+        "sessions": len(_SESSIONS),
+        "memory_backend": backend,
+        "model": model,
+        "offline": False,
+    }
+
+
+# -----------------------------------------------------------------------------
+# UI routes (match base.html: /ui/*)
+# -----------------------------------------------------------------------------
+@app.get("/", response_class=RedirectResponse)
+async def ui_root_redirect() -> RedirectResponse:
+    return RedirectResponse(url="/ui/chat", status_code=307)
+
+
+@app.get("/ui/chat")
+async def ui_chat(request: Request):
+    return templates.TemplateResponse("chat.html", {"request": request, "active": "chat"})
+
+
+@app.get("/ui/sessions", response_class=HTMLResponse)
+async def ui_sessions() -> HTMLResponse:
+    import datetime as _dt
+
+    def _label(ts: int) -> str:
+        dt = _dt.datetime.fromtimestamp(ts)
+        today = _dt.datetime.now().date()
+        if dt.date() == today:
+            return "Today"
+        if dt.date() == (today - _dt.timedelta(days=1)):
+            return "Yesterday"
+        return dt.strftime("%b %d, %Y")
+
+    groups: Dict[str, List[Session]] = {}
+    for s in sorted(_SESSIONS.values(), key=lambda x: x.updated_at, reverse=True):
+        groups.setdefault(_label(s.updated_at), []).append(s)
+
+    parts: List[str] = []
+    for label, items in groups.items():
+        parts.append(f'<div class="sb-section"><div class="sb-section-title">{label}</div>')
+        for it in items:
+            title = (it.title or it.id).strip()
+            sub = f"{it.turns} turns"
+            parts.append(
+                '<div class="sb-item">'
+                '  <a href="/ui/chat" hx-get="/ui/chat" hx-push-url="true">'
+                '    <svg class="ico" viewBox="0 0 24 24"><path d="M21 15V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14l4-4h12a2 2 0 0 0 2-2Z"/></svg>'
+                f'    <span class="sb-title-line" title="{title}">{title}</span>'
+                '  </a>'
+                f'  <div class="sb-sub">{sub}</div>'
+                '</div>'
+            )
+        parts.append('</div>')
+    html = "\n".join(parts) if parts else '<div class="sb-section"><div class="sb-sub">No sessions yet</div></div>'
+    return HTMLResponse(content=html)
+
+
+# -----------------------------------------------------------------------------
+# Sessions endpoints (minimal set used by UI)
+# -----------------------------------------------------------------------------
+@app.get("/sessions")
+async def list_sessions() -> List[Session]:
+    return sorted(_SESSIONS.values(), key=lambda s: s.updated_at, reverse=True)
+
+
+@app.post("/sessions")
+async def create_session() -> Session:
+    return ensure_session(None)
+
+
+@app.get("/sessions/{session_id}")
+async def get_session(session_id: str) -> Session:
+    if session_id not in _SESSIONS:
+        raise HTTPException(status_code=404, detail="No such session")
+    return _SESSIONS[session_id]
+
+
+# -----------------------------------------------------------------------------
+# Core: /send3 — single-shot send used by new UI
+# -----------------------------------------------------------------------------
+@app.post("/send3", response_model=Send3Out)
+async def send3(payload: Send3In) -> Send3Out:
+    sess = ensure_session(payload.session_id)
+
+    user_text = (payload.text or "").strip()
+    if not user_text:
+        raise HTTPException(status_code=400, detail="text is empty")
+
+    mem_ids: List[str] = []
+    if MEMORY is not None and hasattr(MEMORY, "add_text"):
+        try:
+            res = MEMORY.add_text(user_id="dev", text=user_text, session_id=sess.id, source="user")
+            # normalize optional ids
+            if isinstance(res, dict):
+                rid = res.get("id") or res.get("ids")
+                if isinstance(rid, list):
+                    mem_ids.extend([str(x) for x in rid])
+                elif rid:
+                    mem_ids.append(str(rid))
+        except Exception as e:
+            print(f"[WARN] memory add_text (user) failed: {e}")
+
+    # 4) call chat module (prefers your async chat_endpoint_call)
+    reply: Optional[str] = None
+    try:
+        if hasattr(chat_mod, "chat_endpoint_call"):
+            body = {
+                "message": user_text,
+                "session_id": sess.id,
+                "system": None,
+                "stream": False,
+                "use_rag": True,
+                "k_memory": 4,
+                "style": payload.style,   # pass-through from UI
+                "settings": payload.settings or None,
+                "model_override": payload.model_override or None,
+            }
+            headers = {"X-User": "dev", "X-Style": payload.style or ""}
+            try:
+                obj = await chat_mod.chat_endpoint_call(body, headers)  # type: ignore[arg-type]
+                if isinstance(obj, dict):
+                    reply = obj.get("reply") or obj.get("text")
+            except Exception as e:
+                print(f"[WARN] chat_mod.chat_endpoint_call failed: {e}")
+    except Exception as e:
+        print(f"[WARN] chat_mod wrapper failed: {e}")
+
+    if not reply:
+        # last resort — readable fallback
+        reply = f"Принял. {user_text}"
+
+    if MEMORY is not None and hasattr(MEMORY, "add_text"):
+        try:
+            res2 = MEMORY.add_text(user_id="dev", text=reply, session_id=sess.id, source="assistant")
+            if isinstance(res2, dict):
+                rid2 = res2.get("id") or res2.get("ids")
+                if isinstance(rid2, list):
+                    mem_ids.extend([str(x) for x in rid2])
+                elif rid2:
+                    mem_ids.append(str(rid2))
+            summary = reply[:320]
+            MEMORY.add_text(user_id="dev", text=f"summary: {summary}", session_id=sess.id, source="summary")
+        except Exception as e:
+            print(f"[WARN] memory add_text (assistant) failed: {e}")
+
+    sess.updated_at = _now()
+    _SESSIONS[sess.id] = sess
+    return Send3Out(session_id=sess.id, reply=reply, usage={}, memory_ids=mem_ids)
 
 
 # -----------------------------------------------------------------------------
@@ -429,6 +593,8 @@ async def send3(payload: Send3In) -> Send3Out:
                 "use_rag": True,
                 "k_memory": 4,
                 "style": payload.style,   # <-- pass-through from UI
+                "settings": payload.settings or None,
+                "model_override": payload.model_override or None,
             }
             headers = {"X-User": "dev", "X-Style": payload.style or ""}
             try:
@@ -886,3 +1052,14 @@ async def ui_test(request: Request):
     return templates.TemplateResponse("test.html", {"request": request})
 from .routes_ingest import router as ingest_router
 app.include_router(ingest_router)
+
+
+
+@app.get("/ui/google")
+def ui_google_get():
+    return RedirectResponse(url="/static/googleui/dist/index.html")
+
+@app.head("/ui/google")
+def ui_google_head():
+    return RedirectResponse(url="/static/googleui/dist/index.html")
+
