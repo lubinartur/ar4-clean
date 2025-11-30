@@ -3,6 +3,16 @@ import { air4, Fact } from '../services/air4Service';
 import { MemoryItem } from '../types';
 import { Search, RefreshCw, Zap } from 'lucide-react';
 
+type FactsProfile = {
+  subject: string;
+  food?: string[];
+  country?: string[];
+  location?: string[];
+  vehicle?: string[];
+  goals?: string[];
+  other?: string[];
+};
+
 const Memory: React.FC = () => {
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -12,6 +22,10 @@ const Memory: React.FC = () => {
   const [facts, setFacts] = useState<Fact[]>([]);
   const [factsLoading, setFactsLoading] = useState(false);
   const [factsError, setFactsError] = useState<string | null>(null);
+
+  const [profile, setProfile] = useState<FactsProfile | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
 
   const doSearch = async (query: string) => {
       setLoading(true);
@@ -54,10 +68,34 @@ const Memory: React.FC = () => {
       };
   }, [activeTab]);
 
+  useEffect(() => {
+      if (activeTab !== 'profile') return;
+
+      let cancelled = false;
+      setProfileLoading(true);
+      setProfileError(null);
+
+      air4.getFactsProfile('Arch')
+        .then(data => {
+          if (!cancelled) setProfile(data as FactsProfile);
+        })
+        .catch(err => {
+          if (!cancelled) setProfileError(err.message || 'Failed to load profile');
+        })
+        .finally(() => {
+          if (!cancelled) setProfileLoading(false);
+        });
+
+      return () => {
+          cancelled = true;
+      };
+  }, [activeTab]);
+
   const filteredMemories = memories.filter(m => activeTab === 'all' || m.namespace === activeTab);
   const tabs = [
       { id: 'all', label: 'All' },
       { id: 'facts', label: 'Facts' },
+      { id: 'profile', label: 'Profile' },
       { id: 'sessions', label: 'Chat Logs' },
       { id: 'docs', label: 'Documents' },
   ];
@@ -135,6 +173,98 @@ const Memory: React.FC = () => {
                   </p>
                 </div>
               ))
+            )}
+          </>
+        ) : activeTab === 'profile' ? (
+          <>
+            {profileLoading && (
+              <div className="text-center text-slate-600 py-20 text-sm">
+                Building profile...
+              </div>
+            )}
+            {profileError && !profileLoading && (
+              <div className="text-center text-red-400 py-20 text-sm">
+                {profileError}
+              </div>
+            )}
+            {!profileLoading && !profileError && !profile && (
+              <div className="text-center text-slate-600 py-20 text-sm">
+                No profile data yet.
+              </div>
+            )}
+            {!profileLoading && !profileError && profile && (
+              <div className="space-y-4">
+                <div className="glass-card p-4 rounded-xl">
+                  <h3 className="text-sm font-semibold text-white mb-1">Profile: {profile.subject}</h3>
+                  <p className="text-xs text-slate-400">Long‑term memory summary for this user.</p>
+                </div>
+
+                {profile.location && profile.location.length > 0 && (
+                  <div className="glass-card p-4 rounded-xl">
+                    <h4 className="text-xs font-semibold text-slate-300 mb-2 uppercase tracking-wide">Location</h4>
+                    <ul className="text-sm text-slate-300 space-y-1">
+                      {profile.location.map((item, idx) => (
+                        <li key={`loc-${idx}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {profile.goals && profile.goals.length > 0 && (
+                  <div className="glass-card p-4 rounded-xl border border-air-500/30 bg-air-500/5">
+                    <h4 className="text-xs font-semibold text-air-400 mb-2 uppercase tracking-wide">Goals</h4>
+                    <ul className="text-sm text-slate-100 space-y-1">
+                      {profile.goals.map((item, idx) => (
+                        <li key={`goal-${idx}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {profile.food && profile.food.length > 0 && (
+                  <div className="glass-card p-4 rounded-xl">
+                    <h4 className="text-xs font-semibold text-slate-300 mb-2 uppercase tracking-wide">Food</h4>
+                    <ul className="text-sm text-slate-300 space-y-1">
+                      {profile.food.map((item, idx) => (
+                        <li key={`food-${idx}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {profile.country && profile.country.length > 0 && (
+                  <div className="glass-card p-4 rounded-xl">
+                    <h4 className="text-xs font-semibold text-slate-300 mb-2 uppercase tracking-wide">Countries</h4>
+                    <ul className="text-sm text-slate-300 space-y-1">
+                      {profile.country.map((item, idx) => (
+                        <li key={`country-${idx}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {profile.vehicle && profile.vehicle.length > 0 && (
+                  <div className="glass-card p-4 rounded-xl">
+                    <h4 className="text-xs font-semibold text-slate-300 mb-2 uppercase tracking-wide">Vehicles</h4>
+                    <ul className="text-sm text-slate-300 space-y-1">
+                      {profile.vehicle.map((item, idx) => (
+                        <li key={`vehicle-${idx}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {profile.other && profile.other.length > 0 && (
+                  <div className="glass-card p-4 rounded-xl">
+                    <h4 className="text-xs font-semibold text-slate-300 mb-2 uppercase tracking-wide">Other</h4>
+                    <ul className="text-sm text-slate-300 space-y-1">
+                      {profile.other.map((item, idx) => (
+                        <li key={`other-${idx}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
             )}
           </>
         ) : (

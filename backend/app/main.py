@@ -464,18 +464,74 @@ async def send3(payload: Send3In) -> Send3Out:
     # Build system prompt from long-term facts (Knowledge Graph)
     system_prompt = None
     try:
-        facts_kg = get_facts_for_subject("Arch", limit=32)
+        facts_kg = get_facts_for_subject("Arch", limit=64)
         if facts_kg:
-            lines = [f"- {f.subject} {f.predicate} {f.object}" for f in facts_kg]
+            # Build structured profile by categories
+            profile = {
+                "food": set(),
+                "country": set(),
+                "vehicle": set(),
+                "location": set(),
+                "sport": set(),
+                "health": set(),
+                "work": set(),
+                "goals": set(),
+                "hobby": set(),
+                "other": set(),
+            }
+            for f in facts_kg:
+                cat = getattr(f, "category", None) or "other"
+                obj = (f.object or "").strip()
+                if cat not in profile:
+                    profile["other"].add(obj)
+                else:
+                    profile[cat].add(obj)
+
+            profile_lines: List[str] = []
+            if profile["location"]:
+                profile_lines.append("Location: " + ", ".join(sorted(profile["location"])))
+            if profile["vehicle"]:
+                profile_lines.append("Vehicles: " + ", ".join(sorted(profile["vehicle"])))
+            if profile["food"]:
+                profile_lines.append("Food: " + ", ".join(sorted(profile["food"])))
+            if profile["country"]:
+                profile_lines.append("Countries: " + ", ".join(sorted(profile["country"])))
+            if profile["sport"]:
+                profile_lines.append("Sport: " + ", ".join(sorted(profile["sport"])))
+            if profile["health"]:
+                profile_lines.append("Health: " + ", ".join(sorted(profile["health"])))
+            if profile["work"]:
+                profile_lines.append("Work: " + ", ".join(sorted(profile["work"])))
+            if profile["goals"]:
+                profile_lines.append("Goals: " + ", ".join(sorted(profile["goals"])))
+            if profile["hobby"]:
+                profile_lines.append("Hobby: " + ", ".join(sorted(profile["hobby"])))
+            if profile["other"]:
+                profile_lines.append("Other: " + ", ".join(sorted(profile["other"])))
+
+            facts_lines: List[str] = []
+            for f in facts_kg:
+                cat = getattr(f, "category", None) or getattr(f, "category_label", None)
+                if cat:
+                    facts_lines.append(f"- [{cat}] {f.subject} {f.predicate} {f.object}")
+                else:
+                    facts_lines.append(f"- {f.subject} {f.predicate} {f.object}")
+
             prefix = """YOU ARE A MEMORY-ENABLED ASSISTANT.
 The following facts describe the HUMAN USER Arch, not you (the assistant).
 Arch is the user. You are NOT Arch.
 NEVER say "я Арч" or otherwise speak as if you are Arch.
 Always talk TO Arch in second person ("ты") and describe his life, preferences and habits from your own assistant perspective.
 Use the facts below only as background knowledge about Arch when answering personal questions, preferences, habits, tastes and lifestyle.
-Known long-term facts about Arch:
+
+STRUCTURED PROFILE (high-level):
 """
-            system_prompt = prefix + "\n".join(lines)
+            system_prompt = (
+                prefix
+                + "\n".join(profile_lines)
+                + "\n\nRAW FACTS (debug-level, optional):\n"
+                + "\n".join(facts_lines)
+            )
     except Exception as e:
         print(f"[FACTS] error while reading facts: {e}")
 

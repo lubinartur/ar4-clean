@@ -5,16 +5,8 @@
     "predicate": "тестирует_память",
     "object": "FACTS_001",
     "timestamp": 1764449650.7697449,
+    "category": null,
     "source_session": null,
-    "source_message_id": null
-  },
-  {
-    "id": "616c4f10-e610-441b-84ad-a95196c9ef11",
-    "subject": "Arch",
-    "predicate": "любит",
-    "object": "ducati panigale v4 и мне нравится салмон поке",
-    "timestamp": 1764449718.94494,
-    "source_session": "test_session",
     "source_message_id": null
   },
   {
@@ -23,16 +15,8 @@
     "predicate": "нравится",
     "object": "салмон поке",
     "timestamp": 1764449718.9449742,
+    "category": "food",
     "source_session": "test_session",
-    "source_message_id": null
-  },
-  {
-    "id": "7307bbd2-b9cf-49bb-b30a-42e80575411f",
-    "subject": "Arch",
-    "predicate": "любит",
-    "object": "bmw 840d и мне нравится суши",
-    "timestamp": 1764450144.419899,
-    "source_session": null,
     "source_message_id": null
   },
   {
@@ -41,15 +25,7 @@
     "predicate": "нравится",
     "object": "суши",
     "timestamp": 1764450144.42001,
-    "source_session": null,
-    "source_message_id": null
-  },
-  {
-    "id": "0a819d17-c814-4283-81b6-eaf69863107b",
-    "subject": "Arch",
-    "predicate": "любит",
-    "object": "стейки и мне нравится португалия",
-    "timestamp": 1764452919.7589781,
+    "category": "food",
     "source_session": null,
     "source_message_id": null
   },
@@ -59,15 +35,7 @@
     "predicate": "нравится",
     "object": "португалия",
     "timestamp": 1764452919.759089,
-    "source_session": null,
-    "source_message_id": null
-  },
-  {
-    "id": "5cf8776f-a7f8-45b5-95b6-6590c9fe7b97",
-    "subject": "Arch",
-    "predicate": "любит",
-    "object": "пиццу и мне нравится япония",
-    "timestamp": 1764453500.251897,
+    "category": "country",
     "source_session": null,
     "source_message_id": null
   },
@@ -77,15 +45,7 @@
     "predicate": "нравится",
     "object": "япония",
     "timestamp": 1764453500.25203,
-    "source_session": null,
-    "source_message_id": null
-  },
-  {
-    "id": "7b3d6bb5-ca47-498c-a708-f237ff89d1e3",
-    "subject": "Arch",
-    "predicate": "любит",
-    "object": "пасту и мне нравится италия",
-    "timestamp": 1764453940.292865,
+    "category": "country",
     "source_session": null,
     "source_message_id": null
   },
@@ -95,6 +55,7 @@
     "predicate": "нравится",
     "object": "италия",
     "timestamp": 1764453940.2929962,
+    "category": "country",
     "source_session": null,
     "source_message_id": null
   },
@@ -102,8 +63,9 @@
     "id": "b1deea41-cb39-4ec3-8a06-397d542ce001",
     "subject": "Arch",
     "predicate": "любит",
-    "object": "зеленое яблоко",
+    "object": "зелёное яблоко",
     "timestamp": 1764456173.3032188,
+    "category": "food",
     "source_session": null,
     "source_message_id": null
   },
@@ -111,8 +73,9 @@
     "id": "552a7f50-8083-4bc7-a684-d345b80d5d35",
     "subject": "Arch",
     "predicate": "любит",
-    "object": "яблоко зеленое",
+    "object": "зелёное яблоко",
     "timestamp": 1764456223.319006,
+    "category": "food",
     "source_session": null,
     "source_message_id": null
   },
@@ -121,7 +84,38 @@
     "subject": "Arch",
     "predicate": "живёт_в",
     "object": "эстонии",
-    "timestamp": 1764458399.859864,
+    "timestamp": 1764472302.4378939,
+    "category": "location",
+    "source_session": null,
+    "source_message_id": null
+  },
+  {
+    "id": "12f69559-538c-405c-b7a8-4f130ce791b9",
+    "subject": "Arch",
+    "predicate": "хочет",
+    "object": "ламборгини",
+    "timestamp": 1764472302.4373949,
+    "category": "goals",
+    "source_session": null,
+    "source_message_id": null
+  },
+  {
+    "id": "bcb38af0-83fe-4b76-b712-87b414652cc6",
+    "subject": "Arch",
+    "predicate": "хочет",
+    "object": "хочу съесть бургер",
+    "timestamp": 1764472302.4374132,
+    "category": "food",
+    "source_session": null,
+    "source_message_id": null
+  },
+  {
+    "id": "33c20d7a-427c-4958-b9bd-04eec573ebab",
+    "subject": "Arch",
+    "predicate": "хочет",
+    "object": "Памелу. Люблю макларен",
+    "timestamp": 1764472893.433446,
+    "category": null,
     "source_session": null,
     "source_message_id": null
   }

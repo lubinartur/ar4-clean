@@ -61,6 +61,11 @@ def _infer_category(predicate: str, obj: str) -> Optional[str]:
     - country: страны / путешествия
     - vehicle: транспорт
     - location: место жительства
+    - sport: спорт / тренировки
+    - health: здоровье / травмы / курс
+    - work: работа / профессия / проекты
+    - goals: цели / долгосрочные задачи
+    - hobby: хобби / интересы
     """
     p = (predicate or "").lower().strip()
     o = (obj or "").lower().strip()
@@ -77,6 +82,7 @@ def _infer_category(predicate: str, obj: str) -> Optional[str]:
         "яблоко",
         "яблочко",
         "яблоки",
+        "бургер",
     ]
 
     # Страны / география
@@ -100,19 +106,139 @@ def _infer_category(predicate: str, obj: str) -> Optional[str]:
         "porsche",
         "панигале",
         "panigale",
+        "ламборгини",
+        "lamborghini",
     ]
+
+    # Спорт / тренировки
+    sport_markers = [
+        "зал",
+        "тренируюсь",
+        "тренировка",
+        "тренировки",
+        "жим",
+        "присед",
+        "становая",
+        "сплит",
+        "бицепс",
+        "грудь",
+        "плечи",
+        "ноги",
+        "кикбоксинг",
+    ]
+
+    # Здоровье / курс / травмы
+    health_markers = [
+        "спина",
+        "поясница",
+        "боль",
+        "травма",
+        "восстановление",
+        "здоровье",
+        "сустанон",
+        "курс",
+    ]
+
+    # Работа / проекты
+    work_markers = [
+        "работаю",
+        "работа",
+        "дизайнер",
+        "дизайн",
+        "ux",
+        "ui",
+        "проект",
+        "проекты",
+        "air4",
+        "ai",
+        "финансы",
+        "кредиты",
+    ]
+
+    # Цели
+    goals_markers = [
+        "цель",
+        "цели",
+        "соната",
+        "лунная соната",
+        "bench",
+        "жим",
+        "кг",
+        "евро",
+        "доход",
+    ]
+
+    # Хобби / интересы
+    hobby_markers = [
+        "музыка",
+        "фортепиано",
+        "пианино",
+        "мото",
+        "байк",
+        "мотоцикл",
+        "аниме",
+        "3d",
+        "рендер",
+        "рисовать",
+        "рисование",
+        "фото",
+        "фотография",
+    ]
+
+    # Вариант B: цели только для "серьёзных" хотелок, не еды
+    if p in ("хочет", "хочу", "мечтает", "мечтаю"):
+        # если это еда — считаем как еду, а не цель
+        if any(w in o for w in food_markers):
+            return "food"
+        # если явно про авто / технику — считаем как цель (хочу машину/бренд)
+        if any(w in o for w in vehicle_markers):
+            return "goals"
+        # если упоминается доход / деньги / результат — тоже цель
+        serious_goal_markers = [
+            "евро",
+            "€",
+            "доход",
+            "зарплат",
+            "зарабатывать",
+            "заработок",
+            "цель",
+            "соната",
+            "лунная соната",
+            "курс",
+            "форму",
+            "дом",
+            "квартир",
+        ]
+        if any(w in o for w in serious_goal_markers):
+            return "goals"
+        # остальное по умолчанию не считаем отдельной категорией целей
 
     if p in ("любит", "нравится"):
         if any(w in o for w in food_markers):
             return "food"
         if any(w in o for w in country_markers):
             return "country"
+        if any(w in o for w in sport_markers):
+            return "sport"
+        if any(w in o for w in health_markers):
+            return "health"
+        if any(w in o for w in hobby_markers):
+            return "hobby"
 
     if p == "живёт_в":
         return "location"
 
+    if p in ("тренируется",):
+        return "sport"
+
     if p == "владеет" or any(w in o for w in vehicle_markers):
         return "vehicle"
+
+    if p in ("работает_как", "работает") or any(w in o for w in work_markers):
+        return "work"
+
+    if any(w in o for w in goals_markers):
+        return "goals"
 
     return None
 
@@ -275,6 +401,22 @@ def extract_facts_from_text_v3(
                 if low.startswith("я "):
                     continue
                 facts.append(make(item, "любит"))
+
+    # --- Хочет / цели ---
+    goal_patterns = [
+        r"\bя хочу\s+(.+)",
+        r"\bхочу\s+(.+)",
+    ]
+    for pat in goal_patterns:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if m:
+            raw = m.group(1).strip()
+            for item in split_items(raw):
+                low = item.lower()
+                # Не сохраняем хвосты типа "я живу", "я работаю" и т.п.
+                if low.startswith("я "):
+                    continue
+                facts.append(make(item, "хочет"))
 
     # --- Живет ---
     m = re.search(r"\bя живу в\s+([a-zA-Zа-яА-ЯёЁ\s]+)", text, flags=re.IGNORECASE)

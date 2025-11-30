@@ -26,3 +26,38 @@ def list_facts(
         return get_facts_for_subject(subj, limit=limit)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"facts error: {e}")
+
+@router.get("/profile")
+def facts_profile(subject: str = "Arch"):
+    """
+    Собирает профиль пользователя: еда, страны, транспорт, локация, прочее.
+    """
+    try:
+        facts = get_facts_for_subject(subject, limit=200)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"facts profile error: {e}")
+
+    profile = {
+        "food": set(),
+        "country": set(),
+        "vehicle": set(),
+        "location": set(),
+        "other": set(),
+    }
+
+    for f in facts:
+        cat = f.category or "other"
+        obj = f.object.strip()
+        if cat not in profile:
+            profile["other"].add(obj)
+        else:
+            profile[cat].add(obj)
+
+    return {
+        "subject": subject,
+        "food": sorted(profile["food"]),
+        "country": sorted(profile["country"]),
+        "vehicle": sorted(profile["vehicle"]),
+        "location": sorted(profile["location"]),
+        "other": sorted(profile["other"]),
+    }

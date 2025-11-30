@@ -391,6 +391,68 @@ class Air4Service {
           return [];
       }
   }
+
+  async getFactsProfile(subject: string = "Arch"): Promise<{
+      subject: string;
+      food?: string[];
+      country?: string[];
+      location?: string[];
+      vehicle?: string[];
+      goals?: string[];
+      other?: string[];
+  }> {
+      if (this.appState === AppState.PANIC) {
+          return {
+              subject,
+              food: [],
+              country: [],
+              location: [],
+              vehicle: [],
+              goals: [],
+              other: [],
+          };
+      }
+      if (this.isOfflineMode) {
+          return {
+              subject,
+              food: [],
+              country: [],
+              location: [],
+              vehicle: [],
+              goals: [],
+              other: [],
+          };
+      }
+
+      try {
+          const res = await fetch(`${API_BASE}/facts/profile?subject=${encodeURIComponent(subject)}`);
+          if (!res.ok) {
+              throw new Error("Facts profile fetch failed");
+          }
+          const data = await res.json();
+          // Ожидаем, что backend вернёт объект с нужной структурой
+          return {
+              subject: data.subject || subject,
+              food: Array.isArray(data.food) ? data.food : [],
+              country: Array.isArray(data.country) ? data.country : [],
+              location: Array.isArray(data.location) ? data.location : [],
+              vehicle: Array.isArray(data.vehicle) ? data.vehicle : [],
+              goals: Array.isArray(data.goals) ? data.goals : [],
+              other: Array.isArray(data.other) ? data.other : [],
+          };
+      } catch (e) {
+          console.error("Failed to load facts profile", e);
+          return {
+              subject,
+              food: [],
+              country: [],
+              location: [],
+              vehicle: [],
+              goals: [],
+              other: [],
+          };
+      }
+  }
   
   async addManualMemory(content: string, source: string = 'user-selection'): Promise<boolean> {
       if (this.isOfflineMode) return false;
