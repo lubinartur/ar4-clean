@@ -8,6 +8,7 @@ from typing import List, Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+from . import manager_chroma
 
 # Файл, где храним факты (рядом с этим модулем)
 FACTS_PATH = Path(__file__).with_name("facts_store.json")
@@ -272,6 +273,20 @@ def add_fact(fact: Fact) -> None:
         facts.append(fact)
 
     _save_facts(facts)
+
+    # Дополнительно сохраним факт в векторную память (Memory Bank → All)
+    try:
+        mm = getattr(manager_chroma, "MEMORY", None)
+        if mm is not None and hasattr(mm, "add_text"):
+            text = f"{fact.subject} {fact.predicate.replace('_', ' ')} {fact.object}"
+            mm.add_text(
+                user_id="dev",
+                text=text,
+                session_id=fact.source_session or "facts",
+                source="facts",
+            )
+    except Exception as e:
+        print(f"[FACTS] failed to index fact in memory: {e}")
 
 
 def get_facts_for_subject(subject: str, limit: int = 20) -> List[Fact]:

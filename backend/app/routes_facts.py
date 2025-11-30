@@ -4,9 +4,19 @@ from fastapi import APIRouter, HTTPException, Query
 
 try:
     # запуск как пакет
-    from backend.app.memory.facts import Fact, get_facts_for_subject
+    from backend.app.memory.facts import (
+        Fact,
+        get_facts_for_subject,
+        add_fact,
+        _load_facts,
+    )
 except Exception:  # запуск из корня
-    from .memory.facts import Fact, get_facts_for_subject  # type: ignore
+    from .memory.facts import (  # type: ignore
+        Fact,
+        get_facts_for_subject,
+        add_fact,
+        _load_facts,
+    )
 
 
 router = APIRouter(prefix="/facts", tags=["facts"])
@@ -41,6 +51,7 @@ def facts_profile(subject: str = "Arch"):
         "food": set(),
         "country": set(),
         "vehicle": set(),
+        "goals": set(),
         "location": set(),
         "other": set(),
     }
@@ -58,6 +69,44 @@ def facts_profile(subject: str = "Arch"):
         "food": sorted(profile["food"]),
         "country": sorted(profile["country"]),
         "vehicle": sorted(profile["vehicle"]),
+        "goals": sorted(profile["goals"]),
         "location": sorted(profile["location"]),
         "other": sorted(profile["other"]),
     }
+
+
+# Reindex endpoint
+@router.post("/reindex")
+def reindex_facts(subject: str = "Arch") -> dict:
+    """
+    Переиндексирует все факты из локального хранилища в векторную память (MEMORY).
+    По сути повторно прогоняет их через add_fact, который сам вызывает MEMORY.add_text().
+    """
+    try:
+        facts = _load_facts()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"facts load error: {e}")
+
+    if not facts:
+        raise HTTPException(status_code=404, detail="no facts to reindex")
+
+    count = 0
+    for f in facts:
+        # если задан subject — можем переопределить его на лету
+        if subject:
+            f.subject = subject
+        try:
+            add_fact(f)
+            count += 1
+        except Exception as e:
+            # не валим весь процесс из-за одного факта
+            print(
+                "[FACTS REINDEX] error:",
+                f.subject,
+                f.predicate,
+                f.object,
+                "->",
+                e,
+            )
+
+    return {"status": "ok", "count": count}

@@ -13,6 +13,57 @@ type FactsProfile = {
   other?: string[];
 };
 
+const buildProfileSummary = (profile: FactsProfile): string => {
+  const parts: string[] = [];
+
+  if (profile.location && profile.location.length > 0) {
+    parts.push(`Ты живёшь в ${profile.location[0]}.`);
+  }
+
+  if (profile.food && profile.food.length > 0) {
+    parts.push(`Тебе нравится: ${profile.food.join(', ')}.`);
+  }
+
+  if (profile.country && profile.country.length > 0) {
+    parts.push(`Любимые страны: ${profile.country.join(', ')}.`);
+  }
+
+  if (profile.goals && profile.goals.length > 0) {
+    parts.push(`Твои цели: ${profile.goals.join(', ')}.`);
+  }
+
+  return parts.join(' ');
+};
+
+const factLabelFromCategory = (category?: string | null) => {
+  if (!category) return 'FACT';
+
+  switch (category) {
+    case 'goals':
+      return 'GOAL';
+    case 'food':
+      return 'FOOD';
+    case 'country':
+      return 'COUNTRY';
+    case 'vehicle':
+      return 'VEHICLE';
+    case 'location':
+      return 'LOCATION';
+    default:
+      return 'FACT';
+  }
+};
+
+const factBadgeClass = (category?: string | null) => {
+  if (category === 'goals') {
+    // Отдельный стиль для целей
+    return 'text-[10px] font-bold uppercase tracking-[0.16em] px-2.5 py-1 rounded-full border border-purple-400/60 bg-purple-500/15 text-purple-100';
+  }
+
+  // Базовый стиль для обычных фактов (как было)
+  return 'text-[10px] uppercase tracking-wider font-bold text-air-500 bg-air-500/10 px-2 py-0.5 rounded';
+};
+
 const Memory: React.FC = () => {
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -44,6 +95,13 @@ const Memory: React.FC = () => {
       }, 600);
       return () => clearTimeout(timer);
   }, [searchTerm]);
+
+  useEffect(() => {
+    // Когда возвращаемся на вкладку All — перезапрашиваем память
+    if (activeTab === 'all') {
+      doSearch(searchTerm);
+    }
+  }, [activeTab]);
 
   useEffect(() => {
       if (activeTab !== 'facts') return;
@@ -129,9 +187,19 @@ const Memory: React.FC = () => {
           placeholder="Search vectors..."
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
-          className="w-full glass-input rounded-xl pl-12 pr-4 py-3 text-white focus:outline-none focus:border-air-500/50 transition-colors text-sm"
+          className="w-full glass-input rounded-xl pl-12 pr-10 py-3 text-white focus:outline-none focus:border-air-500/50 transition-colors text-sm"
         />
-        {loading && <RefreshCw className="absolute right-4 top-3.5 text-air-500 w-5 h-5 animate-spin" />}
+        {loading ? (
+          <RefreshCw className="absolute right-3 top-3.5 text-air-500 w-5 h-5 animate-spin" />
+        ) : (
+          <button
+            type="button"
+            onClick={() => doSearch(searchTerm)}
+            className="absolute right-3 top-3.5 text-slate-500 hover:text-air-400 transition-colors"
+          >
+            <RefreshCw className="w-5 h-5" />
+          </button>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto space-y-3 custom-scrollbar">
@@ -153,26 +221,34 @@ const Memory: React.FC = () => {
               </div>
             )}
             {!factsLoading && !factsError && facts.length > 0 && (
-              facts.map((fact) => (
-                <div
-                  key={fact.id || `${fact.subject}-${fact.predicate}-${fact.object}-${fact.timestamp}`}
-                  className="glass-card p-4 rounded-xl hover:bg-white/5 transition-colors group"
-                >
-                  <div className="flex items-start justify-between mb-2">
-                    <span className="text-[10px] uppercase tracking-wider font-bold text-air-500 bg-air-500/10 px-2 py-0.5 rounded">
-                      Fact
-                    </span>
-                    <span className="text-[10px] text-slate-500">
-                      {new Date(fact.timestamp * 1000).toLocaleString()}
-                    </span>
+              [...facts]
+                .sort((a, b) => {
+                  const aIsGoal = a.category === 'goals' ? -1 : 0;
+                  const bIsGoal = b.category === 'goals' ? -1 : 0;
+                  return aIsGoal - bIsGoal;
+                })
+                .map((fact) => (
+                  <div
+                    key={fact.id || `${fact.subject}-${fact.predicate}-${fact.object}-${fact.timestamp}`}
+                    className="glass-card p-4 rounded-xl hover:bg-white/5 transition-colors group"
+                  >
+                    <div className="flex items-start justify-between mb-2">
+                      <span className={factBadgeClass((fact as any).category)}>
+                        {factLabelFromCategory((fact as any).category)}
+                      </span>
+                      <span className="text-[10px] text-slate-500">
+                        {new Date(fact.timestamp * 1000).toLocaleString()}
+                      </span>
+                    </div>
+                    <p className="text-slate-300 text-sm leading-relaxed">
+                      <span className="font-semibold">{fact.subject}</span>{' '}
+                      <span className="text-slate-400">
+                        {fact.predicate.replace(/_/g, ' ')}
+                      </span>{' '}
+                      <span>{fact.object}</span>
+                    </p>
                   </div>
-                  <p className="text-slate-300 text-sm leading-relaxed">
-                    <span className="font-semibold">{fact.subject}</span>{' '}
-                    <span className="text-slate-400">{fact.predicate}</span>{' '}
-                    <span>{fact.object}</span>
-                  </p>
-                </div>
-              ))
+                ))
             )}
           </>
         ) : activeTab === 'profile' ? (
@@ -196,7 +272,9 @@ const Memory: React.FC = () => {
               <div className="space-y-4">
                 <div className="glass-card p-4 rounded-xl">
                   <h3 className="text-sm font-semibold text-white mb-1">Profile: {profile.subject}</h3>
-                  <p className="text-xs text-slate-400">Long‑term memory summary for this user.</p>
+                  <p className="text-xs text-slate-400">
+                    {buildProfileSummary(profile)}
+                  </p>
                 </div>
 
                 {profile.location && profile.location.length > 0 && (
@@ -211,9 +289,9 @@ const Memory: React.FC = () => {
                 )}
 
                 {profile.goals && profile.goals.length > 0 && (
-                  <div className="glass-card p-4 rounded-xl border border-air-500/30 bg-air-500/5">
-                    <h4 className="text-xs font-semibold text-air-400 mb-2 uppercase tracking-wide">Goals</h4>
-                    <ul className="text-sm text-slate-100 space-y-1">
+                  <div className="glass-card p-4 rounded-xl">
+                    <h4 className="text-xs font-semibold text-slate-300 mb-2 uppercase tracking-wide">Goals</h4>
+                    <ul className="text-sm text-slate-300 space-y-1">
                       {profile.goals.map((item, idx) => (
                         <li key={`goal-${idx}`}>{item}</li>
                       ))}

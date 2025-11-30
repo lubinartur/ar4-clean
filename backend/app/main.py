@@ -31,6 +31,9 @@ try:
 except Exception:
     from . import chat as chat_mod  # type: ignore
 
+# Toggle for conversational (per-turn) memory. Facts & docs stay enabled regardless.
+ENABLE_CHAT_MEMORY = False
+
 # -----------------------------------------------------------------------------
 # App + CORS
 # -----------------------------------------------------------------------------
@@ -79,6 +82,34 @@ def _normalize_pov(text: str) -> str:
         # заменить только первое вхождение
         return text.replace("Арч ", "Ты ", 1)
     return text
+def _is_smalltalk(text: str) -> bool:
+    """Грубый детектор смоллтока: приветствия и короткие фразы без смысла для памяти."""
+    if not text:
+        return False
+    t = text.strip().lower()
+    if not t:
+        return False
+
+    simple = {
+        "привет",
+        "hi",
+        "hello",
+        "hey",
+        "здарова",
+        "здравствуй",
+        "как дела",
+        "как ты",
+        "что как",
+        "как жизнь",
+    }
+    if t in simple:
+        return True
+
+    # Любая очень короткая фраза без вопроса (или с "как дела") — тоже смоллток
+    if len(t) <= 32 and ("?" not in t or "как дела" in t):
+        return True
+
+    return False
 
 # -----------------------------------------------------------------------------
 # Sessions (in-memory dict; persisted messages live in Chroma via memory manager)
@@ -430,6 +461,7 @@ async def send3(payload: Send3In) -> Send3Out:
     sess = ensure_session(payload.session_id)
 
     user_text = (payload.text or "").strip()
+    is_smalltalk = _is_smalltalk(user_text)
 
     # Long-term semantic memory (Knowledge Graph seed)
     try:
@@ -446,7 +478,8 @@ async def send3(payload: Send3In) -> Send3Out:
         raise HTTPException(status_code=400, detail="text is empty")
 
     mem_ids: List[str] = []
-    if MEMORY is not None and hasattr(MEMORY, "add_text"):
+    # Conversational memory for user messages is gated by ENABLE_CHAT_MEMORY.
+    if ENABLE_CHAT_MEMORY and MEMORY is not None and hasattr(MEMORY, "add_text"):
         try:
             res = MEMORY.add_text(user_id="dev", text=user_text, session_id=sess.id, source="user")
             # normalize optional ids
@@ -459,103 +492,164 @@ async def send3(payload: Send3In) -> Send3Out:
         except Exception as e:
             print(f"[WARN] memory add_text (user) failed: {e}")
 
-    # 4) call chat module (prefers your async chat_endpoint_call)
-    # 4) call chat module (prefers your async chat_endpoint_call)
+        # 4) call chat module (prefers your async chat_endpoint_call)
     # Build system prompt from long-term facts (Knowledge Graph)
     system_prompt = None
     try:
-        facts_kg = get_facts_for_subject("Arch", limit=64)
-        if facts_kg:
-            # Build structured profile by categories
-            profile = {
-                "food": set(),
-                "country": set(),
-                "vehicle": set(),
-                "location": set(),
-                "sport": set(),
-                "health": set(),
-                "work": set(),
-                "goals": set(),
-                "hobby": set(),
-                "other": set(),
-            }
-            for f in facts_kg:
-                cat = getattr(f, "category", None) or "other"
-                obj = (f.object or "").strip()
-                if cat not in profile:
-                    profile["other"].add(obj)
-                else:
-                    profile[cat].add(obj)
+        # Для простого смоллтока не подмешиваем профиль вообще
+        if not is_smalltalk:
+            facts_kg = get_facts_for_subject("Arch", limit=64)
+            if facts_kg:
+                # Build structured profile by categories
+                profile = {
+                    "food": set(),
+                    "country": set(),
+                    "vehicle": set(),
+                    "location": set(),
+                    "sport": set(),
+                    "health": set(),
+                    "work": set(),
+                    "goals": set(),
+                    "hobby": set(),
+                    "other": set(),
+                }
+                for f in facts_kg:
+                    cat = getattr(f, "category", None) or "other"
+                    obj = (f.object or "").strip()
+                    if cat not in profile:
+                        profile["other"].add(obj)
+                    else:
+                        profile[cat].add(obj)
 
-            profile_lines: List[str] = []
-            if profile["location"]:
-                profile_lines.append("Location: " + ", ".join(sorted(profile["location"])))
-            if profile["vehicle"]:
-                profile_lines.append("Vehicles: " + ", ".join(sorted(profile["vehicle"])))
-            if profile["food"]:
-                profile_lines.append("Food: " + ", ".join(sorted(profile["food"])))
-            if profile["country"]:
-                profile_lines.append("Countries: " + ", ".join(sorted(profile["country"])))
-            if profile["sport"]:
-                profile_lines.append("Sport: " + ", ".join(sorted(profile["sport"])))
-            if profile["health"]:
-                profile_lines.append("Health: " + ", ".join(sorted(profile["health"])))
-            if profile["work"]:
-                profile_lines.append("Work: " + ", ".join(sorted(profile["work"])))
-            if profile["goals"]:
-                profile_lines.append("Goals: " + ", ".join(sorted(profile["goals"])))
-            if profile["hobby"]:
-                profile_lines.append("Hobby: " + ", ".join(sorted(profile["hobby"])))
-            if profile["other"]:
-                profile_lines.append("Other: " + ", ".join(sorted(profile["other"])))
+                profile_lines: List[str] = []
+                if profile["location"]:
+                    profile_lines.append("Location: " + ", ".join(sorted(profile["location"])))
+                if profile["vehicle"]:
+                    profile_lines.append("Vehicles: " + ", ".join(sorted(profile["vehicle"])))
+                if profile["food"]:
+                    profile_lines.append("Food: " + ", ".join(sorted(profile["food"])))
+                if profile["country"]:
+                    profile_lines.append("Countries: " + ", ".join(sorted(profile["country"])))
+                if profile["sport"]:
+                    profile_lines.append("Sport: " + ", ".join(sorted(profile["sport"])))
+                if profile["health"]:
+                    profile_lines.append("Health: " + ", ".join(sorted(profile["health"])))
+                if profile["work"]:
+                    profile_lines.append("Work: " + ", ".join(sorted(profile["work"])))
+                if profile["goals"]:
+                    profile_lines.append("Goals: " + ", ".join(sorted(profile["goals"])))
+                if profile["hobby"]:
+                    profile_lines.append("Hobby: " + ", ".join(sorted(profile["hobby"])))
+                if profile["other"]:
+                    profile_lines.append("Other: " + ", ".join(sorted(profile["other"])))
 
-            facts_lines: List[str] = []
-            for f in facts_kg:
-                cat = getattr(f, "category", None) or getattr(f, "category_label", None)
-                if cat:
-                    facts_lines.append(f"- [{cat}] {f.subject} {f.predicate} {f.object}")
-                else:
-                    facts_lines.append(f"- {f.subject} {f.predicate} {f.object}")
+                facts_lines: List[str] = []
+                for f in facts_kg:
+                    cat = getattr(f, "category", None) or getattr(f, "category_label", None)
+                    if cat:
+                        facts_lines.append(f"- [{cat}] {f.subject} {f.predicate} {f.object}")
+                    else:
+                        facts_lines.append(f"- {f.subject} {f.predicate} {f.object}")
 
-            prefix = """YOU ARE A MEMORY-ENABLED ASSISTANT.
+                prefix = """YOU ARE A MEMORY-ENABLED ASSISTANT.
 The following facts describe the HUMAN USER Arch, not you (the assistant).
 Arch is the user. You are NOT Arch.
 NEVER say "я Арч" or otherwise speak as if you are Arch.
 Always talk TO Arch in second person ("ты") and describe his life, preferences and habits from your own assistant perspective.
+
 Use the facts below only as background knowledge about Arch when answering personal questions, preferences, habits, tastes and lifestyle.
+Do NOT repeat or enumerate the whole profile in every answer.
+For neutral small-talk ("привет", "как дела" and similar), answer naturally and briefly and DO NOT mention the profile or facts at all.
+Only mention 1–2 relevant facts when they really help to answer the question, or when Arch explicitly asks about his preferences, goals or past messages.
+
+For questions like "что ты знаешь обо мне по памяти", "что ты помнишь обо мне" или похожие формулировки, дай короткое резюме (2–4 предложения) ТОЛЬКО про пользователя: его локацию, вкусы, привычки, цели, важные факты из жизни.
+Не упоминай технические детали системы, фазы разработки AIr4, профильные тесты и другую внутреннюю кухню, даже если такие вещи присутствуют в фактах ниже.
+Не говори про свои "цели" или внутренние задачи — фокусируйся только на профиле Арча.
 
 STRUCTURED PROFILE (high-level):
 """
-            system_prompt = (
-                prefix
-                + "\n".join(profile_lines)
-                + "\n\nRAW FACTS (debug-level, optional):\n"
-                + "\n".join(facts_lines)
-            )
+                # RAW FACTS section отключён, чтобы модель не цепляла технические детали вроде Phase 11
+                system_prompt = prefix + "\n".join(profile_lines)
     except Exception as e:
         print(f"[FACTS] error while reading facts: {e}")
 
     reply: Optional[str] = None
+
     try:
+        # --- 1) Основной путь: chat_endpoint_call ---
         if hasattr(chat_mod, "chat_endpoint_call"):
             body = {
                 "message": user_text,
                 "session_id": sess.id,
-                "system": system_prompt,
+                "system": system_prompt or None,
                 "stream": False,
-                "use_rag": True,
-                "k_memory": 4,
+                "use_rag": False,
+                "k_memory": 1,  # минимум 1, чтобы пройти pydantic-валидацию ChatBody
                 "style": payload.style,
                 "settings": payload.settings or None,
                 "model_override": payload.model_override or None,
             }
             headers = {"X-User": "dev", "X-Style": payload.style or ""}
+
             try:
                 obj = await chat_mod.chat_endpoint_call(body, headers)  # type: ignore[arg-type]
+                print("[DEBUG] chat_endpoint_call result type:", type(obj))
+
                 if isinstance(obj, dict):
-                    reply = obj.get("reply") or obj.get("text")
+                    print("[DEBUG] chat_endpoint_call keys:", list(obj.keys()))
+                    reply = (
+                        obj.get("reply")
+                        or obj.get("text")
+                        or obj.get("content")
+                        or obj.get("message")
+                    )
+                elif isinstance(obj, str):
+                    reply = obj
+                else:
+                    # на всякий случай — строковое представление
+                    reply = str(obj)
+
             except Exception as e:
                 print(f"[WARN] chat_mod.chat_endpoint_call failed: {e}")
+
+        # --- 2) Фоллбек: если сегмент выше не дал ответа, пробуем chat_mod.chat(...) ---
+        if not reply and hasattr(chat_mod, "chat"):
+            try:
+                print("[DEBUG] Falling back to chat_mod.chat(...)")
+                chat_fn = chat_mod.chat
+
+                res = chat_fn(
+                    message=user_text,
+                    system=system_prompt,
+                    style=payload.style,
+                    settings=payload.settings,
+                    model_override=payload.model_override,
+                    session_id=sess.id,
+                )
+
+                # если это coroutine – ждём
+                if hasattr(res, "__await__"):
+                    res = await res  # type: ignore
+
+                print("[DEBUG] chat_mod.chat result type:", type(res))
+
+                if isinstance(res, dict):
+                    reply = (
+                        res.get("reply")
+                        or res.get("text")
+                        or res.get("content")
+                        or res.get("message")
+                    )
+                elif isinstance(res, str):
+                    reply = res
+                else:
+                    reply = str(res)
+
+            except TypeError as e:
+                print(f"[WARN] chat_mod.chat TypeError (signature mismatch?): {e}")
+            except Exception as e:
+                print(f"[WARN] chat_mod.chat fallback failed: {e}")
+
     except Exception as e:
         print(f"[WARN] chat_mod wrapper failed: {e}")
 
@@ -568,7 +662,7 @@ STRUCTURED PROFILE (high-level):
         # last resort — readable fallback
         reply = f"Принял. {user_text}"
 
-    if MEMORY is not None and hasattr(MEMORY, "add_text"):
+    if ENABLE_CHAT_MEMORY and MEMORY is not None and hasattr(MEMORY, "add_text"):
         try:
             res2 = MEMORY.add_text(user_id="dev", text=reply, session_id=sess.id, source="assistant")
             if isinstance(res2, dict):

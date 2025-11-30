@@ -106,3 +106,23 @@ export interface Send3Out {
     memory_ids: string[];
     updated_at: number;
 }
+
+// Fact and FactsProfile interfaces
+export interface Fact {
+    id: string;
+    subject: string;
+    predicate: string;
+    object: string;
+    timestamp: number;
+    category?: 'food' | 'country' | 'vehicle' | 'location' | 'goals' | 'other';
+}
+
+export interface FactsProfile {
+    subject: string;
+    food: string[];
+    country: string[];
+    vehicle: string[];
+    location: string[];
+    goals: string[];
+    other: string[];
+}
