@@ -602,36 +602,37 @@ class Air4Service {
     }
 
     try {
-        // 2. Call Real Backend
-    const settingsPayload = coreSettings ? {
-        temperature: coreSettings.temperature,
-        response_tone: coreSettings.responseTone,
-        output_density: coreSettings.outputDensity,
-        interface_language: coreSettings.interfaceLanguage,
-        active_model: coreSettings.activeModel || selectedModel
-    } : undefined;
+        // 2. Call Real Backend (unified /chat endpoint with strict RAG + profile)
+        const settingsPayload = coreSettings ? {
+            temperature: coreSettings.temperature,
+            response_tone: coreSettings.responseTone,
+            output_density: coreSettings.outputDensity,
+            interface_language: coreSettings.interfaceLanguage,
+            active_model: coreSettings.activeModel || selectedModel
+        } : undefined;
 
-    const res = await fetch(`${API_BASE}/send3`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            text: lastMessage.content,
-            session_id: sessionId,
-            style: currentStyle, // Pass current response style
-            model_override: selectedModel, // Send preferred model to backend
-            ...(settingsPayload ? { settings: settingsPayload } : {})
-        })
-    });
+        const res = await fetch(`${API_BASE}/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                q: lastMessage.content,
+                session_id: sessionId,
+                style: currentStyle,
+                model_override: selectedModel,
+                ...(settingsPayload ? { settings: settingsPayload } : {})
+            })
+        });
 
         if (!res.ok) {
             throw new Error(`Server responded with status ${res.status}`);
         }
 
-        const data: Send3Out = await res.json();
+        const data: any = await res.json();
+        const memoryIds: string[] = Array.isArray(data.memory_ids) ? data.memory_ids : [];
 
-        if (data.memory_ids && data.memory_ids.length > 0) {
+        if (memoryIds.length > 0) {
              yield { 
-                 context: data.memory_ids.map(id => ({
+                 context: memoryIds.map(id => ({
                      id, 
                      content: `Ref: ${id.substring(0, 8)}...`, 
                      category: 'fact' as const, 
@@ -663,7 +664,7 @@ class Air4Service {
                     content: fullReply,
                     timestamp: Date.now(),
                     modelUsed: selectedModel,
-                    contextUsed: data.memory_ids.length > 0 ? [{
+                    contextUsed: memoryIds.length > 0 ? [{
                         id: '1', 
                         content: 'Context used', 
                         category: 'fact' as const, 

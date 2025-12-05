@@ -6,6 +6,8 @@ import re
 import uuid
 from typing import List, Optional, Dict, Any
 
+import json
+
 from pydantic import BaseModel, Field
 
 from backend.app.routes_profile import load_profile as _load_user_profile
@@ -105,10 +107,21 @@ class ChatResult(BaseModel):
 # Memory retrieval
 # -----------------------------------------------------------------------------
 async def _memory_search_http(query: str, k: int) -> List[Dict[str, Any]]:
+    """
+    HTTP wrapper over /memory/search.
+
+    IMPORTANT: For RAG we explicitly filter only documents (kind="file"),
+    so chat junk does not leak into retrieval context.
+    """
     import httpx
+    import json
 
     url = f"http://127.0.0.1:{PORT}/memory/search"
-    params = {"q": query, "k": k}
+    params = {
+        "q": query,
+        "k": k,
+        "where_json": json.dumps({"kind": "file"}),
+    }
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(url, params=params)
@@ -325,8 +338,26 @@ async def call_ollama(
 
         clean = str(msg_text).strip()
 
-        # --- DeepSeek R1 cleanup: убираем мысли и служебные рассуждения ---
-        resolved_model.startswith("deepseek-r1")
+        # --- DeepSeek R1 cleanup: убираем chain-of-thought и служебные теги ---
+        if resolved_model.startswith("deepseek-r1"):
+            try:
+                import re as _re
+                # Убираем блоки вида &lt;think&gt;...&lt;/think&gt;
+                clean = _re.sub(r"<think>.*?</think>", "", clean, flags=_re.S)
+
+                # Иногда DeepSeek встраивает размышления в несколько длинных строк.
+                # Оставляем только "поверхностный" ответ:
+                parts = [line.strip() for line in clean.splitlines()]
+                # убираем пустые строки в начале
+                while parts and not parts[0]:
+                    parts.pop(0)
+                # если линий слишком много, обрезаем до первых 4–6
+                if len(parts) > 8:
+                    parts = parts[:6]
+                clean = "\n".join(parts).strip()
+            except Exception:
+                clean = clean.strip()
+
         return f"[{resolved_model}] " + clean
 
     except Exception as e:
@@ -403,8 +434,20 @@ async def chat_endpoint_call(body: Dict[str, Any], headers: Dict[str, str]) -> D
             res["text"] for res in memory_results if res["score"] >= _min_score()
         ]
 
+    # Base system prompt: may come from caller (UI) or be empty
+    system_text = data.system or ""
+
+    # If we have RAG context, gently but явно enforce "answer only from context"
+    if memory_blocks:
+        rag_rule = (
+            "Если тебе дан контекст из документов (фрагменты ниже), отвечай строго на его основе. "
+            "Не придумывай факты, которых нет в этих фрагментах. "
+            "Если по документу нельзя однозначно ответить, скажи об этом честно и предложи, что можно уточнить."
+        )
+        system_text = f"{system_text}\n{rag_rule}" if system_text else rag_rule
+
     messages = build_messages(
-        data.system,
+        system_text,
         memory_blocks,
         data.message,
         headers,

@@ -138,5 +138,15 @@
     "category": null,
     "source_session": null,
     "source_message_id": null
+  },
+  {
+    "id": "d3efb1b5-929e-4dde-a955-c004cbfdb2e1",
+    "subject": "Arch",
+    "predicate": "zodiac",
+    "object": "Стрелец",
+    "timestamp": 1764978835.572663,
+    "category": "other",
+    "source_session": "ui",
+    "source_message_id": null
   }
 ]

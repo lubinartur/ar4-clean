@@ -6,9 +6,10 @@ load_dotenv()
 import os
 import time
 import uuid
+import re
 from typing import Dict, Optional, List
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -62,14 +63,32 @@ templates = Jinja2Templates(directory=TEMPLATES_DIR)
 # -----------------------------------------------------------------------------
 _now = lambda: int(time.time())
 def strip_think(text: str) -> str:
-    """Режем блок <think>...</think> от DeepSeek R1, оставляем только ответ."""
+    """Режем блок <think>...</think> от DeepSeek R1, оставляем только ответ.
+
+    Дополнительно хэндлим обрезанный поток, когда есть <think>, но нет </think>:
+    в этом случае выкидываем всё от <think> до конца ответа.
+    """
     if not text:
         return text
+
     start = text.find("<think>")
     end = text.find("</think>")
+
+    # Нет вообще блоков — просто тримим пробелы
+    if start == -1 and end == -1:
+        return text.strip()
+
+    # Есть <think> и корректный </think> после него — берём только то, что после </think>
     if start != -1 and end != -1 and end > start:
         return text[end + len("</think>"):].strip()
-    return text.strip()
+
+    # Если есть открывающий тег, но нет закрывающего — считаем, что мысли обрезались,
+    # и выкидываем всё начиная с <think>.
+    if start != -1 and (end == -1 or end < start):
+        return text[:start].strip()
+
+    # На всякий случай, если встретился только </think> без <think>
+    return text.replace("</think>", "").strip()
 
 # POV normalization helper for Arch/Ты
 def _normalize_pov(text: str) -> str:
@@ -82,14 +101,78 @@ def _normalize_pov(text: str) -> str:
         # заменить только первое вхождение
         return text.replace("Арч ", "Ты ", 1)
     return text
+
+# Фикс интро: вырезаем/переформулируем фразы вида 'Я — Арч'.
+def _sanitize_intro(text: str) -> str:
+    """Фикс интро: вырезаем/переформулируем фразы вида 'Я — Арч'."""
+    if not text:
+        return text
+
+    # Заменяем любые варианты "я - арч" / "я — арч" / "я арч" на нейтральное описание
+    patterns = [
+        r"\bя\s*[—-]\s*арч\b",
+        r"\bя\s+арч\b",
+    ]
+    for pat in patterns:
+        text = re.sub(pat, "Я — твой локальный ИИ‑помощник", text, flags=re.IGNORECASE)
+
+    return text
+
+# Убираем случайные китайские иероглифы от DeepSeek (могут проскальзывать в смоллтоке).
+_CJK_RE = re.compile(r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]")
+
+def _strip_cjk(text: str) -> str:
+    """Удаляет CJK-символы (китайские/японские/корейские иероглифы) из ответа."""
+    if not text:
+        return text
+    return _CJK_RE.sub("", text)
+
+def _sanitize_phases(text: str, user_text: str) -> str:
+    """Убираем упоминания внутренних фаз (Phase 11 и т.п.), если пользователь сам об этом не спрашивал."""
+    if not text:
+        return text
+
+    ut = (user_text or "").lower()
+    # Если пользователь сам спросил про фазы — ничего не трогаем
+    if "phase" in ut or "фаза" in ut:
+        return text
+
+    # Сначала вырежем целиком предложения, в которых есть Phase/фаза,
+    # чтобы не оставалось обрезков вида "работаю над .".
+    # Очень простой разбор по точкам / знакам конца предложения.
+    sentences = re.split(r'([.!?])', text)
+    cleaned_parts: List[str] = []
+    for i in range(0, len(sentences), 2):
+        chunk = sentences[i]
+        if not chunk:
+            continue
+        sep = sentences[i + 1] if i + 1 < len(sentences) else ""
+        low = chunk.lower()
+        if "phase" in low or "фаза" in low:
+            # пропускаем предложение целиком
+            continue
+        cleaned_parts.append(chunk.strip() + sep)
+
+    cleaned = " ".join(part.strip() for part in cleaned_parts if part.strip())
+
+    # Дополнительно подчищаем возможные лишние пробелы и двойные точки
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\.\s*\.", ".", cleaned)
+
+    return cleaned.strip()
+
 def _is_smalltalk(text: str) -> bool:
     """Грубый детектор смоллтока: приветствия и короткие фразы без смысла для памяти."""
     if not text:
         return False
+    # Нормализуем: убираем пробелы и финальную пунктуацию, чтобы
+    # 'что интересного?' == 'что интересного'
     t = text.strip().lower()
     if not t:
         return False
+    t = t.strip("!?.,;:…")
 
+    # Базовые приветствия / фатические фразы
     simple = {
         "привет",
         "hi",
@@ -101,15 +184,103 @@ def _is_smalltalk(text: str) -> bool:
         "как ты",
         "что как",
         "как жизнь",
+        "что интересного",
+        "что нового",
+        "что расскажешь",
     }
     if t in simple:
         return True
 
-    # Любая очень короткая фраза без вопроса (или с "как дела") — тоже смоллток
-    if len(t) <= 32 and ("?" not in t or "как дела" in t):
+    # Явные запросы к профилю / памяти — НЕ считаем смоллтоком,
+    # чтобы к ним подмешивался профиль и факты.
+    profile_triggers = [
+        "что ты знаешь обо мне",
+        "что ты помнишь обо мне",
+        "что помнишь обо мне",
+        "что знаешь обо мне",
+        "про мой профиль",
+        "мой профиль",
+        "моя память",
+        "по памяти обо мне",
+        "about me from memory",
+        "my profile",
+    ]
+    if any(kw in t for kw in profile_triggers):
+        return False
+
+    # Любая очень короткая фраза без явных "профильных" ключевых слов
+    # считаем смоллтоком. Это убирает всплытие профиля на вопросы типа
+    # "что интересного?", "как день?" и т.п.
+    if len(t) <= 40:
         return True
 
     return False
+
+
+# -----------------------------------------------------------------------------
+# RAG: Retrieve context from MEMORY for use in system prompt
+# -----------------------------------------------------------------------------
+def _retrieve_rag_context(query: str, k: int = 6, max_chars: int = 2000) -> str:
+    """Достаёт текстовый контекст из MEMORY по запросу.
+
+    Используем тот же MEMORY.search, что и в /memory/search,
+    но возвращаем уже склеенный текст для подмешивания в промт.
+    """
+    if not query or MEMORY is None:
+        return ""
+
+    # Простейшая защита: если у менеджера вообще нет search — выходим
+    if not hasattr(MEMORY, "search"):
+        return ""
+
+    try:
+        # Основной вариант: ChromaMemoryManager с сигнатурой search(user_id=..., query=..., ...)
+        try:
+            res = MEMORY.search(user_id="dev", query=query, k=k, score_threshold=0.35, dedup=True)  # type: ignore
+        except TypeError:
+            # Фоллбек: более простой search(query=..., k=...)
+            res = MEMORY.search(query=query, k=k)  # type: ignore
+    except Exception as e:
+        print(f"[RAG] search failed: {e}")
+        return ""
+
+    # Нормализуем ответ так же, как в /memory/search
+    if isinstance(res, dict):
+        items = res.get("results") or res.get("hits") or res.get("items") or res.get("data") or []
+    else:
+        items = res or []
+
+    parts: List[str] = []
+    total = 0
+    for it in items:
+        if isinstance(it, dict):
+            txt = (
+                it.get("text")
+                or it.get("chunk")
+                or it.get("content")
+                or it.get("value")
+            )
+        else:
+            txt = getattr(it, "text", None) or getattr(it, "content", None)
+
+        if not txt:
+            continue
+
+        t = str(txt).strip()
+        if not t:
+            continue
+
+        parts.append(t)
+        total += len(t)
+        if total >= max_chars:
+            break
+
+    ctx = "\n---\n".join(parts).strip()
+    if ctx:
+        print(f"[RAG] retrieved context, {len(parts)} chunks, {len(ctx)} chars")
+    else:
+        print("[RAG] no context found")
+    return ctx
 
 # -----------------------------------------------------------------------------
 # Sessions (in-memory dict; persisted messages live in Chroma via memory manager)
@@ -135,52 +306,6 @@ def ensure_session(session_id: Optional[str]) -> Session:
 # -----------------------------------------------------------------------------
 # Debug/Tools: simple memory search endpoint
 # -----------------------------------------------------------------------------
-from fastapi import Query
-import inspect
-
-def _mem_try_search(mem, q: str, k: int):
-    """
-    Универсальный адаптер: пробует разные сигнатуры .search(...)
-    и возвращает список хитов или [].
-    """
-    fn = getattr(mem, "search", None)
-    if not callable(fn):
-        return []
-
-    # Узнаем, какие параметры поддерживает функция
-    try:
-        sig = inspect.signature(fn)
-        params = list(sig.parameters.keys())  # ['self', 'query', 'k'] или только ['self'] и т.п.
-    except Exception:
-        params = []
-
-    # Набор попыток (от наиболее информативных к простым)
-    attempts = []
-    if "query" in params and "k" in params:
-        attempts.append(lambda: fn(query=q, k=k))
-    if "query" in params:
-        attempts.append(lambda: fn(query=q))
-    if "q" in params and "k" in params:
-        attempts.append(lambda: fn(q=q, k=k))
-    if "q" in params:
-        attempts.append(lambda: fn(q=q))
-    if "text" in params:
-        attempts.append(lambda: fn(text=q))
-    if "k" in params:
-        attempts.append(lambda: fn(k=k))
-    # как крайний случай — без аргументов
-    attempts.append(lambda: fn())
-
-    for call in attempts:
-        try:
-            res = call()
-            return res or []
-        except TypeError:
-            continue
-        except Exception:
-            # если конкретная попытка упала — пробуем следующую
-            continue
-    return []
 
 @app.get("/memory/search")
 async def memory_search(
@@ -494,7 +619,20 @@ async def send3(payload: Send3In) -> Send3Out:
 
         # 4) call chat module (prefers your async chat_endpoint_call)
     # Build system prompt from long-term facts (Knowledge Graph)
-    system_prompt = None
+    # Базовый системный промт без привязки к фазам/этапам проекта.
+    # Он отвечает за общий стиль общения даже в простом смоллтоке.
+    base_system_prompt = (
+        "Ты — локальный ИИ-помощник Арча. "
+        "Отвечай коротко и по делу, без воды и без извинений. "
+        "Стиль — умный, уверенный, как старший брат: можешь быть жёстким, "
+        "но всегда с уважением. "
+        "Никогда не представляйся пользователем и не называй себя Арч; "
+        "ты всегда говоришь как отдельный ассистент, обращаясь к нему на «ты». "
+        "Если вопрос простой или это смоллток — отвечай кратко, без лишних подробностей. "
+        "Не упоминай внутренние этапы разработки, фазы, версии и техническую кухню проекта, "
+        "если пользователь сам прямо об этом не спросил."
+    )
+    system_prompt = base_system_prompt
     try:
         # Для простого смоллтока не подмешиваем профиль вообще
         if not is_smalltalk:
@@ -516,6 +654,12 @@ async def send3(payload: Send3In) -> Send3Out:
                 for f in facts_kg:
                     cat = getattr(f, "category", None) or "other"
                     obj = (f.object or "").strip()
+                    if not obj:
+                        continue
+                    # фильтруем технические фазы разработки, чтобы они не попадали в профиль
+                    low = obj.lower()
+                    if "phase" in low or "фаза" in low:
+                        continue
                     if cat not in profile:
                         profile["other"].add(obj)
                     else:
@@ -523,25 +667,25 @@ async def send3(payload: Send3In) -> Send3Out:
 
                 profile_lines: List[str] = []
                 if profile["location"]:
-                    profile_lines.append("Location: " + ", ".join(sorted(profile["location"])))
+                    profile_lines.append("Локация: " + ", ".join(sorted(profile["location"])))
                 if profile["vehicle"]:
-                    profile_lines.append("Vehicles: " + ", ".join(sorted(profile["vehicle"])))
+                    profile_lines.append("Транспорт: " + ", ".join(sorted(profile["vehicle"])))
                 if profile["food"]:
-                    profile_lines.append("Food: " + ", ".join(sorted(profile["food"])))
+                    profile_lines.append("Любимые продукты: " + ", ".join(sorted(profile["food"])))
                 if profile["country"]:
-                    profile_lines.append("Countries: " + ", ".join(sorted(profile["country"])))
+                    profile_lines.append("Страны, что тебе нравятся: " + ", ".join(sorted(profile["country"])))
                 if profile["sport"]:
-                    profile_lines.append("Sport: " + ", ".join(sorted(profile["sport"])))
+                    profile_lines.append("Спорт и тренировки: " + ", ".join(sorted(profile["sport"])))
                 if profile["health"]:
-                    profile_lines.append("Health: " + ", ".join(sorted(profile["health"])))
+                    profile_lines.append("Контекст по здоровью: " + ", ".join(sorted(profile["health"])))
                 if profile["work"]:
-                    profile_lines.append("Work: " + ", ".join(sorted(profile["work"])))
+                    profile_lines.append("Работа и карьера: " + ", ".join(sorted(profile["work"])))
                 if profile["goals"]:
-                    profile_lines.append("Goals: " + ", ".join(sorted(profile["goals"])))
+                    profile_lines.append("Твои цели: " + ", ".join(sorted(profile["goals"])))
                 if profile["hobby"]:
-                    profile_lines.append("Hobby: " + ", ".join(sorted(profile["hobby"])))
+                    profile_lines.append("Хобби: " + ", ".join(sorted(profile["hobby"])))
                 if profile["other"]:
-                    profile_lines.append("Other: " + ", ".join(sorted(profile["other"])))
+                    profile_lines.append("Доп. факты: " + ", ".join(sorted(profile["other"])))
 
                 facts_lines: List[str] = []
                 for f in facts_kg:
@@ -562,16 +706,46 @@ Do NOT repeat or enumerate the whole profile in every answer.
 For neutral small-talk ("привет", "как дела" and similar), answer naturally and briefly and DO NOT mention the profile or facts at all.
 Only mention 1–2 relevant facts when they really help to answer the question, or when Arch explicitly asks about his preferences, goals or past messages.
 
-For questions like "что ты знаешь обо мне по памяти", "что ты помнишь обо мне" или похожие формулировки, дай короткое резюме (2–4 предложения) ТОЛЬКО про пользователя: его локацию, вкусы, привычки, цели, важные факты из жизни.
-Не упоминай технические детали системы, фазы разработки AIr4, профильные тесты и другую внутреннюю кухню, даже если такие вещи присутствуют в фактах ниже.
-Не говори про свои "цели" или внутренние задачи — фокусируйся только на профиле Арча.
+When you answer, always speak in natural conversational Russian, as if you are talking to a friend.
+Do NOT output JSON, code, tables, bullet lists of settings, or anything that looks like a config.
+Never use field names like "reply_style", "profile", "settings", "model" or similar in the text of your answer.
+Avoid constructions like "Имя — Арч. Предпочтения: (reply_style: short) ..." — instead write normal sentences.
+
+For questions like "что ты знаешь обо мне по памяти", "что ты помнишь обо мне" или похожие формулировки, дай короткое резюме (2–4 нормальных предложения) ТОЛЬКО про пользователя:
+его локацию, вкусы, привычки, цели, важные факты из жизни.
+Не упоминай технические детали системы, фазы разработки AIr4, профильные тесты, внутренние теги или любую служебную информацию, даже если такие вещи присутствуют в фактах ниже.
+Не говори про свои "цели" или внутренние задачи — фокусируйся только на профиле Арча и говори простым человеческим языком.
+Отвечай как живой человек, а не как анкета: не пиши шаблоны вида "Имя — Арч. Предпочтения — ... Локация — ...". Лучше дай 2–4 нормальных предложения подряд, связывая факты в связный текст. Представь, что ты устно отвечаешь другу, и избегай сухих перечней через двоеточия и тире.
 
 STRUCTURED PROFILE (high-level):
 """
-                # RAW FACTS section отключён, чтобы модель не цепляла технические детали вроде Phase 11
-                system_prompt = prefix + "\n".join(profile_lines)
+                # RAW FACTS section отключён, чтобы модель не цепляла технические детали вроде Phase 11.
+                # Профиль пользователя добавляем поверх базового промта.
+                system_prompt = base_system_prompt + "\n\n" + prefix + "\n".join(profile_lines)
     except Exception as e:
         print(f"[FACTS] error while reading facts: {e}")
+
+    # --- RAG: подмешиваем контекст из документов / памяти ---
+    rag_context = ""
+    if not is_smalltalk:
+        try:
+            rag_context = _retrieve_rag_context(user_text, k=6, max_chars=2000)
+        except Exception as e:
+            print(f"[RAG] context retrieval error: {e}")
+            rag_context = ""
+
+    if rag_context:
+        system_prompt = (
+            (system_prompt or base_system_prompt)
+            + "\n\n"
+            + "Ниже приведён контекст из твоей локальной базы файлов, заметок и памяти. "
+              "Используй его как основной источник фактов при ответе на вопрос, "
+              "но не пересказывай дословно больше, чем нужно. Если контекст противоречит "
+              "твоим общим знаниям, приоритет у этого контекста.\n\n"
+              "RAG CONTEXT START\n"
+            + rag_context
+            + "\nRAG CONTEXT END\n"
+        )
 
     reply: Optional[str] = None
 
@@ -583,7 +757,7 @@ STRUCTURED PROFILE (high-level):
                 "session_id": sess.id,
                 "system": system_prompt or None,
                 "stream": False,
-                "use_rag": False,
+                "use_rag": bool(rag_context),
                 "k_memory": 1,  # минимум 1, чтобы пройти pydantic-валидацию ChatBody
                 "style": payload.style,
                 "settings": payload.settings or None,
@@ -656,7 +830,10 @@ STRUCTURED PROFILE (high-level):
     # 🔪 режем мысли DeepSeek всегда, если ответ есть
     if reply:
         reply = strip_think(reply)
+        reply = _sanitize_intro(reply)
         reply = _normalize_pov(reply)
+        reply = _sanitize_phases(reply, user_text)
+        reply = _strip_cjk(reply)
 
     if not reply:
         # last resort — readable fallback
@@ -673,16 +850,16 @@ STRUCTURED PROFILE (high-level):
                     mem_ids.append(str(rid2))
             summary = reply[:320]
             MEMORY.add_text(user_id="dev", text=f"summary: {summary}", session_id=sess.id, source="summary")
-            # Auto-extract facts from assistant replies
-            try:
-                assistant_facts = extract_facts_from_text_v3(
-                    reply,
-                    subject="Arch",
-                )
-                for f in assistant_facts:
-                    add_fact(f)
-            except Exception as e:
-                print(f"[FACTS] assistant extract error: {e}")
+            # Auto-extract facts from assistant replies (disabled)
+            # try:
+            #     assistant_facts = extract_facts_from_text_v3(
+            #         reply,
+            #         subject="Arch",
+            #     )
+            #     for f in assistant_facts:
+            #         add_fact(f)
+            # except Exception as e:
+            #     print(f"[FACTS] assistant extract error: {e}")
         except Exception as e:
             print(f"[WARN] memory add_text (assistant) failed: {e}")
 

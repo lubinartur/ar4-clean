@@ -4,6 +4,9 @@ import httpx
 import json
 import time
 from pathlib import Path
+import re
+
+from backend.app.memory.facts import Fact, add_fact
 
 # --- Session storage helpers ---
 SESS_DIR = Path("data/sessions")
@@ -59,7 +62,45 @@ def _append_msg(session_id: str, role: str, content: str):
 router = APIRouter()
 
 AGENT_PROFILE = {"priorities": ["финрезерв 10k", "форма", "AIR4/портфолио", "ясность"]}
-FACTS_PROFILE = {"work_time": "10:00–19:00", "gym_time": "19:30"}
+FACTS_PROFILE = {
+    "work_time": "10:00–19:00",
+    "gym_time": "19:30",
+    "zodiac": None,
+    "dog_name": None,
+    "dog_age": None,
+}
+
+
+# Helper: определение знака зодиака по дате рождения (день, месяц)
+def _zodiac_from_day_month(day: int, month: int) -> str:
+    # Простое определение знака зодиака по дате (западная система)
+    if (month == 3 and day >= 21) or (month == 4 and day <= 19):
+        return "Овен"
+    if (month == 4 and day >= 20) or (month == 5 and day <= 20):
+        return "Телец"
+    if (month == 5 and day >= 21) or (month == 6 and day <= 20):
+        return "Близнецы"
+    if (month == 6 and day >= 21) or (month == 7 and day <= 22):
+        return "Рак"
+    if (month == 7 and day >= 23) or (month == 8 and day <= 22):
+        return "Лев"
+    if (month == 8 and day >= 23) or (month == 9 and day <= 22):
+        return "Дева"
+    if (month == 9 and day >= 23) or (month == 10 and day <= 22):
+        return "Весы"
+    if (month == 10 and day >= 23) or (month == 11 and day <= 21):
+        return "Скорпион"
+    if (month == 11 and day >= 22) or (month == 12 and day <= 21):
+        return "Стрелец"
+    if (month == 12 and day >= 22) or (month == 1 and day <= 19):
+        return "Козерог"
+    if (month == 1 and day >= 20) or (month == 2 and day <= 18):
+        return "Водолей"
+    # (month == 2 and day >= 19) or (month == 3 and day <= 20)
+    return "Рыбы"
+
+STRICT_RAG = True
+RAG_SCORE_THRESHOLD = 0.60
 
 
 @router.post("/chat")
@@ -190,6 +231,59 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
 
     q_l = q.lower().strip()
 
+    # Авто-запоминание даты рождения -> знак зодиака
+    dob_match = re.search(r"(\d{1,2})[./-](\d{1,2})[./-](\d{4})", q)
+    if dob_match and (
+        "дата рождения" in q_l
+        or "родился" in q_l
+        or "родилась" in q_l
+    ):
+        try:
+            day = int(dob_match.group(1))
+            month = int(dob_match.group(2))
+            zodiac = _zodiac_from_day_month(day, month)
+            FACTS_PROFILE["zodiac"] = zodiac
+            reply = f"Запомнил. Твой знак зодиака — {zodiac}."
+
+            # Persist zodiac as a structured fact so it appears in Memory Bank
+            try:
+                add_fact(
+                    Fact(
+                        subject="Arch",
+                        predicate="zodiac",
+                        object=zodiac,
+                        category="other",
+                        source_session=sess_id,
+                    )
+                )
+            except Exception as e:
+                print(f"[FACTS] failed to persist zodiac fact: {e}")
+        except Exception:
+            reply = "Принял дату рождения, но не смог корректно определить знак зодиака."
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
+        except Exception:
+            pass
+        return {"reply": reply}
+
+    # Жёсткие факты из профиля (обход RAG/LLM)
+    if "знак зодиака" in q_l:
+        zodiac = FACTS_PROFILE.get("zodiac")
+        if zodiac:
+            reply = f"Твой знак зодиака — {zodiac}."
+        else:
+            reply = (
+                "У меня нет в профиле данных о твоём знаке зодиака. "
+                "Могу запомнить, если скажешь."
+            )
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
+        except Exception:
+            pass
+        return {"reply": reply}
+
     # быстрые режимы (#morning_check, #evening_check, #week_check)
     if any(
         tok in q_l
@@ -274,9 +368,10 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
         except Exception:
             pass
 
-        # --- RAG auto‑context (safe mode) ---
+        # --- RAG auto‑context (safe mode + строгий режим) ---
         rag_ctx = ""
-        use_rag = len(q.split()) >= 4  # RAG only for meaningful queries
+        use_rag = True  # строгий режим: всегда пытаться использовать память
+        rag_ok = False
 
         if use_rag:
             try:
@@ -287,22 +382,46 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
                     )
                     js = r.json()
                     hits = js.get("results", [])
+                    print("RAG HITS:", hits)
                     # More strict score threshold
                     if (
                         hits
                         and isinstance(hits[0], dict)
                         and hits[0].get("text")
-                        and hits[0].get("score", 0) >= 0.60
+                        and hits[0].get("score") is not None
+                        and hits[0]["score"] >= RAG_SCORE_THRESHOLD
                     ):
                         rag_ctx = hits[0]["text"][:1200]
+                        rag_ok = True
             except Exception:
                 rag_ctx = ""
+                rag_ok = False
+
+        # Если включён строгий режим и RAG не нашёл ничего надёжного — не зовём LLM
+        if STRICT_RAG and use_rag and not rag_ok:
+            answer = (
+                "У меня нет надёжных данных в памяти по этому вопросу. "
+                "Загрузи документы или переформулируй запрос, либо отключи строгий режим RAG."
+            )
+            try:
+                _append_msg(sess_id, "assistant", answer)
+            except Exception:
+                pass
+            return {"reply": answer, "rag_ctx_head": ""}
 
         # user payload (RAG only if available)
         if rag_ctx:
             user_payload = f"{q}\n\n[MEMORY]\n{rag_ctx}"
         else:
             user_payload = q
+
+        if rag_ctx:
+            system_preamble = (
+                system_preamble
+                + " ВНИМАНИЕ: отвечай ТОЛЬКО на основе блока [MEMORY] ниже. "
+                  "Ничего не придумывай. Если пользователь просит точную фразу, "
+                  "верни её дословно из [MEMORY] без изменений."
+            )
 
         # --- call LLM via Ollama chat ---
         async with httpx.AsyncClient(timeout=60.0) as client:
