@@ -18,13 +18,13 @@ if "def _profile_block_from_request(" not in t:
     helper=(
         "\ndef _profile_block_from_request(headers)->str:\n"
         "    try:\n        user_id=headers.get(\"X-User\", \"dev\")\n    except Exception:\n        user_id=\"dev\"\n"
-        "    try:\n        prof=_load_user_profile(user_id)\n    except Exception:\n        return \"\\"\n"
+        "    try:\n        prof=_load_user_profile(user_id)\n    except Exception:\n        return \"\"\n"
         "    prefs=prof.preferences or {}\n    facts=prof.facts or {}\n    goals=prof.goals or []\n"
         "    parts=[]\n    if getattr(prof,\"name\",None): parts.append(f\"name={prof.name}\")\n"
         "    if prefs: parts.append(\"prefs=\"+\",\".join([f\"{k}:{v}\" for k,v in list(prefs.items())[:5]]))\n"
         "    if facts: parts.append(\"facts=\"+\",\".join([f\"{k}:{v}\" for k,v in list(facts.items())[:6]]))\n"
-        "    if goals: parts.append(\"goals=\"+\"; \".join([getattr(g,\"title\",getattr(g,\"id\",\"\\")) for g in goals][:3]))\n"
-        "    return (\"USER_PROFILE: \"+\" | \".join(parts)) if parts else \"\\"\n"
+        "    if goals: parts.append(\"goals=\"+\"; \".join([getattr(g,\"title\",getattr(g,\"id\",\"\") ) for g in goals][:3]))\n"
+        "    return (\"USER_PROFILE: \"+\" | \".join(parts)) if parts else \"\"\n"
     )
     t+=helper
     changed=True
