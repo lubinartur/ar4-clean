@@ -1,261 +1,422 @@
-
-import React, { useState, useEffect } from 'react';
-import { 
-  LayoutDashboard, 
-  MessageSquare, 
-  Database, 
-  Settings, 
-  AlertTriangle,
-  Lock,
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  LayoutDashboard,
+  MessageSquare,
+  Database,
+  Settings,
   UploadCloud,
   PlusCircle,
-  Zap,
-  Trash2,
   Clock,
-  History
+  History as HistoryIcon,
+  Lock,
+  Trash2,
+  ChevronDown,
+  ChevronRight,
+  Archive,
+  Zap,
+  AlertTriangle,
 } from 'lucide-react';
-import { air4 } from '../services/air4Service';
+import { useAir4 } from '../contexts/Air4Context';
 import { ChatSession } from '../types';
-import { Logo } from './Logo';
+import Logo from '../assets/air4.svg';
+import { usePolling } from '../hooks/usePolling';
 
 interface SidebarProps {
   activeTab: string;
   onTabChange: (tab: string) => void;
   currentSessionId: string | null;
-  onSessionChange: (sessionId: string) => void;
+  onSessionChange: (sessionId: string | null) => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange, currentSessionId, onSessionChange }) => {
+const Sidebar: React.FC<SidebarProps> = ({
+  activeTab,
+  onTabChange,
+  currentSessionId,
+  onSessionChange,
+}) => {
+  const air4 = useAir4();
   const [panicActive, setPanicActive] = useState(false);
   const [history, setHistory] = useState<ChatSession[]>([]);
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
+    Today: true,
+    Yesterday: true,
+    'Previous 7 Days': true,
+  });
 
-  const refreshHistory = () => {
-      setHistory(air4.getSessions());
-  };
+  const refreshHistory = useCallback(() => {
+    try {
+      const sessions = air4.getSessions();
+      setHistory(Array.isArray(sessions) ? sessions : []);
+    } catch (err) {
+      console.error('[Sidebar] refreshHistory error', err);
+      setHistory([]);
+    }
+  }, [air4]);
 
+  // Poll for system health and ingest queue status
+  const pollSystemStatus = useCallback(async () => {
+    try {
+      await air4.getStats();
+      await air4.getIngestQueueStatus();
+    } catch (err) {
+      // Errors are handled in service
+    }
+  }, [air4]);
+
+  // Initial load
   useEffect(() => {
     refreshHistory();
-    // Poll for title updates or new chats
-    const interval = setInterval(refreshHistory, 2000);
-    return () => clearInterval(interval);
-  }, []);
+  }, [refreshHistory]);
+
+  // Polling: health check + ingest queue (every 5 seconds)
+  usePolling(pollSystemStatus, 5000);
+
+  // Refresh history when sessions change (no polling, only on mount and manual actions)
 
   const handlePanic = () => {
-    if (window.confirm("ENGAGE DURESS PROTOCOL?")) {
-        air4.triggerPanic();
-        setPanicActive(true);
+    if (window.confirm('ENGAGE DURESS PROTOCOL?')) {
+      air4.triggerPanic();
+      setPanicActive(true);
     }
   };
 
   const handleNewChat = () => {
-      const newSession = air4.createSession();
-      refreshHistory();
+    try {
+      const newSession = air4.createSession('New Session');
+      refreshHistory(); // Manual refresh after action
       onSessionChange(newSession.id);
       onTabChange('chat');
+    } catch (err) {
+      console.error('[Sidebar] handleNewChat error', err);
+    }
   };
 
-  const handleDeleteSession = (e: React.MouseEvent, id: string) => {
-      e.stopPropagation();
-      if (confirm('Delete this memory thread?')) {
-          air4.deleteSession(id);
-          refreshHistory();
-          if (currentSessionId === id) {
-              // If deleted active session, go to dashboard or first available
-              const remaining = air4.getSessions();
-              if (remaining.length > 0) onSessionChange(remaining[0].id);
-              else onTabChange('dashboard');
-          }
+  const handleDeleteSession = (
+    e: React.MouseEvent,
+    id: string
+  ) => {
+    e.stopPropagation();
+    if (!window.confirm('Delete this memory thread?')) return;
+
+    try {
+      air4.deleteSession(id);
+      refreshHistory();
+      if (currentSessionId === id) {
+        const remaining = air4.getSessions();
+        if (remaining.length > 0) {
+          onSessionChange(remaining[0].id);
+        } else {
+          onSessionChange(null);
+          onTabChange('dashboard');
+        }
       }
+    } catch (err) {
+      console.error('[Sidebar] deleteSession error', err);
+    }
   };
 
   if (panicActive) {
-      return (
-          <div className="h-full w-20 md:w-64 bg-red-950/20 glass-panel rounded-[2rem] flex flex-col items-center justify-center animate-pulse border-red-500/50 border">
-              <Lock className="w-12 h-12 text-red-500 mb-4" />
-              <h2 className="text-red-500 font-bold tracking-widest">LOCKED</h2>
-          </div>
-      )
+    return (
+      <div className="h-full w-20 md:w-64 bg-red-950/20 glass-panel rounded-[2rem] flex flex-col items-center justify-center animate-pulse border border-red-500/50">
+        <Lock className="w-12 h-12 text-red-500 mb-4" />
+        <h2 className="text-red-500 font-bold tracking-widest">
+          LOCKED
+        </h2>
+      </div>
+    );
   }
 
-  // Group history by date
-  const safeHistory = Array.isArray(history) ? history : [];
-  const groupedHistory = safeHistory.reduce((groups, session) => {
+  // Advanced grouping logic: Today, Yesterday, 7/30 days, then by month
+  const groupedHistory = history.reduce(
+    (groups, session) => {
       const date = new Date(session.timestamp);
-      const today = new Date();
-      let key = 'Previous';
-      
-      if (date.toDateString() === today.toDateString()) key = 'Today';
-      else if (date.getDate() === today.getDate() - 1 && date.getMonth() === today.getMonth() && date.getFullYear() === today.getFullYear()) key = 'Yesterday';
-      else if (date > new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)) key = 'Previous 7 Days';
+      const now = new Date();
+      const diffTime = Math.abs(now.getTime() - date.getTime());
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+      let key = 'Older';
+
+      if (date.toDateString() === now.toDateString()) {
+        key = 'Today';
+      } else if (diffDays <= 1) {
+        key = 'Yesterday';
+      } else if (diffDays <= 7) {
+        key = 'Previous 7 Days';
+      } else if (diffDays <= 30) {
+        key = 'Previous 30 Days';
+      } else {
+        // Group by Month Year for older items, e.g., "September 2024"
+        key = date.toLocaleDateString('en-US', {
+          month: 'long',
+          year: 'numeric',
+        });
+      }
 
       if (!groups[key]) groups[key] = [];
       groups[key].push(session);
       return groups;
-  }, {} as Record<string, ChatSession[]>);
+    },
+    {} as Record<string, ChatSession[]>
+  );
 
-  const groupOrder = ['Today', 'Yesterday', 'Previous 7 Days', 'Previous'];
+  const fixedOrder = [
+    'Today',
+    'Yesterday',
+    'Previous 7 Days',
+    'Previous 30 Days',
+  ];
+  const allKeys = Object.keys(groupedHistory);
+  const dynamicKeys = allKeys
+    .filter((k) => !fixedOrder.includes(k))
+    .sort(
+      (a, b) =>
+        new Date(b).getTime() - new Date(a).getTime()
+    );
+
+  const finalGroupOrder = [...fixedOrder, ...dynamicKeys];
+
+  const toggleGroup = (group: string) => {
+    setOpenGroups((prev) => ({
+      ...prev,
+      [group]: !prev[group],
+    }));
+  };
 
   return (
     <div className="h-full w-20 md:w-[280px] flex flex-col z-50">
-      
-      {/* Header Area */}
-      <div className="flex-shrink-0 px-6 py-5 flex items-center gap-3 mb-2">
-             <div className="w-8 h-8 rounded-lg bg-air-500/10 flex items-center justify-center border border-air-500/20 text-air-500 shadow-[0_0_15px_rgba(249,115,22,0.15)] relative overflow-hidden group">
-                 <div className="absolute inset-0 bg-air-500/10 blur-md opacity-0 group-hover:opacity-100 transition-opacity"></div>
-                 <Logo className="w-5 h-5 text-air-500 relative z-10" />
-             </div>
-             <div className="hidden md:block">
-                 <h1 className="font-bold text-lg text-slate-100 tracking-tight">AIr4 Core</h1>
-             </div>
+      {/* Header */}
+      <div className="flex-shrink-0 px-6 py-0 mt-2 flex items-center mb-0">
+        <div className="w-28 h-28 flex items-center justify-center overflow-hidden">
+          <img
+            src={Logo}
+            alt="AiR4 logo"
+            className="w-24 h-24 object-contain"
+          />
+        </div>
       </div>
 
-      {/* New Chat Button */}
-      <div className="flex-shrink-0 px-4 mb-6">
-            <button 
-                onClick={handleNewChat}
-                className="w-full flex items-center gap-3 bg-white/5 hover:bg-air-600 hover:text-white border border-white/10 hover:border-air-500/50 text-slate-300 p-3 rounded-2xl transition-all duration-300 group shadow-lg shadow-transparent hover:shadow-[0_0_15px_rgba(249,115,22,0.3)] hover:scale-[1.02]"
-            >
-                <PlusCircle className="w-5 h-5 text-air-500 group-hover:text-white group-hover:rotate-90 transition-all" />
-                <span className="hidden md:block font-medium">New Session</span>
-            </button>
+      {/* New Session */}
+      <div className="flex-shrink-0 px-4 mb-3">
+        <button
+          onClick={handleNewChat}
+          className="w-full flex items-center gap-3 bg-white/5 hover:bg-air-600 hover:text-white border border-white/10 hover:border-air-500/50 text-slate-300 p-3 rounded-2xl transition-all duration-300 group shadow-lg shadow-transparent hover:shadow-[0_0_15px_rgba(249,115,22,0.3)] hover:scale-[1.02]"
+        >
+          <PlusCircle className="w-5 h-5 text-air-500 group-hover:text-white group-hover:rotate-90 transition-all" />
+          <span className="hidden md:block font-medium">
+            New Session
+          </span>
+        </button>
       </div>
 
-      {/* Main Navigation + History Scroll Area */}
-      <div className="flex-1 overflow-y-auto px-4 space-y-8 custom-scrollbar pb-4">
-            
-            {/* Core Workspaces */}
-            <div>
-                <h3 className="text-[10px] font-bold text-slate-500 mb-3 px-2 hidden md:block tracking-widest uppercase">Workspaces</h3>
-                <div className="space-y-1">
-                    <NavItem 
-                        id="dashboard" 
-                        icon={LayoutDashboard} 
-                        label="System Overview" 
-                        active={activeTab === 'dashboard'} 
-                        onClick={() => onTabChange('dashboard')} 
-                    />
-                     <NavItem 
-                        id="memory" 
-                        icon={Database} 
-                        label="Memory Bank" 
-                        active={activeTab === 'memory'} 
-                        onClick={() => onTabChange('memory')} 
-                    />
-                    <NavItem 
-                        id="ingest" 
-                        icon={UploadCloud} 
-                        label="Ingest Data" 
-                        active={activeTab === 'ingest'} 
-                        onClick={() => onTabChange('ingest')} 
-                    />
-                    <NavItem 
-                        id="history" 
-                        icon={History} 
-                        label="History" 
-                        active={activeTab === 'history'} 
-                        onClick={() => onTabChange('history')} 
-                    />
-                    <NavItem 
-                        id="settings" 
-                        icon={Settings} 
-                        label="Settings" 
-                        active={activeTab === 'settings'} 
-                        onClick={() => onTabChange('settings')} 
-                    />
-                </div>
-            </div>
+      {/* Nav + History */}
+      <div className="flex-1 overflow-y-auto px-4 space-y-6 pb-4">
+        {/* Workspaces */}
+        <div>
+          <h3 className="text-[10px] font-bold text-slate-500 mb-3 px-2 hidden md:block tracking-widest uppercase">
+            Workspaces
+          </h3>
+          <div className="space-y-1">
+            <NavItem
+              id="dashboard"
+              icon={LayoutDashboard}
+              label="System Overview"
+              active={activeTab === 'dashboard'}
+              onClick={() => onTabChange('dashboard')}
+            />
+            <NavItem
+              id="chat"
+              icon={MessageSquare}
+              label="Think"
+              active={activeTab === 'chat'}
+              onClick={() => onTabChange('chat')}
+            />
+            <NavItem
+              id="memory"
+              icon={Database}
+              label="Store"
+              active={activeTab === 'memory'}
+              onClick={() => onTabChange('memory')}
+            />
+            <NavItem
+              id="history"
+              icon={HistoryIcon}
+              label="Recall"
+              active={activeTab === 'history'}
+              onClick={() => onTabChange('history')}
+            />
+            <NavItem
+              id="ingest"
+              icon={UploadCloud}
+              label="Ingest"
+              active={activeTab === 'ingest'}
+              onClick={() => onTabChange('ingest')}
+            />
+            <NavItem
+              id="settings"
+              icon={Settings}
+              label="Settings"
+              active={activeTab === 'settings'}
+              onClick={() => onTabChange('settings')}
+            />
+          </div>
+        </div>
 
-            {/* Chat History Section */}
-            <div className="hidden md:block">
-                <h3 className="text-[10px] font-bold text-slate-500 mb-3 px-2 tracking-widest uppercase flex items-center justify-between">
-                    <span>Recent Chats</span>
-                    <Clock className="w-3 h-3" />
-                </h3>
-                
-                <div className="space-y-4">
-                    {groupOrder.map(group => {
-                        if (!groupedHistory[group]) return null;
-                        return (
-                            <div key={group}>
-                                <div className="px-2 text-[10px] text-slate-600 font-semibold mb-2">{group}</div>
-                                <div className="space-y-1">
-                                    {groupedHistory[group].map(session => (
-                                        <div 
-                                            key={session.id}
-                                            onClick={() => { onSessionChange(session.id); onTabChange('chat'); }}
-                                            className={`group relative flex items-center gap-3 px-3 py-2 rounded-xl cursor-pointer transition-all ${
-                                                currentSessionId === session.id && activeTab === 'chat'
-                                                ? 'bg-white/10 text-white border border-white/5' 
-                                                : 'text-slate-400 hover:text-slate-200 hover:bg-white/5 border border-transparent'
-                                            }`}
-                                        >
-                                            <MessageSquare className={`w-3 h-3 flex-shrink-0 ${currentSessionId === session.id && activeTab === 'chat' ? 'text-air-500' : 'text-slate-600'}`} />
-                                            <span className="truncate text-xs font-medium flex-1">
-                                                {session.title || 'Untitled Session'}
-                                            </span>
-                                            
-                                            {/* Delete Action (visible on hover) */}
-                                            <button 
-                                                onClick={(e) => handleDeleteSession(e, session.id)}
-                                                className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 transition-opacity"
-                                            >
-                                                <Trash2 className="w-3 h-3" />
-                                            </button>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        )
-                    })}
-                    
-                    {history.length === 0 && (
-                        <div className="px-3 py-4 text-center border border-dashed border-white/5 rounded-xl">
-                            <span className="text-xs text-slate-600">No active sessions</span>
+        {/* Recent Chats */}
+        <div className="hidden md:block">
+          <div className="flex items-center justify-between mb-3 px-2">
+            <h3 className="text-[10px] font-bold text-slate-500 tracking-widest uppercase opacity-70">
+              Recent Chats
+            </h3>
+            <Clock className="w-3 h-3 text-slate-600" />
+          </div>
+
+          <div className="space-y-1">
+            {finalGroupOrder.map((group) => {
+              if (!groupedHistory[group] || groupedHistory[group].length === 0)
+                return null;
+
+              const isOpen = openGroups[group];
+              const count = groupedHistory[group].length;
+
+              return (
+                <div key={group} className="mb-2">
+                  {/* Group header */}
+                  <button
+                    onClick={() => toggleGroup(group)}
+                    className="w-full flex items-center justify-between px-3 py-1.5 text-[10px] text-slate-500 uppercase tracking-wider transition-colors group/header hover:text-slate-300"
+                  >
+                    <div className="flex items-center gap-1">
+                      {isOpen ? (
+                        <ChevronDown className="w-3 h-3" />
+                      ) : (
+                        <ChevronRight className="w-3 h-3" />
+                      )}
+                      <span>{group}</span>
+                    </div>
+                    <span className="bg-white/5 px-1.5 py-0.5 rounded-md text-[9px] group-hover/header:bg-white/10">
+                      {count}
+                    </span>
+                  </button>
+
+                  {/* Session list */}
+                  <div
+                    className={`space-y-0.5 overflow-hidden transition-all duration-200 ${
+                      isOpen
+                        ? 'max-h-[500px] opacity-100'
+                        : 'max-h-0 opacity-0'
+                    }`}
+                  >
+                    {groupedHistory[group].map((session) => {
+                      const isActive =
+                        currentSessionId === session.id &&
+                        activeTab === 'chat';
+                      return (
+                        <div
+                          key={session.id}
+                          onClick={() => {
+                            onSessionChange(session.id);
+                            onTabChange('chat');
+                          }}
+                          className={`group relative flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-all border-l-2 ${
+                            isActive
+                              ? 'bg-white/10 text-white border-l-air-500'
+                              : 'text-slate-400 hover:text-slate-200 hover:bg-white/5 border-l-transparent'
+                          }`}
+                        >
+                          <span className="truncate text-xs font-medium flex-1">
+                            {session.title || 'Untitled Session'}
+                          </span>
+                          <button
+                            onClick={(e) =>
+                              handleDeleteSession(e, session.id)
+                            }
+                            className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 transition-opacity"
+                            title="Delete"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
                         </div>
-                    )}
+                      );
+                    })}
+                  </div>
                 </div>
-            </div>
-      </div>
+              );
+            })}
 
-      {/* Footer / Status Card */}
-      <div className="flex-shrink-0 p-4">
-        <div className="glass-card rounded-2xl p-4 relative overflow-hidden group border border-white/5">
-            <div className="absolute top-0 right-0 w-20 h-20 bg-air-500/20 blur-2xl -translate-y-1/2 translate-x-1/2 rounded-full"></div>
-            
+            {history.length === 0 && (
+              <div className="px-3 py-8 text-center border border-dashed border-white/5 rounded-xl flex flex-col items-center gap-2">
+                <Archive className="w-5 h-5 text-slate-700" />
+                <span className="text-xs text-slate-600">
+                  No active sessions
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Footer / Status Card */}
+        <div className="hidden md:block flex-shrink-0 p-4">
+          <div className="glass-card rounded-2xl p-4 relative overflow-hidden group border border-white/5">
+            <div className="absolute top-0 right-0 w-20 h-20 bg-air-500/20 opacity-40 blur-2xl -translate-y-1/2 translate-x-1/2 rounded-full" />
             <div className="relative z-10 text-center md:text-left">
-                <div className="mx-auto md:mx-0 w-8 h-8 rounded-full bg-air-500/20 flex items-center justify-center mb-2">
-                    <Zap className="w-4 h-4 text-air-500" />
-                </div>
-                <h4 className="hidden md:block text-sm font-bold text-white mb-1">System Online</h4>
-                <p className="hidden md:block text-[10px] text-slate-400 leading-tight mb-3">
-                    Local core active. <br/>AES-256 Enabled.
-                </p>
-                <button 
-                    onClick={handlePanic}
-                    className="w-full py-2 bg-white/5 hover:bg-red-500/20 hover:text-red-200 border border-white/5 rounded-xl text-xs font-medium transition-colors text-slate-300 flex items-center justify-center gap-2"
-                >
-                    <AlertTriangle className="w-3 h-3" />
-                    <span className="hidden md:inline">PANIC</span>
-                </button>
+              <div className="mx-auto md:mx-0 w-8 h-8 rounded-full bg-air-500/20 flex items-center justify-center mb-2">
+                <Zap className="w-4 h-4 text-air-500" />
+              </div>
+              <h4 className="hidden md:block text-sm font-bold text-white mb-1">
+                System Online
+              </h4>
+              <p className="hidden md:block text-[10px] text-slate-400 leading-tight mb-3">
+                Local core active. <br />
+                AES-256 Enabled.
+              </p>
+              <button
+                onClick={handlePanic}
+                className="w-full py-2 bg-white/5 hover:bg-red-600/80 border border-white/10 hover:border-red-500/70 rounded-xl text-[11px] font-semibold text-slate-300 hover:text-white transition-colors flex items-center justify-center gap-2"
+              >
+                <AlertTriangle className="w-3 h-3" />
+                <span className="hidden md:inline">PANIC</span>
+              </button>
             </div>
+          </div>
         </div>
       </div>
     </div>
   );
 };
 
-const NavItem = ({ id, icon: Icon, label, active, onClick }: any) => (
+interface NavItemProps {
+  id: string;
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}
+
+const NavItem: React.FC<NavItemProps> = ({
+  icon: Icon,
+  label,
+  active,
+  onClick,
+}) => {
+  return (
     <button
-        onClick={onClick}
-        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200 group ${
-            active 
-            ? 'bg-air-500/10 text-air-500 border border-air-500/20 shadow-[0_0_20px_rgba(249,115,22,0.1)]' 
-            : 'text-slate-400 hover:text-slate-200 hover:bg-white/5 border border-transparent'
-        }`}
+      onClick={onClick}
+      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200 group ${
+        active
+          ? 'bg-air-500/10 text-air-500 border border-air-500/20 shadow-[0_0_20px_rgba(249,115,22,0.1)]'
+          : 'text-slate-400 hover:text-slate-200 hover:bg-white/5 border border-transparent'
+      }`}
     >
-        <Icon className={`w-4 h-4 transition-colors ${active ? 'text-air-500' : 'group-hover:text-air-400'}`} />
-        <span className="hidden md:block font-medium text-sm">{label}</span>
+      <Icon
+        className={`w-4 h-4 transition-colors ${
+          active ? 'text-air-500' : 'group-hover:text-air-400'
+        }`}
+      />
+      <span className="hidden md:block font-medium text-sm">
+        {label}
+      </span>
     </button>
-);
+  );
+};
 
 export default Sidebar;
