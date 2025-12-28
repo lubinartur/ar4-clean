@@ -1,18 +1,83 @@
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useSettings } from "../hooks/useSettings";
-import { air4, AVAILABLE_MODELS } from "../services/air4Service";
+import { useAir4 } from "../contexts/Air4Context";
+import { AVAILABLE_MODELS } from "../services/air4Service";
 import { ChevronDown, Check, Sliders, Cpu, User, Database, FileText, ShieldAlert } from "lucide-react";
-import type { IngestMode } from "../types";
+import type { IngestMode, SessionConfig } from "../types";
 
 type ModelName = (typeof AVAILABLE_MODELS)[number];
 
-const SettingsPage: React.FC = () => {
+interface SettingsProps {
+  activeSessionId: string | null;
+}
+
+const SettingsPage: React.FC<SettingsProps> = ({ activeSessionId }) => {
   const { settings, setSettings } = useSettings();
+  const air4 = useAir4();
+  
+  // Session Config state
+  const [sessionConfig, setSessionConfig] = useState<SessionConfig>({});
+  
+  // Ollama models state
+  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
+  const [modelsLoading, setModelsLoading] = useState<boolean>(true);
+  const [modelsError, setModelsError] = useState<string | null>(null);
 
   // Bridge to backend session / ingest behaviour
   const [autoTitle, setAutoTitle] = useState<boolean>(air4.getAutoTitle());
   const [ingestMode, setIngestMode] = useState<IngestMode>(air4.getIngestMode());
+
+  // Fetch Ollama models on mount
+  const fetchOllamaModels = async () => {
+    setModelsLoading(true);
+    setModelsError(null);
+    try {
+      const apiBaseUrl = (import.meta as any).env?.VITE_API_BASE_URL 
+        ? (import.meta as any).env.VITE_API_BASE_URL.replace(/\/$/, '')
+        : 'http://127.0.0.1:8000';
+      
+      const response = await fetch(`${apiBaseUrl}/models/ollama`);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch models: ${response.status}`);
+      }
+      const data = await response.json();
+      const models = Array.isArray(data.models) ? data.models : [];
+      setOllamaModels(models);
+    } catch (error) {
+      console.error('[Settings] Failed to fetch Ollama models:', error);
+      setModelsError(error instanceof Error ? error.message : 'Unknown error');
+      setOllamaModels([]);
+    } finally {
+      setModelsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchOllamaModels();
+  }, []);
+
+  // Load session config when activeSessionId changes
+  useEffect(() => {
+    if (activeSessionId) {
+      const config = air4.getSessionConfig(activeSessionId);
+      if (config) {
+        setSessionConfig(config);
+      } else {
+        // Initialize with defaults from global settings
+        setSessionConfig({
+          model: air4.getActiveModel?.() || "auto",
+          tone: settings.responseTone,
+          density: settings.outputDensity,
+          uiLang: settings.interfaceLanguage,
+          streaming: settings.streaming,
+        });
+      }
+    } else {
+      setSessionConfig({});
+    }
+  }, [activeSessionId, air4, settings]);
+
 
   // --- Handlers wired to CoreSettings + air4 service where нужно ---
 
@@ -50,9 +115,11 @@ const SettingsPage: React.FC = () => {
   };
 
   const handleModelSelect = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const val = e.target.value as ModelName;
-    setSettings((prev) => ({ ...prev, activeModel: val }));
-    air4.setActiveModel(val);
+    const model = e.target.value;
+    console.log("[MODEL SELECT]", model);
+    air4.setActiveModel(model as any);
+    // setSettings только для UI синхронизации
+    setSettings((prev) => ({ ...prev, activeModel: model as any }));
   };
 
   const handleStreamingToggle = () => {
@@ -91,6 +158,28 @@ const SettingsPage: React.FC = () => {
     const mode = mapChunkProfileToIngest(profile);
     setIngestMode(mode);
     air4.setIngestMode(mode);
+  };
+
+  const rerunSetup = () => {
+    if (
+      confirm(
+        "Reset local configuration and run onboarding again?\n\nThis will clear all local settings and restart the setup process."
+      )
+    ) {
+      // Удаляем все ключи из localStorage содержащие "air4" (case-insensitive)
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.toLowerCase().includes('air4')) {
+          keysToRemove.push(key);
+        }
+      }
+      keysToRemove.forEach(key => localStorage.removeItem(key));
+      
+      // Hard reload на корень
+      window.location.href = '/';
+      window.location.reload();
+    }
   };
 
   const handleReset = () => {
@@ -253,13 +342,31 @@ const SettingsPage: React.FC = () => {
             icon={Cpu}
           >
             <FieldGroup label="Active Model Weight">
-              <Select value={settings.activeModel} onChange={handleModelSelect}>
-                {AVAILABLE_MODELS.map((m) => (
-                  <option key={m} value={m}>
-                    {modelLabel(m)}
-                  </option>
-                ))}
+              <Select 
+                value={air4.getActiveModel?.() || "auto"} 
+                onChange={handleModelSelect}
+              >
+                {modelsLoading ? (
+                  <option value="auto">Loading models...</option>
+                ) : modelsError || ollamaModels.length === 0 ? (
+                  <option value="auto">Ollama unavailable</option>
+                ) : (
+                  <>
+                    <option value="auto">auto (router)</option>
+                    {ollamaModels.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </>
+                )}
               </Select>
+              <p className="text-[10px] text-slate-500 mt-2">
+                Effective model: {(() => {
+                  const model = air4.getActiveModel?.() || "auto";
+                  return model === "auto" ? "auto (router)" : model;
+                })()} (global)
+              </p>
             </FieldGroup>
 
             <div className="flex items-center justify-between p-4 bg-white/5 rounded-xl border border-white/5 hover:border-white/10 transition-colors">
@@ -278,6 +385,159 @@ const SettingsPage: React.FC = () => {
               <Checkbox checked={settings.streaming} onChange={handleStreamingToggle} />
             </div>
           </Card>
+
+          {/* 3.5. SESSION CONFIG */}
+          {activeSessionId && (
+            <Card
+              title="Session Configuration"
+              subtitle="Override settings for current session. Changes apply immediately."
+              icon={Sliders}
+            >
+              <p className="text-xs text-slate-400 mb-4">
+                Active session: {activeSessionId || 'none'}
+              </p>
+              <FieldGroup label="Model Override">
+                <Select 
+                  value={sessionConfig.model || ""} 
+                  onChange={(e) => {
+                    const newConfig = { ...sessionConfig };
+                    if (e.target.value) {
+                      newConfig.model = e.target.value;
+                    } else {
+                      delete newConfig.model;
+                    }
+                    setSessionConfig(newConfig);
+                    air4.setSessionConfig(activeSessionId, newConfig);
+                  }}
+                >
+                  <option value="">Use Global ({(() => {
+                    const model = air4.getActiveModel?.() || "auto";
+                    return model === "auto" ? "auto (router)" : model;
+                  })()})</option>
+                  {modelsLoading ? (
+                    <option value="">Loading models...</option>
+                  ) : modelsError || ollamaModels.length === 0 ? (
+                    <option value="">Ollama unavailable</option>
+                  ) : (
+                    <>
+                      <option value="auto">auto (router)</option>
+                      {ollamaModels.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </>
+                  )}
+                </Select>
+                <p className="text-[10px] text-slate-500 mt-2">
+                  Effective model: {(() => {
+                    const sessionModel = sessionConfig.model;
+                    const globalModel = air4.getActiveModel?.() || "auto";
+                    const effective = sessionModel || globalModel;
+                    const display = effective === "auto" ? "auto (router)" : effective;
+                    return sessionModel 
+                      ? `${display} (session override)` 
+                      : `${display} (global)`;
+                  })()}
+                </p>
+              </FieldGroup>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <FieldGroup label="Tone Override">
+                  <Select 
+                    value={sessionConfig.tone || ""} 
+                    onChange={(e) => {
+                      const newConfig = { ...sessionConfig };
+                      if (e.target.value) {
+                        newConfig.tone = e.target.value;
+                      } else {
+                        delete newConfig.tone;
+                      }
+                      setSessionConfig(newConfig);
+                      air4.setSessionConfig(activeSessionId, newConfig);
+                    }}
+                  >
+                    <option value="">Use Global ({toneLabel(settings.responseTone)})</option>
+                    <option value="bro">Bro mode</option>
+                    <option value="strict">Strict</option>
+                    <option value="neutral">Neutral</option>
+                  </Select>
+                </FieldGroup>
+
+                <FieldGroup label="Density Override">
+                  <Select 
+                    value={sessionConfig.density || ""} 
+                    onChange={(e) => {
+                      const newConfig = { ...sessionConfig };
+                      if (e.target.value) {
+                        newConfig.density = e.target.value;
+                      } else {
+                        delete newConfig.density;
+                      }
+                      setSessionConfig(newConfig);
+                      air4.setSessionConfig(activeSessionId, newConfig);
+                    }}
+                  >
+                    <option value="">Use Global ({densityLabel(settings.outputDensity)})</option>
+                    <option value="short">Short</option>
+                    <option value="balanced">Balanced</option>
+                    <option value="deep">Deep</option>
+                  </Select>
+                </FieldGroup>
+              </div>
+
+              <FieldGroup label="Language Override">
+                <Select 
+                  value={sessionConfig.uiLang || ""} 
+                  onChange={(e) => {
+                    const newConfig = { ...sessionConfig };
+                    if (e.target.value) {
+                      newConfig.uiLang = e.target.value;
+                    } else {
+                      delete newConfig.uiLang;
+                    }
+                    setSessionConfig(newConfig);
+                    air4.setSessionConfig(activeSessionId, newConfig);
+                  }}
+                >
+                  <option value="">Use Global ({settings.interfaceLanguage})</option>
+                  <option value="auto">Auto Detect</option>
+                  <option value="en">English (US)</option>
+                  <option value="ru">Russian (RU)</option>
+                </Select>
+              </FieldGroup>
+
+              <div className="flex items-center justify-between p-4 bg-white/5 rounded-xl border border-white/5 hover:border-white/10 transition-colors">
+                <div>
+                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">
+                    Streaming Override
+                  </span>
+                  <span
+                    className={`text-xs font-bold block ${
+                      (sessionConfig.streaming !== undefined ? sessionConfig.streaming : settings.streaming) 
+                        ? "text-emerald-400" 
+                        : "text-slate-400"
+                    }`}
+                  >
+                    {(sessionConfig.streaming !== undefined ? sessionConfig.streaming : settings.streaming) 
+                      ? "Enabled" 
+                      : "Disabled"}
+                  </span>
+                </div>
+                <Checkbox 
+                  checked={sessionConfig.streaming !== undefined ? sessionConfig.streaming : settings.streaming} 
+                  onChange={() => {
+                    const newConfig = { 
+                      ...sessionConfig, 
+                      streaming: sessionConfig.streaming !== undefined ? !sessionConfig.streaming : !settings.streaming 
+                    };
+                    setSessionConfig(newConfig);
+                    air4.setSessionConfig(activeSessionId, newConfig);
+                  }} 
+                />
+              </div>
+            </Card>
+          )}
 
           {/* 4. MEMORY & CONTEXT */}
           <Card
@@ -383,6 +643,32 @@ const SettingsPage: React.FC = () => {
                 </button>
               </div>
             </div>
+          </div>
+
+          {/* 7. SETUP */}
+          <div className="xl:col-span-2">
+            <Card
+              title="Setup"
+              subtitle="Reset local configuration and run onboarding again."
+              icon={Sliders}
+            >
+              <div className="p-4 bg-white/5 rounded-xl border border-white/5 hover:border-white/10 transition-colors flex flex-col md:flex-row items-center justify-between gap-4">
+                <div>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">
+                    Re-run setup
+                  </span>
+                  <p className="text-[10px] text-slate-500 max-w-xs leading-tight">
+                    Clear all local configuration and restart onboarding.
+                  </p>
+                </div>
+                <button
+                  onClick={rerunSetup}
+                  className="px-5 py-3 bg-air-500/10 hover:bg-air-500/20 border border-air-500/30 hover:border-air-500 text-air-400 hover:text-air-200 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all whitespace-nowrap"
+                >
+                  Re-run setup
+                </button>
+              </div>
+            </Card>
           </div>
         </div>
       </div>

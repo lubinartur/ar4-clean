@@ -93,6 +93,28 @@ const SettingsPage: React.FC = () => {
     air4.setIngestMode(mode);
   };
 
+  const rerunSetup = () => {
+    if (
+      confirm(
+        "Reset local configuration and run onboarding again?\n\nThis will clear all local settings and restart the setup process."
+      )
+    ) {
+      // Удаляем все ключи из localStorage содержащие "air4" (case-insensitive)
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.toLowerCase().includes('air4')) {
+          keysToRemove.push(key);
+        }
+      }
+      keysToRemove.forEach(key => localStorage.removeItem(key));
+      
+      // Hard reload на корень
+      window.location.href = '/';
+      window.location.reload();
+    }
+  };
+
   const handleReset = () => {
     if (
       confirm(
@@ -383,6 +405,32 @@ const SettingsPage: React.FC = () => {
                 </button>
               </div>
             </div>
+          </div>
+
+          {/* 7. SETUP */}
+          <div className="xl:col-span-2">
+            <Card
+              title="Setup"
+              subtitle="Reset local configuration and run onboarding again."
+              icon={Sliders}
+            >
+              <div className="p-4 bg-white/5 rounded-xl border border-white/5 hover:border-white/10 transition-colors flex flex-col md:flex-row items-center justify-between gap-4">
+                <div>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">
+                    Re-run setup
+                  </span>
+                  <p className="text-[10px] text-slate-500 max-w-xs leading-tight">
+                    Clear all local configuration and restart onboarding.
+                  </p>
+                </div>
+                <button
+                  onClick={rerunSetup}
+                  className="px-5 py-3 bg-air-500/10 hover:bg-air-500/20 border border-air-500/30 hover:border-air-500 text-air-400 hover:text-air-200 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all whitespace-nowrap"
+                >
+                  Re-run setup
+                </button>
+              </div>
+            </Card>
           </div>
         </div>
       </div>
