@@ -1,4 +1,14 @@
-# backend/app/main.py — AIr4 v0.12.1 (Phase-12 — UI/send3 + sessions + memory)
+# backend/app/main.py — AIr4 v1.0.0-rc1 (v1.0 Release Candidate)
+#
+# ============================================================================
+# MAIN ENTRYPOINT: This is the ONLY valid FastAPI application instance.
+# ============================================================================
+# 
+# To start the server, use:
+#   uvicorn backend.app.main:app --reload
+# 
+# Do NOT use dev_server.py or any other entrypoint.
+# ============================================================================
 from __future__ import annotations
 from dotenv import load_dotenv
 load_dotenv()
@@ -22,9 +32,9 @@ try:
 except Exception:
     from .memory.manager_chroma import ChromaMemoryManager  # type: ignore
 try:
-    from backend.app.memory.facts import extract_facts_from_text_v3, add_fact, get_facts_for_subject
+    from backend.app.memory.facts import extract_facts_from_text_v3, extract_profile_facts_auto, add_fact, get_facts_for_subject
 except Exception:
-    from .memory.facts import extract_facts_from_text_v3, add_fact, get_facts_for_subject  # type: ignore
+    from .memory.facts import extract_facts_from_text_v3, extract_profile_facts_auto, add_fact, get_facts_for_subject  # type: ignore
 
 
 try:
@@ -33,20 +43,26 @@ except Exception:
     from . import chat as chat_mod  # type: ignore
 
 # Toggle for conversational (per-turn) memory. Facts & docs stay enabled regardless.
-ENABLE_CHAT_MEMORY = False
+ENABLE_CHAT_MEMORY = os.getenv("ENABLE_CHAT_MEMORY", "0") == "1"
+
+# App version (single source of truth)
+# IMPORTANT: API is frozen until v1.0 release. No new features or breaking changes allowed.
+APP_VERSION = "1.0.0-rc1"
 
 # -----------------------------------------------------------------------------
 # App + CORS
 # -----------------------------------------------------------------------------
-app = FastAPI(title="AIr4", version="0.12.1")
+app = FastAPI(title="AIr4", version=APP_VERSION)
 from .routes_chat import router as router_chat
 from .routes_stream import router as stream_router
+from .routes_models import router as models_router
 app.include_router(router_chat)
 app.include_router(stream_router)
+app.include_router(models_router)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],  # Vite dev server
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -220,7 +236,7 @@ def _is_smalltalk(text: str) -> bool:
 # -----------------------------------------------------------------------------
 # RAG: Retrieve context from MEMORY for use in system prompt
 # -----------------------------------------------------------------------------
-def _retrieve_rag_context(query: str, k: int = 6, max_chars: int = 2000) -> str:
+def _retrieve_rag_context(query: str, session_id: str, k: int = 6, max_chars: int = 2000) -> str:
     """Достаёт текстовый контекст из MEMORY по запросу.
 
     Используем тот же MEMORY.search, что и в /memory/search,
@@ -234,12 +250,13 @@ def _retrieve_rag_context(query: str, k: int = 6, max_chars: int = 2000) -> str:
         return ""
 
     try:
-        # Основной вариант: ChromaMemoryManager с сигнатурой search(user_id=..., query=..., ...)
+        # Основной вариант: ChromaMemoryManager с сигнатурой search(user_id=..., query=..., session_id=..., ...)
         try:
-            res = MEMORY.search(user_id="dev", query=query, k=k, score_threshold=0.35, dedup=True)  # type: ignore
+            res = MEMORY.search(user_id="dev", query=query, session_id=session_id, k=k, score_threshold=0.35, dedup=True)  # type: ignore
         except TypeError:
-            # Фоллбек: более простой search(query=..., k=...)
-            res = MEMORY.search(query=query, k=k)  # type: ignore
+            # Фоллбек: более простой search(query=..., k=...) - but this shouldn't happen with new signature
+            # If it does, return empty to prevent cross-session access
+            return ""
     except Exception as e:
         print(f"[RAG] search failed: {e}")
         return ""
@@ -303,6 +320,40 @@ def ensure_session(session_id: Optional[str]) -> Session:
     _SESSIONS[sid] = sess
     return sess
 
+def validate_session_id(session_id: Optional[str]) -> str:
+    """
+    Validates session_id parameter.
+    Raises HTTPException(400) if session_id is missing or invalid.
+    Returns the validated session_id string.
+    Checks both in-memory _SESSIONS and persisted index.json.
+    """
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    if not isinstance(session_id, str):
+        raise HTTPException(status_code=400, detail="session_id must be a string")
+    session_id = session_id.strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id cannot be empty or whitespace-only")
+    
+    # Check if session exists in memory
+    if session_id in _SESSIONS:
+        return session_id
+    
+    # Check if session exists in persisted index.json
+    from pathlib import Path
+    INDEX_PATH = Path("data/sessions/index.json")
+    if INDEX_PATH.exists():
+        try:
+            import json
+            idx = json.loads(INDEX_PATH.read_text(encoding="utf-8"))
+            if session_id in idx:
+                return session_id
+        except Exception:
+            pass
+    
+    # Session not found
+    raise HTTPException(status_code=400, detail=f"Invalid session_id: session not found")
+
 # -----------------------------------------------------------------------------
 # Debug/Tools: simple memory search endpoint
 # -----------------------------------------------------------------------------
@@ -310,14 +361,16 @@ def ensure_session(session_id: Optional[str]) -> Session:
 @app.get("/memory/search")
 async def memory_search(
     q: str = Query(..., description="query text"),
+    session_id: str = Query(..., description="Session ID (required)"),
     k: int = Query(5, ge=1, le=50),
-    session_id: Optional[str] = Query(None),
 ):
+    # Validate session_id
+    session_id = validate_session_id(session_id)
     if MEMORY is None:
-        raise HTTPException(status_code=503, detail="memory disabled")
+        return {"ok": False, "error": "memory disabled"}
     try:
-        # Your manager's signature: search(*, user_id: str, query: str, k: int=5, score_threshold: float=0.0, dedup: bool=True)
-        res = MEMORY.search(user_id="dev", query=q, k=k, score_threshold=0.2, dedup=True)
+        # Your manager's signature: search(*, user_id: str, query: str, session_id: str, k: int=5, score_threshold: float=0.0, dedup: bool=True)
+        res = MEMORY.search(user_id="dev", query=q, session_id=session_id, k=k, score_threshold=0.2, dedup=True)
 
         # Extract list of items from dict-like response
         if isinstance(res, dict):
@@ -356,6 +409,10 @@ async def memory_search(
 
 @app.get("/memory/debug")
 async def memory_debug():
+    """
+    @deprecated Not used by GoogleUI. Internal debug endpoint.
+    Memory diagnostics and introspection.
+    """
     if MEMORY is None:
         raise HTTPException(status_code=503, detail="memory disabled")
     import inspect as _insp
@@ -415,7 +472,7 @@ class InMemoryMemoryAdapter:
         self._by_session.setdefault(sid, []).append(_MemDoc(id=did, text=text, meta=meta))
         return did
 
-    def search(self, query: str, k: int = 3, filters: Optional[dict] = None):
+    def search(self, query: str, k: int = 3, filters: Optional[dict] = None, user_id: str | None = None, **kwargs):
         sid = (filters or {}).get("session_id")
         pool: List[_MemDoc] = []
         if sid and sid in self._by_session:
@@ -438,11 +495,35 @@ class InMemoryMemoryAdapter:
 MEMORY: Optional[object] = None
 
 
-def _init_memory() -> None:
-    """Init ChromaMemoryManager with (persist_dir, collection, model_path)."""
+def _validate_startup_config() -> None:
+    """Validate required environment variables at startup. Fail fast on invalid configuration."""
+    # Validate MEMORY_MODE: must be "strict" or "fallback"
+    memory_mode = os.getenv("MEMORY_MODE", "fallback").strip().lower()
+    if memory_mode not in ("strict", "fallback"):
+        raise RuntimeError(
+            f"Invalid MEMORY_MODE={memory_mode!r}. Must be one of: 'strict', 'fallback'"
+        )
+
+
+def _init_memory() -> str:
+    """Init ChromaMemoryManager with (persist_dir, collection, model_path).
+    
+    Behavior controlled by MEMORY_MODE env var:
+    - "strict": Raises on Chroma init failure, stops startup
+    - "fallback": Logs warning and uses InMemoryMemoryAdapter (default)
+    
+    Returns:
+        str: Name of the active memory adapter ("ChromaMemoryManager" or "InMemoryMemoryAdapter")
+    """
     global MEMORY
     if MEMORY is not None:
-        return
+        # Already initialized, return adapter name
+        if "ChromaMemoryManager" in str(type(MEMORY)):
+            return "ChromaMemoryManager"
+        return "InMemoryMemoryAdapter"
+
+    # Read MEMORY_MODE: validated by _validate_startup_config()
+    memory_mode = os.getenv("MEMORY_MODE", "fallback").strip().lower()
 
     persist_dir = os.getenv("AIR4_CHROMA_DIR", "./data/chroma")
     collection = os.getenv("AIR4_CHROMA_COLLECTION", "air4")
@@ -450,37 +531,82 @@ def _init_memory() -> None:
 
     try:
         MEMORY = ChromaMemoryManager(persist_dir, collection, embed_model)
-        print("[INFO] ChromaMemoryManager init ok", {
-            "persist_dir": persist_dir,
-            "collection": collection,
-            "model": embed_model,
-        })
+        return "ChromaMemoryManager"
     except Exception as e:
-        print(f"[WARN] Chroma init failed: {e}")
-        MEMORY = InMemoryMemoryAdapter()
-        print("[INFO] Using InMemoryMemoryAdapter as fallback")
+        if memory_mode == "strict":
+            raise RuntimeError(f"Memory initialization failed in strict mode: {e}") from e
+        else:
+            # fallback mode (explicitly allowed)
+            MEMORY = InMemoryMemoryAdapter()
+            return "InMemoryMemoryAdapter"
 
 
 @app.on_event("startup")
 def _startup() -> None:
-    _init_memory()
+    """Single startup path: validate configuration, initialize memory, log status."""
+    global MEMORY
+    try:
+        # Step 1: Validate startup configuration (fail fast)
+        _validate_startup_config()
+        
+        # Step 2: Initialize memory (only if ENABLE_CHAT_MEMORY is True)
+        if ENABLE_CHAT_MEMORY:
+            adapter_name = _init_memory()
+        else:
+            MEMORY = None
+            adapter_name = "disabled"
+        
+        # Step 3: Wire memory to app state
+        app.state.memory_manager = MEMORY
+        
+        # Step 4: Log startup status
+        memory_mode = os.getenv("MEMORY_MODE", "fallback").strip().lower()
+        print("=" * 60)
+        print(f"[STARTUP] AIr4 v{APP_VERSION}")
+        print(f"[STARTUP] ENABLE_CHAT_MEMORY={ENABLE_CHAT_MEMORY}")
+        print(f"[STARTUP] MEMORY_MODE={memory_mode}")
+        print(f"[STARTUP] Memory adapter: {adapter_name}")
+        print("=" * 60)
+        
+    except RuntimeError as e:
+        # Configuration or initialization error - fail fast
+        print("=" * 60)
+        print(f"[STARTUP FAILED] {e}")
+        print("=" * 60)
+        raise
+    except Exception as e:
+        # Unexpected error during startup
+        print("=" * 60)
+        print(f"[STARTUP ERROR] Unexpected error: {e}")
+        print("=" * 60)
+        raise
 
 
 # -----------------------------------------------------------------------------
 # Schemas for /send3
 # -----------------------------------------------------------------------------
 class MsgIn(BaseModel):
-    role: str = Field(..., description="user/assistant/system")
-    content: str
+    role: str = Field(..., description="user/assistant/system", min_length=1)
+    content: str = Field(..., description="Message content", min_length=1)
+
+
+class Send3Settings(BaseModel):
+    """Settings for Send3 endpoint."""
+    response_tone: Optional[str] = None
+    output_density: Optional[str] = None
+    temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
+    interface_language: Optional[str] = None
+    model: Optional[str] = None
+    active_model: Optional[str] = None
 
 
 class Send3In(BaseModel):
-    text: str = Field(..., description="User message text")
-    session_id: Optional[str] = Field(None, description="Existing session id, or omitted for new")
+    text: str = Field(..., description="User message text", min_length=1)
+    session_id: str = Field(..., description="Session ID (required)", min_length=1)
     context: Optional[List[MsgIn]] = Field(None, description="Optional prior turns for UI echo")
     style: Optional[str] = Field(None, description="short | normal | detailed")
-    settings: Optional[dict] = Field(None, description="Optional core settings from UI")
-    model_override: Optional[str] = Field(None, description="Preferred model name from UI (e.g. Mistral-7B)")
+    settings: Optional[Send3Settings] = Field(None, description="Optional core settings from UI")
+    model_override: Optional[str] = Field(None, description="Preferred model name from UI (e.g. Mistral-7B)", max_length=200)
 
 
 class Send3Out(BaseModel):
@@ -509,73 +635,73 @@ async def health() -> dict:
 
 
 # -----------------------------------------------------------------------------
-# UI routes (match base.html: /ui/*)
+# UI routes - GoogleUI is the ONLY active UI
 # -----------------------------------------------------------------------------
 @app.get("/", response_class=RedirectResponse)
 async def ui_root_redirect() -> RedirectResponse:
-    return RedirectResponse(url="/ui/chat", status_code=307)
+    """Root redirect: Always goes to GoogleUI (the only active UI)."""
+    return RedirectResponse(url="/ui/google", status_code=307)
 
 
-@app.get("/ui/chat")
-async def ui_chat(request: Request):
-    return templates.TemplateResponse("chat.html", {"request": request, "active": "chat"})
+# ============================================================================
+# DEPRECATED: Legacy HTMX/Jinja UI routes - DISABLED
+# ============================================================================
+# These routes are kept for reference but are NOT active.
+# GoogleUI (React) at /ui/google is the only active UI.
+# ============================================================================
+
+# @app.get("/ui/chat")
+# async def ui_chat(request: Request):
+#     """DEPRECATED: Legacy HTMX chat UI - Use GoogleUI instead."""
+#     return templates.TemplateResponse("chat.html", {"request": request, "active": "chat"})
 
 
-@app.get("/ui/sessions", response_class=HTMLResponse)
-async def ui_sessions() -> HTMLResponse:
-    import datetime as _dt
-
-    def _label(ts: int) -> str:
-        dt = _dt.datetime.fromtimestamp(ts)
-        today = _dt.datetime.now().date()
-        if dt.date() == today:
-            return "Today"
-        if dt.date() == (today - _dt.timedelta(days=1)):
-            return "Yesterday"
-        return dt.strftime("%b %d, %Y")
-
-    groups: Dict[str, List[Session]] = {}
-    for s in sorted(_SESSIONS.values(), key=lambda x: x.updated_at, reverse=True):
-        groups.setdefault(_label(s.updated_at), []).append(s)
-
-    parts: List[str] = []
-    for label, items in groups.items():
-        parts.append(f'<div class="sb-section"><div class="sb-section-title">{label}</div>')
-        for it in items:
-            title = (it.title or it.id).strip()
-            sub = f"{it.turns} turns"
-            parts.append(
-                '<div class="sb-item">'
-                '  <a href="/ui/chat" hx-get="/ui/chat" hx-push-url="true">'
-                '    <svg class="ico" viewBox="0 0 24 24"><path d="M21 15V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14l4-4h12a2 2 0 0 0 2-2Z"/></svg>'
-                f'    <span class="sb-title-line" title="{title}">{title}</span>'
-                '  </a>'
-                f'  <div class="sb-sub">{sub}</div>'
-                '</div>'
-            )
-        parts.append('</div>')
-    html = "\n".join(parts) if parts else '<div class="sb-section"><div class="sb-sub">No sessions yet</div></div>'
-    return HTMLResponse(content=html)
+# @app.get("/ui/sessions", response_class=HTMLResponse)
+# async def ui_sessions() -> HTMLResponse:
+#     """DEPRECATED: Legacy HTMX sessions UI - Use GoogleUI instead."""
+#     import datetime as _dt
+#
+#     def _label(ts: int) -> str:
+#         dt = _dt.datetime.fromtimestamp(ts)
+#         today = _dt.datetime.now().date()
+#         if dt.date() == today:
+#             return "Today"
+#         if dt.date() == (today - _dt.timedelta(days=1)):
+#             return "Yesterday"
+#         return dt.strftime("%b %d, %Y")
+#
+#     groups: Dict[str, List[Session]] = {}
+#     for s in sorted(_SESSIONS.values(), key=lambda x: x.updated_at, reverse=True):
+#         groups.setdefault(_label(s.updated_at), []).append(s)
+#
+#     parts: List[str] = []
+#     for label, items in groups.items():
+#         parts.append(f'<div class="sb-section"><div class="sb-section-title">{label}</div>')
+#         for it in items:
+#             title = (it.title or it.id).strip()
+#             sub = f"{it.turns} turns"
+#             parts.append(
+#                 '<div class="sb-item">'
+#                 '  <a href="/ui/chat" hx-get="/ui/chat" hx-push-url="true">'
+#                 '    <svg class="ico" viewBox="0 0 24 24"><path d="M21 15V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14l4-4h12a2 2 0 0 0 2-2Z"/></svg>'
+#                 f'    <span class="sb-title-line" title="{title}">{title}</span>'
+#                 '  </a>'
+#                 f'  <div class="sb-sub">{sub}</div>'
+#                 '</div>'
+#             )
+#         parts.append('</div>')
+#     html = "\n".join(parts) if parts else '<div class="sb-section"><div class="sb-sub">No sessions yet</div></div>'
+#     return HTMLResponse(content=html)
 
 
 # -----------------------------------------------------------------------------
-# Sessions endpoints (minimal set used by UI)
+# Sessions endpoints (moved to routes_chat.py)
 # -----------------------------------------------------------------------------
-@app.get("/sessions")
-async def list_sessions() -> List[Session]:
-    return sorted(_SESSIONS.values(), key=lambda s: s.updated_at, reverse=True)
-
-
-@app.post("/sessions")
-async def create_session() -> Session:
-    return ensure_session(None)
-
-
-@app.get("/sessions/{session_id}")
-async def get_session(session_id: str) -> Session:
-    if session_id not in _SESSIONS:
-        raise HTTPException(status_code=404, detail="No such session")
-    return _SESSIONS[session_id]
+# @app.get("/sessions")
+# @app.post("/sessions")
+# @app.get("/sessions/{session_id}")
+# These endpoints have been moved to routes_chat.py to use unified storage
+# (index.json + jsonl files). FastAPI will use routes_chat.py endpoints instead.
 
 
 # -----------------------------------------------------------------------------
@@ -583,21 +709,19 @@ async def get_session(session_id: str) -> Session:
 # -----------------------------------------------------------------------------
 @app.post("/send3", response_model=Send3Out)
 async def send3(payload: Send3In) -> Send3Out:
-    sess = ensure_session(payload.session_id)
+    """
+    @deprecated Not used by GoogleUI. Use /chat instead.
+    Alternative chat endpoint (legacy).
+    """
+    # Validate session_id
+    validated_session_id = validate_session_id(payload.session_id)
+    sess = _SESSIONS[validated_session_id]
 
     user_text = (payload.text or "").strip()
     is_smalltalk = _is_smalltalk(user_text)
 
-    # Long-term semantic memory (Knowledge Graph seed)
-    try:
-        facts = extract_facts_from_text_v3(
-            user_text,
-            subject="Arch",
-        )
-        for f in facts:
-            add_fact(f)
-    except Exception as e:
-        print(f"[FACTS] error while extracting/storing facts: {e}")
+    # Автосохранение профильных фактов теперь происходит в /chat/stream
+    # Здесь больше не обрабатываем
 
     if not user_text:
         raise HTTPException(status_code=400, detail="text is empty")
@@ -729,7 +853,7 @@ STRUCTURED PROFILE (high-level):
     rag_context = ""
     if not is_smalltalk:
         try:
-            rag_context = _retrieve_rag_context(user_text, k=6, max_chars=2000)
+            rag_context = _retrieve_rag_context(user_text, sess.id, k=6, max_chars=2000)
         except Exception as e:
             print(f"[RAG] context retrieval error: {e}")
             rag_context = ""
@@ -760,7 +884,7 @@ STRUCTURED PROFILE (high-level):
                 "use_rag": bool(rag_context),
                 "k_memory": 1,  # минимум 1, чтобы пройти pydantic-валидацию ChatBody
                 "style": payload.style,
-                "settings": payload.settings or None,
+                "settings": payload.settings.model_dump(exclude_none=True) if payload.settings else None,
                 "model_override": payload.model_override or None,
             }
             headers = {"X-User": "dev", "X-Style": payload.style or ""}
@@ -796,7 +920,7 @@ STRUCTURED PROFILE (high-level):
                     message=user_text,
                     system=system_prompt,
                     style=payload.style,
-                    settings=payload.settings,
+                    settings=payload.settings.model_dump(exclude_none=True) if payload.settings else None,
                     model_override=payload.model_override,
                     session_id=sess.id,
                 )
@@ -891,45 +1015,44 @@ except NameError:
     templates = Jinja2Templates(directory="backend/app/templates")
 
 
-@app.on_event("startup")
-async def _wire_memory_to_state():
-    try:
-        app.state.memory_manager = MEMORY
-    except NameError:
-        pass
-# also set eagerly for dev reloads
-try:
-    app.state.memory_manager = MEMORY
-except NameError:
-    pass
+# Memory wiring is now handled in _startup() above
+# Removed duplicate startup handler - single startup path enforced
 
-@app.get('/ui/ingest', response_class=HTMLResponse)
-async def ui_ingest(request: Request):
-    return templates.TemplateResponse('ingest.html', {'request': request, 'active': 'ingest'})
+# @app.get('/ui/ingest', response_class=HTMLResponse)
+# async def ui_ingest(request: Request):
+#     """DEPRECATED: Legacy HTMX ingest UI - Use GoogleUI instead."""
+#     return templates.TemplateResponse('ingest.html', {'request': request, 'active': 'ingest'})
 
-@app.get('/ui/ingest/status', response_class=HTMLResponse)
-async def ui_ingest_status():
-    from pathlib import Path
-    inbox = Path("data/ingest/inbox")
-    inbox.mkdir(parents=True, exist_ok=True)
+# @app.get('/ui/ingest/status', response_class=HTMLResponse)
+# async def ui_ingest_status():
+#     """DEPRECATED: Legacy HTMX ingest status UI - Use GoogleUI instead."""
+#     from pathlib import Path
+#     inbox = Path("data/ingest/inbox")
+#     inbox.mkdir(parents=True, exist_ok=True)
+#
+#     files = sorted([f.name for f in inbox.iterdir() if f.is_file() and f.name != "urls.txt"])
+#     if not files:
+#         return HTMLResponse('<pre class="ing-pre">📭 Пусто</pre>')
+#
+#     html = "<pre class='ing-pre'>\n" + "\n".join(f"📄 {f}" for f in files) + "\n</pre>"
+#     return HTMLResponse(html)
 
-    files = sorted([f.name for f in inbox.iterdir() if f.is_file() and f.name != "urls.txt"])
-    if not files:
-        return HTMLResponse('<pre class="ing-pre">📭 Пусто</pre>')
+# @app.post('/ui/ingest/commit-all', response_class=HTMLResponse)
+# async def ui_ingest_commit_all():
+#     """DEPRECATED: Legacy HTMX ingest commit UI - Use GoogleUI instead."""
+#     return HTMLResponse('<pre>OK: committed (stub)</pre>')
 
-    html = "<pre class='ing-pre'>\n" + "\n".join(f"📄 {f}" for f in files) + "\n</pre>"
-    return HTMLResponse(html)
-
-@app.post('/ui/ingest/commit-all', response_class=HTMLResponse)
-async def ui_ingest_commit_all():
-    return HTMLResponse('<pre>OK: committed (stub)</pre>')
-
-@app.delete('/ui/ingest/clear', response_class=HTMLResponse)
-async def ui_ingest_clear():
-    return HTMLResponse('<pre>OK: cleared (stub)</pre>')
+# @app.delete('/ui/ingest/clear', response_class=HTMLResponse)
+# async def ui_ingest_clear():
+#     """DEPRECATED: Legacy HTMX ingest clear UI - Use GoogleUI instead."""
+#     return HTMLResponse('<pre>OK: cleared (stub)</pre>')
 
 @app.post('/ingest', response_class=HTMLResponse)
 async def ingest_endpoint(files: List[UploadFile] = File(default=[]), url: Optional[str] = Form(default=None)):
+    """
+    @deprecated Not used by GoogleUI. Use /ingest/file instead.
+    Legacy ingest endpoint (HTMX UI).
+    """
     # сохраняем файлы в data/ingest/inbox и дописываем URL в urls.txt
     from pathlib import Path
     inbox = Path("data/ingest/inbox")
@@ -962,6 +1085,10 @@ async def ingest_endpoint(files: List[UploadFile] = File(default=[]), url: Optio
 
 @app.get('/ingest/status')
 async def ingest_status():
+    """
+    @deprecated Not used by GoogleUI. Internal endpoint.
+    JSON: текущее содержимое инбокса (файлы + urls).
+    """
     """JSON: текущее содержимое инбокса (файлы + urls)."""
     from pathlib import Path
     inbox = Path("data/ingest/inbox")
@@ -987,8 +1114,11 @@ async def ingest_status():
     return {"ok": True, "inbox": str(inbox.resolve()), "files": files, "urls": urls}
 
 @app.post('/ingest/commit')
-async def ingest_commit(name: str):
-    """Перенос файла из data/ingest/inbox в data/ingest/store с SHA256-дедупликацией."""
+async def ingest_commit(name: str = Query(..., description="File name to commit", min_length=1, max_length=500)):
+    """
+    @deprecated Not used by GoogleUI. Internal endpoint.
+    Перенос файла из data/ingest/inbox в data/ingest/store с SHA256-дедупликацией.
+    """
     import hashlib, json
     from pathlib import Path
 
@@ -1061,7 +1191,11 @@ async def ingest_commit(name: str):
 
 @app.post('/ingest/commit-all')
 async def ingest_commit_all():
-    """Коммитит все файлы из data/ingest/inbox в data/ingest/store с SHA256-дедупликацией."""
+    """
+    @deprecated Not used by GoogleUI. Internal endpoint.
+    @deprecated Not used by GoogleUI. Internal endpoint.
+    Коммитит все файлы из data/ingest/inbox в data/ingest/store с SHA256-дедупликацией.
+    """
     import hashlib, json
     from pathlib import Path
 
@@ -1123,6 +1257,10 @@ async def ingest_commit_all():
 
 @app.delete('/ingest/clear')
 async def ingest_clear():
+    """
+    @deprecated Not used by GoogleUI. Internal endpoint.
+    Очищает inbox: удаляет все файлы и обнуляет urls.txt.
+    """
     """Очищает inbox: удаляет все файлы и обнуляет urls.txt."""
     from pathlib import Path
     inbox = Path("data/ingest/inbox"); inbox.mkdir(parents=True, exist_ok=True)
@@ -1163,6 +1301,10 @@ async def ingest_queue():
 
 @app.get('/ingest/preview')
 async def ingest_preview(name: str):
+    """
+    @deprecated Not used by GoogleUI. Internal endpoint.
+    Предпросмотр: TXT/MD/LOG/CSV, PDF (первые 5 стр), DOCX.
+    """
     # Предпросмотр: TXT/MD/LOG/CSV, PDF (первые 5 стр), DOCX.
     try:
         from pathlib import Path
@@ -1233,40 +1375,52 @@ async def ingest_preview(name: str):
     except Exception as e:
         return {"ok": False, "error": str(e), "name": name}
 
-@app.get("/ui/ingest/queue", response_class=HTMLResponse)
-def get_ingest_queue_partial(request: Request):
-    from .memory.queue import get_ingest_queue
-    queue = get_ingest_queue()
-    return templates.TemplateResponse("partials/ingest_queue.html", {"request": request, "queue": queue})
+# @app.get("/ui/ingest/queue", response_class=HTMLResponse)
+# def get_ingest_queue_partial(request: Request):
+#     """DEPRECATED: Legacy HTMX ingest queue UI - Use GoogleUI instead."""
+#     from .memory.queue import get_ingest_queue
+#     queue = get_ingest_queue()
+#     return templates.TemplateResponse("partials/ingest_queue.html", {"request": request, "queue": queue})
 
-@app.get("/ui/chat/stream", response_class=HTMLResponse)
-def get_chat_stream(request: Request):
-    from .main import _SESSIONS
-    if not _SESSIONS:
-        messages = []
-    else:
-        messages = list(_SESSIONS.values())[-1].messages[-20:]
-    return templates.TemplateResponse("partials/chat_stream.html", {
-        "request": request,
-        "messages": messages
-    })
-from backend.app.routes_todos import todos_router
-app.include_router(todos_router)
+# @app.get("/ui/chat/stream", response_class=HTMLResponse)
+# def get_chat_stream(request: Request):
+#     """DEPRECATED: Legacy HTMX chat stream UI - Use GoogleUI instead."""
+#     from .main import _SESSIONS
+#     if not _SESSIONS:
+#         messages = []
+#     else:
+#         messages = list(_SESSIONS.values())[-1].messages[-20:]
+#     return templates.TemplateResponse("partials/chat_stream.html", {
+#         "request": request,
+#         "messages": messages
+#     })
+# ============================================================================
+# DEPRECATED: Legacy UI routers - DISABLED
+# ============================================================================
+# These routers are kept for reference but are NOT active.
+# GoogleUI (React) at /ui/google is the only active UI.
+# ============================================================================
+
+# from backend.app.routes_todos import todos_router
+# app.include_router(todos_router)  # DEPRECATED: Legacy HTMX todos UI
 from fastapi import Request
-@app.get('/ui/summary', response_class=HTMLResponse)
-async def ui_summary(request: Request):
-    return templates.TemplateResponse('base.html', {'request': request, 'page': 'summary_content'})
-@app.get('/ui/summaries', response_class=HTMLResponse)
-async def ui_summaries(request: Request):
-    return templates.TemplateResponse('base.html', {'request': request, 'page': 'summary_content'})
-@app.get("/ui/settings", response_class=HTMLResponse)
-def ui_settings(request: Request):
-    return templates.TemplateResponse("settings.html", {"request": request})
+# @app.get('/ui/summary', response_class=HTMLResponse)
+# async def ui_summary(request: Request):
+#     """DEPRECATED: Legacy HTMX summary UI - Use GoogleUI instead."""
+#     return templates.TemplateResponse('base.html', {'request': request, 'page': 'summary_content'})
+# @app.get('/ui/summaries', response_class=HTMLResponse)
+# async def ui_summaries(request: Request):
+#     """DEPRECATED: Legacy HTMX summaries UI - Use GoogleUI instead."""
+#     return templates.TemplateResponse('base.html', {'request': request, 'page': 'summary_content'})
+# @app.get("/ui/settings", response_class=HTMLResponse)
+# def ui_settings(request: Request):
+#     """DEPRECATED: Legacy HTMX settings UI - Use GoogleUI instead."""
+#     return templates.TemplateResponse("settings.html", {"request": request})
 
-from backend.app.routes_ui_search import router as ui_search_router
-app.include_router(ui_search_router)
-from backend.app.routes_ui_chat_htmx import router as chat_htmx_router
-app.include_router(chat_htmx_router)
+# from backend.app.routes_ui_search import router as ui_search_router
+# app.include_router(ui_search_router)  # DEPRECATED: Legacy HTMX search UI
+# from backend.app.routes_ui_chat_htmx import router as chat_htmx_router
+# app.include_router(chat_htmx_router)  # DEPRECATED: Legacy HTMX chat UI
 
 # Facts API router (for Memory Bank / Facts tab)
 try:
@@ -1282,9 +1436,10 @@ except Exception:
 from backend.app.routes_memory import router as memory_router
 app.include_router(memory_router)
 
-@app.get("/ui/test", response_class=HTMLResponse)
-async def ui_test(request: Request):
-    return templates.TemplateResponse("test.html", {"request": request})
+# @app.get("/ui/test", response_class=HTMLResponse)
+# async def ui_test(request: Request):
+#     """DEPRECATED: Legacy HTMX test UI - Use GoogleUI instead."""
+#     return templates.TemplateResponse("test.html", {"request": request})
 from .routes_ingest import router as ingest_router
 app.include_router(ingest_router)
 

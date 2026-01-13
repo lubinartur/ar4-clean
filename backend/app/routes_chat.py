@@ -1,12 +1,96 @@
-from fastapi import APIRouter, Request, Body
+from fastapi import APIRouter, Request, Body, HTTPException
 from fastapi.responses import JSONResponse
 import httpx
 import json
 import time
 from pathlib import Path
 import re
+from typing import Optional, Dict, Any, List
+from pydantic import BaseModel, Field
+import logging
+import uuid
+
+logger = logging.getLogger(__name__)
 
 from backend.app.memory.facts import Fact, add_fact
+import importlib
+
+# Helper flag для логирования предупреждения о неподдерживаемых аргументах
+_memory_adapter_warning_logged = False
+
+
+def _get_memory():
+    """Lazy import для получения MEMORY и ENABLE_CHAT_MEMORY без циклического импорта."""
+    try:
+        m = importlib.import_module("backend.app.main")
+    except Exception:
+        m = importlib.import_module(".main", package=__package__)
+    memory = getattr(m, "MEMORY", None)
+    enabled = getattr(m, "ENABLE_CHAT_MEMORY", False)
+    return enabled, memory
+
+
+def safe_memory_add(text: str, session_id: str, role: str, user_id: str = "dev") -> None:
+    """
+    Безопасное сохранение текста в память с graceful degradation.
+    Пробует разные сигнатуры адаптера памяти для совместимости.
+    
+    Args:
+        text: Текст для сохранения
+        session_id: ID сессии
+        role: Роль сообщения ("user" или "assistant")
+        user_id: ID пользователя (по умолчанию "dev")
+    """
+    global _memory_adapter_warning_logged
+    
+    enabled, memory = _get_memory()
+    if not enabled or memory is None:
+        return
+    
+    # Попытка 1: add_text с полными параметрами (ChromaMemoryManager)
+    if hasattr(memory, "add_text"):
+        try:
+            memory.add_text(user_id=user_id, text=text, session_id=session_id, source=role)
+            logger.debug(f"[memory] saved turn: role={role!r}, session_id={session_id!r}, len={len(text)}")
+            return
+        except TypeError as e:
+            # Попытка 2: add_text без user_id (если адаптер не требует его)
+            try:
+                memory.add_text(text=text, session_id=session_id, source=role)
+                logger.debug(f"[memory] saved turn (no user_id): role={role!r}, session_id={session_id!r}")
+                return
+            except (TypeError, AttributeError):
+                pass
+        except Exception as e:
+            logger.warning(f"[memory] add_text failed: {e}")
+            return
+    
+    # Попытка 3: add с meta dict (InMemoryMemoryAdapter)
+    if hasattr(memory, "add"):
+        try:
+            ts = int(time.time())
+            meta = {
+                "user_id": user_id,
+                "session_id": session_id,
+                "role": role,
+                "source": role,
+                "ts": ts,
+                "created_at": ts,
+            }
+            memory.add(text=text, meta=meta)
+            logger.debug(f"[memory] saved turn (via add): role={role!r}, session_id={session_id!r}")
+            return
+        except Exception as e:
+            if not _memory_adapter_warning_logged:
+                logger.warning(f"[memory] adapter unsupported args: {type(memory).__name__} does not support expected signatures")
+                _memory_adapter_warning_logged = True
+            return
+    
+    # Если ничего не сработало
+    if not _memory_adapter_warning_logged:
+        logger.warning(f"[memory] adapter unsupported: {type(memory).__name__} does not have add_text or add methods")
+        _memory_adapter_warning_logged = True
+
 
 # --- Session storage helpers ---
 SESS_DIR = Path("data/sessions")
@@ -14,7 +98,7 @@ SESS_DIR.mkdir(parents=True, exist_ok=True)
 INDEX_PATH = SESS_DIR / "index.json"
 
 
-def _bump_session(session_id: str, title: str | None = None):
+def _bump_session(session_id: str, title: str | None = None, role: str | None = None):
     try:
         idx = json.loads(INDEX_PATH.read_text(encoding="utf-8")) if INDEX_PATH.exists() else {}
     except Exception:
@@ -32,7 +116,8 @@ def _bump_session(session_id: str, title: str | None = None):
         if not rec.get("title") or rec.get("title") == "New session":
             rec["title"] = title
     rec["updated_at"] = now
-    rec["turns"] = int(rec.get("turns", 0)) + 1
+    if role == "user":
+        rec["turns"] = int(rec.get("turns", 0)) + 1
     idx[session_id] = rec
     INDEX_PATH.write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
 
@@ -47,7 +132,7 @@ def _append_msg(session_id: str, role: str, content: str):
         snippet = first_line[:80].strip()
         if snippet:
             title = snippet
-    _bump_session(session_id, title)
+    _bump_session(session_id, title, role)
     f = SESS_DIR / f"{session_id}.jsonl"
     line = json.dumps(
         {"ts": int(time.time()), "role": role, "content": content},
@@ -68,6 +153,9 @@ FACTS_PROFILE = {
     "zodiac": None,
     "dog_name": None,
     "dog_age": None,
+    "location": None,
+    "goals": [],
+    "training_freq": None,
 }
 
 
@@ -99,89 +187,251 @@ def _zodiac_from_day_month(day: int, month: int) -> str:
     # (month == 2 and day >= 19) or (month == 3 and day <= 20)
     return "Рыбы"
 
+# --- PROFILE FACTS EXTRACTOR ---
+def extract_profile_facts(text: str, sess_id: str) -> str | None:
+    """
+    Простые правила для авто-запоминания профиля из текста.
+    Возвращает reply, если факт обработан здесь, иначе None.
+    """
+    t = text.lower()
+
+    # 1) Локация: "я живу в ...", "живу в ...", "я из ..."
+    m = re.search(
+        r"\b(я живу в|живу в|я из)\s+([a-zA-Zа-яА-ЯёЁ\s]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        place = m.group(2).strip().strip(".!? ")
+        if place:
+            FACTS_PROFILE["location"] = place
+            try:
+                add_fact(
+                    Fact(
+                        subject="Arch",
+                        predicate="живёт_в",
+                        object=place,
+                        category="location",
+                        source_session=sess_id,
+                    )
+                )
+            except Exception as e:
+                print(f"[PROFILE] failed to persist location fact: {e}")
+            return f"Запомнил. Ты живёшь в {place}."
+
+    # 2) Цели: "моя цель ...", "главная цель ...", "цель — ..."
+    g = re.search(
+        r"(?:моя цель|главная цель|цель)\s*[:\-–— ]+\s*(.+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if g:
+        goal = g.group(1).strip().strip(".!? ")
+        if goal:
+            goals = FACTS_PROFILE.get("goals") or []
+            if isinstance(goals, list):
+                goals.append(goal)
+                FACTS_PROFILE["goals"] = goals
+            try:
+                add_fact(
+                    Fact(
+                        subject="Arch",
+                        predicate="goal",
+                        object=goal,
+                        category="goals",
+                        source_session=sess_id,
+                    )
+                )
+            except Exception as e:
+                print(f"[PROFILE] failed to persist goal fact: {e}")
+            return f"Запомнил цель: {goal}."
+
+    # 3) Тренировки: "X раза в неделю"
+    freq_match = re.search(r"(\d+)\s+раза?\s+в\s+недел", t)
+    if freq_match:
+        freq = freq_match.group(1)
+        FACTS_PROFILE["training_freq"] = freq
+        desc = f"тренировки {freq} раза в неделю"
+        try:
+            add_fact(
+                Fact(
+                    subject="Arch",
+                    predicate="training_freq",
+                    object=freq,
+                    category="habits",
+                    source_session=sess_id,
+                )
+            )
+        except Exception as e:
+            print(f"[PROFILE] failed to persist training fact: {e}")
+        return f"Запомнил: {desc}."
+
+    return None
+
 STRICT_RAG = True
 RAG_SCORE_THRESHOLD = 0.60
 
 
+# Pydantic models for request validation
+class ChatMessage(BaseModel):
+    role: str = Field(..., description="Message role")
+    content: str = Field(..., description="Message content", min_length=1)
+
+
+class ChatSettings(BaseModel):
+    response_tone: Optional[str] = None
+    output_density: Optional[str] = None
+    temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
+    interface_language: Optional[str] = None
+    model: Optional[str] = None
+    active_model: Optional[str] = None
+    activeModel: Optional[str] = None
+    active_model_weight: Optional[str] = None
+    model_name: Optional[str] = None
+    llm_model: Optional[str] = None
+
+
+class CreateSessionRequest(BaseModel):
+    title: Optional[str] = Field(None, description="Session title (optional)")
+
+
+# Runtime guard limits
+MAX_CHAT_INPUT_LENGTH = 10000  # Max characters for chat input text
+
+class ChatRequest(BaseModel):
+    q: Optional[str] = Field(None, description="Query text", max_length=MAX_CHAT_INPUT_LENGTH)
+    text: Optional[str] = Field(None, description="Query text (alias)", max_length=MAX_CHAT_INPUT_LENGTH)
+    input: Optional[str] = Field(None, description="Query text (alias)", max_length=MAX_CHAT_INPUT_LENGTH)
+    prompt: Optional[str] = Field(None, description="Query text (alias)", max_length=MAX_CHAT_INPUT_LENGTH)
+    message: Optional[str] = Field(None, description="Query text (alias)", max_length=MAX_CHAT_INPUT_LENGTH)
+    messages: Optional[List[ChatMessage]] = Field(None, description="Message history", max_length=100)
+    settings: Optional[ChatSettings] = Field(None, description="Chat settings")
+    session_id: Optional[str] = Field(None, description="Session ID")
+    session: Optional[str] = Field(None, description="Session ID (alias)")
+    sid: Optional[str] = Field(None, description="Session ID (alias)")
+
+    def get_query_text(self) -> Optional[str]:
+        """Extract query text from various possible fields."""
+        for field in [self.q, self.text, self.input, self.prompt, self.message]:
+            if field and isinstance(field, str) and field.strip():
+                if len(field) > MAX_CHAT_INPUT_LENGTH:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Input text exceeds maximum length of {MAX_CHAT_INPUT_LENGTH} characters"
+                    )
+                return field.strip()
+        # Try to extract from messages
+        if self.messages:
+            for msg in reversed(self.messages):
+                if isinstance(msg, ChatMessage) and msg.content and msg.content.strip():
+                    content = msg.content.strip()
+                    if len(content) > MAX_CHAT_INPUT_LENGTH:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Message content exceeds maximum length of {MAX_CHAT_INPUT_LENGTH} characters"
+                        )
+                    return content
+        return None
+
+    def get_session_id(self) -> Optional[str]:
+        """Extract session_id from various possible fields."""
+        for field in [self.session_id, self.session, self.sid]:
+            if field and isinstance(field, str) and field.strip():
+                return field.strip()
+        return None
+
+    def get_settings_dict(self) -> Dict[str, Any]:
+        """Convert settings model to dict, handling None."""
+        if self.settings is None:
+            return {}
+        return self.settings.model_dump(exclude_none=True)
+
+
 @router.post("/chat")
-async def chat(request: Request, q: str | None = Body(None, embed=True)):
-    system_preamble = (
-        "Ты — AR4, личный интеллект Arch’a. "
-        "Отвечай строго на запрос пользователя. "
-        "Не перечисляй цели и приоритеты, если об этом прямо не спросили. "
-        "Если вопрос — small talk, ответь 1–2 короткими фразами. "
-        "Если просят план — дай 3–5 пунктов без моралей."
-    )
+async def chat(body: ChatRequest):
+    # Core Dialog: используем фиксированный ARCH_CORE_PROMPT
+    # UI не может перезаписать system prompt через settings или systemPrompt
+    from backend.app.chat import ARCH_CORE_PROMPT
+    system_preamble = ARCH_CORE_PROMPT
 
-    # AIR4: подстройка стиля и языка ответа из профиля
-    prefs: dict = {}
-    try:
-        async with httpx.AsyncClient(timeout=2.0) as c:
-            r_prof = await c.get(
-                "http://127.0.0.1:8000/memory/profile",
-                params={"user_id": "dev"},
-            )
-            pj = r_prof.json()
-            if isinstance(pj, dict):
-                prefs = pj.get("preferences", {}) or {}
-    except Exception:
-        prefs = {}
-    reply_style = str(prefs.get("reply_style", "short") or "").lower()
-    language = str(prefs.get("language", "ru") or "").lower()
-
-    style_hint = ""
-    if reply_style == "short":
-        style_hint = "Отвечай максимально кратко: 2–4 коротких предложения или список из 3–5 пунктов."
-    elif reply_style == "detailed":
-        style_hint = "Отвечай подробно: можно раскрывать детали и использовать списки, но без воды."
-    else:
-        style_hint = "Отвечай развёрнуто, но без воды: 4–8 предложений или список из 3–7 пунктов."
-
-    lang_hint = ""
-    if language == "ru":
-        lang_hint = "Отвечай по-русски."
-    elif language == "en":
-        lang_hint = "Answer in English."
-    else:
-        lang_hint = "Выбирай язык ответа под вопрос."
-
-    system_preamble = system_preamble + " " + style_hint + " " + lang_hint
-
-    # нормализуем q + вынимаем payload
-    payload = {}
+    # Extract query text from validated body
+    q = body.get_query_text()
     if not q:
-        try:
-            payload = await request.json()
-        except Exception:
-            payload = {}
-        for k in ("q", "text", "input", "prompt", "message"):
-            v = payload.get(k)
-            if isinstance(v, str) and v.strip():
-                q = v.strip()
-                break
-        if not q and isinstance(payload.get("messages"), list):
-            for msg in reversed(payload["messages"]):
-                if (
-                    isinstance(msg, dict)
-                    and isinstance(msg.get("content"), str)
-                    and msg["content"].strip()
-                ):
-                    q = msg["content"].strip()
-                    break
-        if not q:
-            return JSONResponse({"reply": "empty"}, status_code=200)
+        raise HTTPException(status_code=400, detail="Query text is required (provide 'q', 'text', 'input', 'prompt', 'message', or 'messages')")
 
-    # настройки из payload (фронтовый Settings)
-    settings: dict = {}
-    if isinstance(payload, dict):
-        raw_settings = payload.get("settings") or {}
-        if isinstance(raw_settings, dict):
-            settings = raw_settings
+    # Extract settings from validated body
+    settings = body.get_settings_dict()
+    # Debug: посмотреть, какие ключи реально приходят из UI
+    try:
+        print("[SETTINGS]", settings)
+    except Exception:
+        pass
 
+    # UI settings игнорируются для system prompt (используем фиксированный ARCH_CORE_PROMPT)
+    # Но оставляем выбор модели и другие параметры из UI
     tone = str(settings.get("response_tone", "") or "").lower()
     density = str(settings.get("output_density", "") or "").lower()
     temp = settings.get("temperature", None)
     ui_lang = str(settings.get("interface_language", "") or "").lower()
+
+    # Выбор модели по умолчанию для Ollama
+    model_name = "mistral"
+
+    # Опциональный выбор модели из настроек UI (NEURAL ENGINE / Active model weight)
+    raw_model = str(
+        settings.get("model")
+        or settings.get("active_model")
+        or settings.get("activeModel")
+        or settings.get("active_model_weight")
+        or settings.get("model_name")
+        or settings.get("llm_model")
+        or ""
+    ).strip().lower()
+    if raw_model:
+        # Убираем суффиксы вида "-local" / "_local" (как в UI: "mistral-7b-local")
+        normalized = raw_model.replace("-local", "").replace("_local", "")
+
+        # Mistral-7B
+        if normalized in ("mistral-7b", "mistral", "mistral_7b"):
+            model_name = "mistral"
+        # Hermes-7B (обычно nous-hermes2:7b)
+        elif normalized in (
+            "hermes-7b",
+            "hermes",
+            "hermes:7b",
+            "nous-hermes2:7b",
+            "nous-hermes2-mistral-7b",
+        ):
+            model_name = "nous-hermes2:7b"
+        # LLaMA-3.1-8B
+        elif normalized in (
+            "llama-3.1-8b",
+            "llama3.1-8b",
+            "llama3.1",
+            "llama3",
+            "llama3.1:8b",
+        ):
+            model_name = "llama3.1:8b"
+        # Qwen-2.5-14B
+        elif normalized in ("qwen-2.5-14b", "qwen25-14b", "qwen2.5-14b"):
+            model_name = "qwen2.5:14b"
+        # Mixtral-8x7B
+        elif normalized in ("mixtral-8x7b", "mixtral", "mixtral-8x7b-instruct"):
+            model_name = "mixtral:8x7b"
+        # DeepSeek-32B
+        elif normalized in (
+            "deepseek-32b",
+            "deepseek32b",
+            "deepseek-v2:32b",
+            "deepseek-v2.5:32b",
+        ):
+            model_name = "deepseek-v2:32b"
+        # DeepSeek-14B / r1-8B
+        elif normalized in ("deepseek-14b", "deepseek", "deepseek-r1", "deepseek-r1:8b"):
+            model_name = "deepseek-r1:8b"
+        else:
+            # неизвестное имя модели — оставляем дефолт и просто логируем
+            print(f"[LLM] unknown model override '{raw_model}', using default '{model_name}'")
 
     extra_parts: list[str] = []
 
@@ -212,22 +462,14 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
     elif ui_lang in ("en", "en-us", "en-gb", "english"):
         extra_parts.append("Answer in English.")
 
-    if temp is not None:
-        extra_parts.append(f"Держи уровень креативности примерно на уровне {temp}.")
+    # Core Dialog: system_preamble фиксирован (ARCH_CORE_PROMPT)
+    # UI не может модифицировать system prompt через settings
+    # extra_parts игнорируются для system prompt
 
-    if extra_parts:
-        system_preamble = system_preamble + " " + " ".join(extra_parts)
-
-    # session_id из payload (если есть), иначе "ui"
-    sess_id = "ui"
-    if isinstance(payload, dict):
-        sid = (
-            payload.get("session_id")
-            or payload.get("session")
-            or payload.get("sid")
-        )
-        if isinstance(sid, str) and sid.strip():
-            sess_id = sid.strip()
+    # Extract and validate session_id from validated body
+    sess_id = body.get_session_id()
+    from backend.app.main import validate_session_id
+    sess_id = validate_session_id(sess_id)
 
     q_l = q.lower().strip()
 
@@ -267,6 +509,16 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
             pass
         return {"reply": reply}
 
+    # Общий extractor профиля (локация и др. правила)
+    prof_reply = extract_profile_facts(q, sess_id)
+    if prof_reply is not None:
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", prof_reply)
+        except Exception:
+            pass
+        return {"reply": prof_reply}
+
     # Жёсткие факты из профиля (обход RAG/LLM)
     if "знак зодиака" in q_l:
         zodiac = FACTS_PROFILE.get("zodiac")
@@ -277,6 +529,104 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
                 "У меня нет в профиле данных о твоём знаке зодиака. "
                 "Могу запомнить, если скажешь."
             )
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
+        except Exception:
+            pass
+        return {"reply": reply}
+
+    # Вопросы про активную модель / движок — отвечаем сами, без RAG и без фантазий LLM
+    if any(
+        tok in q_l
+        for tok in [
+            "какая модель",
+            "какая у тебя модель",
+            "какая сейчас модель",
+            "активная модель",
+            "что за модель",
+            "что за движок",
+            "какой движок",
+            "какой вес модели",
+            "нейросеть какая",
+            "нейронка какая",
+        ]
+    ):
+        # Человекочитаемое имя модели: предпочитаем то, что пришло из настроек
+        human_model = settings.get("model") or model_name
+
+        # Короткое описание отличий по типу модели
+        desc = ""
+        m_low = model_name.lower()
+        if "hermes" in m_low:
+            desc = (
+                "Hermes-7B обычно даёт более развернутые и разговорные ответы, "
+                "в то время как Mistral-7B более сдержанный и лаконичный."
+            )
+        elif "llama" in m_low:
+            desc = (
+                "LLaMA-3.1-8B хорошо держит контекст и логические цепочки, "
+                "по сравнению с Mistral-7B чуть свободнее формулирует ответы."
+            )
+        elif "qwen" in m_low:
+            desc = "Qwen-2.5-14B силён в фактах и коде, ответы обычно структурированные."
+        elif "mixtral" in m_low:
+            desc = "Mixtral-8x7B даёт более мощный и разнообразный вывод за счёт смеси экспертов."
+        elif "deepseek" in m_low:
+            desc = "DeepSeek часто хорош в рассуждениях и технических темах."
+
+        reply = f"Сейчас активна модель: {human_model} (Ollama: {model_name})."
+        if desc:
+            reply += " " + desc
+
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
+        except Exception:
+            pass
+        return {"reply": reply}
+
+    # Вопросы вида "что ты помнишь обо мне" — отвечаем строго из профиля, без LLM
+    if any(
+        tok in q_l
+        for tok in [
+            "что ты помнишь обо мне",
+            "что помнишь обо мне",
+            "что ты обо мне помнишь",
+            "что знаешь обо мне",
+            "что ты обо мне знаешь",
+            "что помнишь про меня",
+        ]
+    ):
+        parts: list[str] = []
+
+        loc = FACTS_PROFILE.get("location")
+        if loc:
+            parts.append(f"ты живёшь в {loc}")
+
+        zodiac = FACTS_PROFILE.get("zodiac")
+        if zodiac:
+            parts.append(f"твой знак зодиака — {zodiac}")
+
+        goals = FACTS_PROFILE.get("goals") or []
+        if isinstance(goals, list) and goals:
+            goals_str = "; ".join(str(g) for g in goals[:3])
+            if len(goals) > 3:
+                goals_str += " и ещё несколько целей"
+            parts.append(f"твои цели: {goals_str}")
+
+        tfreq = FACTS_PROFILE.get("training_freq")
+        if tfreq:
+            parts.append(f"ты тренируешься {tfreq} раза в неделю")
+
+        if parts:
+            reply = "Вот что я о тебе помню: " + "; ".join(parts) + "."
+        else:
+            reply = (
+                "Честно — в профиле почти нет данных именно о тебе. "
+                "Расскажи мне о себе: где живёшь, какие цели и режим — я запомню."
+            )
+
         try:
             _append_msg(sess_id, "user", q)
             _append_msg(sess_id, "assistant", reply)
@@ -361,6 +711,71 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
             pass
         return {"reply": reply}
 
+
+    # Простое приветствие / small talk — отвечаем сами, без RAG и LLM
+    if any(
+        tok in q_l
+        for tok in [
+            "привет",
+            "здравствуй",
+            "здравствуйте",
+            "hi",
+            "hello",
+            "hey",
+        ]
+    ) and len(q_l) <= 40:
+        reply = "Привет. Я на связи, давай разбираться, что нужно сделать."
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
+        except Exception:
+            pass
+        return {"reply": reply}
+
+    # Small talk: "как дела" — тоже обрабатываем без RAG/LLM
+    if any(
+        phrase in q_l
+        for phrase in [
+            "как дела",
+            "как у тебя дела",
+            "как твои дела",
+            "как поживаешь",
+            "как настроение",
+        ]
+    ) and len(q_l) <= 60:
+        reply = "Нормально, работаю над твоими задачами. Главное — твои дела, давай говорить про них."
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
+        except Exception:
+            pass
+        return {"reply": reply}
+
+    # Короткие подтверждения/реакции ("ок", "супер", "круто" и т.п.) — отвечаем сами
+    if any(
+        phrase in q_l
+        for phrase in [
+            "ок",
+            "окей",
+            "okay",
+            "ладно",
+            "норм",
+            "супер",
+            "круто",
+            "огонь",
+            "топ",
+            "класс",
+            "спасибо",
+        ]
+    ) and len(q_l) <= 40:
+        reply = "Принял. Двигаемся дальше."
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
+        except Exception:
+            pass
+        return {"reply": reply}
+
     try:
         # логируем запрос пользователя в текущую сессию
         try:
@@ -370,7 +785,9 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
 
         # --- RAG auto‑context (safe mode + строгий режим) ---
         rag_ctx = ""
-        use_rag = True  # строгий режим: всегда пытаться использовать память
+        # Для очень коротких вопросов (small talk / простые вопросы) RAG не используем.
+        # RAG включается только для более длинных / содержательных запросов.
+        use_rag = len(q_l) > 40
         rag_ok = False
 
         if use_rag:
@@ -378,7 +795,7 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
                 async with httpx.AsyncClient(timeout=10.0) as c:
                     r = await c.get(
                         "http://127.0.0.1:8000/memory/search",
-                        params={"q": q, "k": 3},
+                        params={"q": q, "session_id": sess_id, "k": 3},
                     )
                     js = r.json()
                     hits = js.get("results", [])
@@ -393,21 +810,15 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
                     ):
                         rag_ctx = hits[0]["text"][:1200]
                         rag_ok = True
-            except Exception:
+            except httpx.TimeoutException:
+                logger.warning(f"[RAG TIMEOUT] RAG retrieval timed out for query (session_id={sess_id})")
+                rag_ctx = ""
+                rag_ok = False
+            except Exception as e:
+                logger.warning(f"[RAG ERROR] RAG retrieval failed: {e}")
                 rag_ctx = ""
                 rag_ok = False
 
-        # Если включён строгий режим и RAG не нашёл ничего надёжного — не зовём LLM
-        if STRICT_RAG and use_rag and not rag_ok:
-            answer = (
-                "У меня нет надёжных данных в памяти по этому вопросу. "
-                "Загрузи документы или переформулируй запрос, либо отключи строгий режим RAG."
-            )
-            try:
-                _append_msg(sess_id, "assistant", answer)
-            except Exception:
-                pass
-            return {"reply": answer, "rag_ctx_head": ""}
 
         # user payload (RAG only if available)
         if rag_ctx:
@@ -424,39 +835,133 @@ async def chat(request: Request, q: str | None = Body(None, embed=True)):
             )
 
         # --- call LLM via Ollama chat ---
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream(
-                "POST",
-                "http://localhost:11434/api/chat",
-                json={
-                    "model": "mistral",
-                    "messages": [
-                        {"role": "system", "content": system_preamble},
-                        {"role": "user", "content": user_payload},
-                    ],
-                },
-            ) as res:
-                chunks = []
-                async for line in res.aiter_lines():
-                    if not line.strip():
-                        continue
-                    try:
-                        json_line = json.loads(line)
-                        content = json_line.get("message", {}).get("content", "")
-                        if content:
-                            chunks.append(content)
-                    except Exception:
-                        continue
-                answer = "".join(chunks)
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream(
+                    "POST",
+                    "http://localhost:11434/api/chat",
+                    json={
+                        "model": model_name,
+                        "messages": [
+                            {"role": "system", "content": system_preamble},
+                            {"role": "user", "content": user_payload},
+                        ],
+                    },
+                ) as res:
+                    chunks = []
+                    async for line in res.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            json_line = json.loads(line)
+                            content = json_line.get("message", {}).get("content", "")
+                            if content:
+                                chunks.append(content)
+                        except Exception:
+                            continue
+                    answer = "".join(chunks).strip()
+                    
+                    if not answer:
+                        # Если есть RAG-контекст, в строгом режиме просто возвращаем его как ответ
+                        if rag_ctx:
+                            print(
+                                "[LLM WARNING] пустой ответ от модели",
+                                model_name,
+                                "при наличии RAG-контекста; возвращаю rag_ctx",
+                                repr(q),
+                            )
+                            answer = rag_ctx
+                        else:
+                            # Глобальный фолбэк: никогда не отдаём пустую строку в UI
+                            print(
+                                "[LLM WARNING] пустой ответ от модели",
+                                model_name,
+                                "на запрос без RAG:",
+                                repr(q),
+                            )
+                            answer = (
+                                "Я не получил нормальный ответ от модели на этот запрос. "
+                                "Сформулируй мысль ещё раз или чуть подробнее — и попробуем снова."
+                            )
+        except httpx.TimeoutException:
+            logger.error(f"[LLM TIMEOUT] LLM call timed out after 60s (session_id={sess_id})")
+            raise HTTPException(status_code=504, detail="LLM request timed out")
+        except Exception as e:
+            logger.error(f"[LLM ERROR] LLM call failed: {e}")
+            raise
 
+        # PERSIST: сохраняем user и assistant сообщения
         try:
             _append_msg(sess_id, "assistant", answer)
-        except Exception:
+            # Логируем сохранение для отладки
+            f = SESS_DIR / f"{sess_id}.jsonl"
+            print("[PERSIST]", sess_id, "jsonl:", f, "user_len:", len(q), "assistant_len:", len(answer))
+        except Exception as e:
+            print("[PERSIST ERROR]", sess_id, "error:", e)
             pass
+
+        # MEMORY: сохраняем user message и assistant reply в память
+        try:
+            safe_memory_add(q, sess_id, "user")
+            safe_memory_add(answer, sess_id, "assistant")
+        except Exception as e:
+            logger.debug(f"[memory] skipped: {e}")
 
         return {"reply": answer, "rag_ctx_head": (rag_ctx or "")[:200]}
     except Exception as e:
         return {"reply": f"echo: {q} (ollama failed: {e})"}
+
+
+@router.post("/sessions")
+def create_session(body: Optional[CreateSessionRequest] = None):
+    """
+    AIR4: создать новую сессию.
+    Создаёт session id (8 hex chars), записывает в index.json и создаёт jsonl файл.
+    """
+    # Extract optional title from request body
+    title = "New session"
+    if body and body.title and body.title.strip():
+        title = body.title.strip()
+    
+    # Generate session ID (8 hex characters)
+    session_id = uuid.uuid4().hex[:8]
+    
+    # Load index.json
+    try:
+        idx = json.loads(INDEX_PATH.read_text(encoding="utf-8")) if INDEX_PATH.exists() else {}
+    except Exception:
+        idx = {}
+    
+    # Create session entry
+    now = int(time.time() * 1000)  # milliseconds
+    session_entry = {
+        "id": session_id,
+        "title": title,
+        "created_at": now,
+        "updated_at": now,
+        "turns": 0,
+    }
+    
+    # Add to index
+    idx[session_id] = session_entry
+    
+    # Write index.json (atomic-ish: load, update, write)
+    try:
+        INDEX_PATH.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.error(f"Failed to write index.json: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create session")
+    
+    # Create jsonl file if not exists (can be empty)
+    jsonl_path = SESS_DIR / f"{session_id}.jsonl"
+    if not jsonl_path.exists():
+        try:
+            jsonl_path.touch()
+        except Exception as e:
+            logger.warning(f"Failed to create jsonl file for session {session_id}: {e}")
+            # Don't fail the request if jsonl file creation fails
+    
+    return session_entry
 
 
 @router.get("/sessions")
@@ -464,13 +969,34 @@ def list_sessions():
     """
     AIR4: список сессий для UI.
     Читаем index.json и возвращаем отсортированный список.
+    Гарантируем, что каждая сессия имеет поле "id" (миграция legacy-сессий).
     """
     try:
         idx = json.loads(INDEX_PATH.read_text(encoding="utf-8")) if INDEX_PATH.exists() else {}
     except Exception:
         idx = {}
 
-    sessions = list(idx.values())
+    # Нормализация: гарантируем наличие "id" в каждой сессии
+    # Используем ключ словаря как id (самый стабильный вариант)
+    idx_modified = False
+    sessions = []
+    for session_key, session_data in idx.items():
+        if not isinstance(session_data, dict):
+            continue
+        # Если id отсутствует, используем ключ словаря как id
+        if "id" not in session_data or not session_data.get("id"):
+            session_data["id"] = session_key
+            idx[session_key] = session_data
+            idx_modified = True
+        sessions.append(session_data)
+    
+    # Сохраняем миграцию обратно в index.json если были изменения
+    if idx_modified:
+        try:
+            INDEX_PATH.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Failed to save migrated sessions to index.json: {e}")
+
     sessions.sort(key=lambda r: r.get("updated_at", 0), reverse=True)
     return {"ok": True, "sessions": sessions}
 
@@ -478,36 +1004,107 @@ def list_sessions():
 @router.get("/sessions/{session_id}")
 def get_session(session_id: str):
     """
-    AIR4: вернуть сообщения по сессии.
-    Берём JSONL data/sessions/<session_id>.jsonl
+    AIR4: вернуть полную информацию о сессии (id, title, messages, lastMessage, timestamp).
+    Берём метаданные из index.json и messages из JSONL.
     """
-    f = SESS_DIR / f"{session_id}.jsonl"
-    if not f.exists():
-        return {"ok": True, "messages": []}
-
-    messages = []
+    # Validate session_id
+    from backend.app.main import validate_session_id
+    session_id = validate_session_id(session_id)
+    # Читаем метаданные из index.json
     try:
-        with f.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    messages.append(json.loads(line))
-                except Exception:
-                    continue
-    except Exception as e:
-        return {"ok": False, "error": str(e), "messages": []}
+        idx = json.loads(INDEX_PATH.read_text(encoding="utf-8")) if INDEX_PATH.exists() else {}
+    except Exception:
+        idx = {}
+    
+    meta = idx.get(session_id)
+    if not meta:
+        return JSONResponse({"ok": False, "error": "Session not found"}, status_code=404)
 
-    return {"ok": True, "messages": messages}
+    # Читаем messages из JSONL
+    f = SESS_DIR / f"{session_id}.jsonl"
+    messages = []
+    if f.exists():
+        try:
+            with f.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        msg_data = json.loads(line)
+                        # Нормализация: если есть text или message, добавляем content для совместимости
+                        if isinstance(msg_data, dict):
+                            if "text" in msg_data and "content" not in msg_data:
+                                msg_data["content"] = msg_data["text"]
+                            elif "message" in msg_data and "content" not in msg_data:
+                                msg_data["content"] = msg_data["message"]
+                        messages.append(msg_data)
+                    except Exception:
+                        continue
+        except Exception as e:
+            return {"ok": False, "error": str(e), "messages": []}
+
+    # Определяем lastMessage из последнего сообщения
+    last_message = ""
+    if messages:
+        last_msg = messages[-1]
+        if isinstance(last_msg, dict):
+            # Проверяем разные возможные поля для content
+            last_message = (
+                last_msg.get("content") or 
+                last_msg.get("text") or 
+                last_msg.get("message") or 
+                last_msg.get("value") or 
+                ""
+            )
+            if isinstance(last_message, str):
+                pass  # уже строка
+            else:
+                last_message = str(last_message)
+
+    print(
+        "[GET /sessions]",
+        session_id,
+        "messages:",
+        len(messages),
+        "file_exists:",
+        f.exists()
+    )
+
+    title = meta.get("title", "New session")
+    created_at = meta.get("created_at", 0)
+    updated_at = meta.get("updated_at", 0)
+    # Compute turns as number of user messages
+    turns = 0
+    try:
+        if isinstance(messages, list):
+            turns = sum(1 for msg in messages if isinstance(msg, dict) and msg.get("role") == "user")
+    except Exception:
+        turns = 0
+    print(f"[GET /sessions/{session_id}] returning title={title!r}, meta={meta}")
+    return {
+        "ok": True,
+        "id": session_id,
+        "title": title,
+        "messages": messages,
+        "lastMessage": last_message,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "timestamp": updated_at,
+        "turns": turns
+    }
 
 
 @router.post("/sessions/{session_id}/clear")
 def clear_session(session_id: str):
     """
+    @deprecated Not used by GoogleUI. Internal endpoint.
     AIR4: очистить историю сессии.
     Удаляет JSONL-файл и запись из index.json.
     """
+    # Validate session_id
+    from backend.app.main import validate_session_id
+    session_id = validate_session_id(session_id)
     # удалить файл истории
     f = SESS_DIR / f"{session_id}.jsonl"
     if f.exists():

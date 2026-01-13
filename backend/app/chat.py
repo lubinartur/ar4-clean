@@ -38,6 +38,22 @@ def _is_greeting(q: str) -> bool:
     return (len(q) < 5) or bool(GREETING_RE.search(q))
 
 
+# ===== Core Dialog System Prompt =====
+# Единый system prompt для Core Dialog (chat + stream)
+# UI не может перезаписать этот prompt
+ARCH_CORE_PROMPT = (
+    "Ты — ARCH, локальный персональный интеллект AIR4 (второй мозг) для одного пользователя.\n"
+    "Контекст: оффлайн, приватно, не SaaS. Мы доводим до честного v1.0 — новые фичи запрещены.\n\n"
+    "Стиль:\n"
+    "- Коротко, по делу, без философии и без \"давай фильм/шахматы/новости\".\n"
+    "- Всегда держись текущего плана/роадмапа. Если запрос не про план — возвращай к плану.\n"
+    "- Если не хватает данных — задай 1 уточняющий вопрос и предложи 1 следующий шаг.\n"
+    "- Не предлагай развлечения. Не предлагай темы \"для разговора\".\n\n"
+    "Правило:\n"
+    "Твоя задача — помогать вести проект AIR4 и задачи пользователя. Никаких посторонних инициатив."
+)
+
+
 # ===== Style presets =====
 STYLE_DEFAULT = "short"
 STYLES: Dict[str, Dict[str, Any]] = {
@@ -201,9 +217,10 @@ def build_messages(
     if profile_block:
         system = (system + "\n" + profile_block) if system else profile_block
 
-    # Prepend style prompt if provided
-    if style_prompt:
-        system = style_prompt + ("\n" + system if system else "")
+    # Core Dialog: игнорируем style_prompt из UI
+    # style_prompt используется только если явно передан сервером (не из UI)
+    # Для Core Dialog (chat/stream) используем фиксированный ARCH_CORE_PROMPT
+    # style_prompt игнорируется, чтобы UI не мог перезаписать system prompt
 
     messages: List[dict] = []
     if system:
@@ -264,6 +281,11 @@ async def call_ollama(
         async with httpx.AsyncClient(timeout=120.0) as client:
             r = await client.post(url, json=payload)
         r.raise_for_status()
+    except httpx.TimeoutException:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"[LLM TIMEOUT] LLM call timed out after 120s (session_id={session_id})")
+        raise RuntimeError("LLM request timed out") from None
 
         raw = (r.text or "").strip()
         msg_text = ""

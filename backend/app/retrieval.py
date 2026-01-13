@@ -68,17 +68,20 @@ class Retriever:
         self.mgr = manager
 
     # низкоуровневый запрос к стору
-    def _base_query(self, q: str, n: int) -> List[Dict[str, Any]]:
+    def _base_query(self, q: str, n: int, session_id: str) -> List[Dict[str, Any]]:
         # 1) если менеджер умеет .search(...) — используем его формат
         if hasattr(self.mgr, "search"):
             try:
-                res = self.mgr.search(user_id="dev", query=q, k=int(n), score_threshold=0.0)
+                res = self.mgr.search(user_id="dev", query=q, session_id=session_id, k=int(n), score_threshold=0.0)
                 items = res.get("results") if isinstance(res, dict) else res
                 out = []
                 for it in (items or []):
                     # ожидаем ключи: text / metadata / score (но поддержим старый "meta")
                     text = it.get("text")
                     meta = it.get("metadata") or it.get("meta") or {}
+                    # Additional safety check: filter by session_id
+                    if meta.get("session_id") != session_id:
+                        continue
                     score = float(it.get("score", 0.0))
                     out.append({"text": text or "", "metadata": meta or {}, "score": score})
                 if out:
@@ -95,6 +98,7 @@ class Retriever:
                 qr = coll.query(
                     query_texts=[q],
                     n_results=n_fetch,
+                    where={"session_id": session_id},  # Filter by session_id
                     include=["documents", "metadatas", "distances"],
                 )
                 docs = (qr.get("documents") or [[]])[0]
@@ -104,12 +108,16 @@ class Retriever:
                 seen_texts = set()
                 for t, m, d in zip(docs, metas, dists):
                     text = t or ""
+                    # Additional safety check: ensure metadata matches session_id
+                    meta_dict = m or {}
+                    if meta_dict.get("session_id") != session_id:
+                        continue  # Skip records from other sessions (defense in depth)
                     key = text.strip().lower()[:200]
                     if key in seen_texts:
                         continue
                     seen_texts.add(key)
                     score = 1.0 - float(d if d is not None else 1.0)
-                    out.append({"text": text, "metadata": (m or {}), "score": score})
+                    out.append({"text": text, "metadata": meta_dict, "score": score})
                 return out
             except Exception:
                 pass
@@ -117,7 +125,7 @@ class Retriever:
         # 3) иначе — пусто
         return []
 
-    def _query_hyde(self, q: str, n: int) -> List[Dict[str, Any]]:
+    def _query_hyde(self, q: str, n: int, session_id: str) -> List[Dict[str, Any]]:
         # HyDE опционален; если генератора нет — возвращаем пусто
         try:
             from backend.app.chat import generate_once  # опционально
@@ -127,13 +135,14 @@ class Retriever:
             hypo = (generate_once(f"Кратко ответь по существу: {q}") or "").strip()
             if not hypo:
                 return []
-            return self._base_query(hypo, n)
+            return self._base_query(hypo, n, session_id)
         except Exception:
             return []
 
     def search(
         self,
         q: str,
+        session_id: str,  # Required for session isolation
         k: int = 5,
         where_json: Optional[str] = None,
         mmr: Optional[float] = None,            # 0..1
@@ -141,16 +150,22 @@ class Retriever:
         use_hyde: bool = True,
         candidate_multiplier: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
+        if not session_id:
+            raise ValueError("session_id is required for memory search")
         where = _parse_where_json(where_json)
+        # Ensure where filter includes session_id
+        if where is None:
+            where = {}
+        where["session_id"] = session_id  # Enforce session isolation in where filter
         n0 = max(1, int(k))
         n_cand = max(n0, n0 * int(candidate_multiplier or 3))
 
         # базовые кандидаты
-        cands = self._base_query(q, n_cand)
+        cands = self._base_query(q, n_cand, session_id)
 
         # HyDE‑кандидаты
         if use_hyde:
-            hc = self._query_hyde(q, max(5, n0))
+            hc = self._query_hyde(q, max(5, n0), session_id)
             if hc:
                 seen = {(c.get("text") or "") for c in cands}
                 for h in hc:
@@ -188,9 +203,11 @@ class Retriever:
         except Exception:
             pass
 
-        # where_json фильтр
+        # where_json фильтр (session_id already enforced, but double-check)
         if where:
             cands = [c for c in cands if _meta_match(c.get("metadata") or {}, where)]
+        # Final safety check: ensure all results belong to the session
+        cands = [c for c in cands if (c.get("metadata") or {}).get("session_id") == session_id]
 
         # сортировка по score
         cands.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
