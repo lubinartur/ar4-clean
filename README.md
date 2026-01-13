@@ -1,4 +1,10 @@
-# AIr4 (Phase-12)
+# AIr4 v1.0 Release Candidate
+
+**Status: v1.0.0-rc1 - API Frozen**
+
+This is the v1.0 release candidate. Core functionality is complete and stabilized. **No new features will be added before v1.0 release.** Only bug fixes and critical stability improvements are permitted.
+
+---
 
 ## Quick start
 python3 -m venv .venv
