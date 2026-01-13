@@ -55,12 +55,9 @@ const Sidebar: React.FC<SidebarProps> = ({
 
   // Poll for system health and ingest queue status
   const pollSystemStatus = useCallback(async () => {
-    try {
-      await air4.getStats();
-      await air4.getIngestQueueStatus();
-    } catch (err) {
-      // Errors are handled in service
-    }
+    // Errors are propagated to usePolling for backoff handling
+    await air4.getStats();
+    await air4.getIngestQueueStatus();
   }, [air4]);
 
   // Initial load
@@ -68,8 +65,15 @@ const Sidebar: React.FC<SidebarProps> = ({
     refreshHistory();
   }, [refreshHistory]);
 
-  // Polling: health check + ingest queue (every 5 seconds)
-  usePolling(pollSystemStatus, 5000);
+  // Polling: health check + ingest queue with backoff and pause on hidden/offline
+  usePolling(pollSystemStatus, {
+    enabled: true,
+    pauseWhenHidden: true,
+    pauseWhenOffline: true,
+    intervalMs: 5000,
+    maxIntervalMs: 60000,
+    backoffFactor: 2,
+  });
 
   // Refresh history when sessions change (no polling, only on mount and manual actions)
 
@@ -80,9 +84,9 @@ const Sidebar: React.FC<SidebarProps> = ({
     }
   };
 
-  const handleNewChat = () => {
+  const handleNewChat = async () => {
     try {
-      const newSession = air4.createSession('New Session');
+      const newSession = await air4.createSession('New Session');
       refreshHistory(); // Manual refresh after action
       onSessionChange(newSession.id);
       onTabChange('chat');

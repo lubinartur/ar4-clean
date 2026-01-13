@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { air4 } from '../services/air4Service';
+import { useAir4 } from '../contexts/Air4Context';
 import { ChatSession } from '../types';
 import { MessageSquare, Trash2, Calendar, Search, Edit2, Check, X, List } from 'lucide-react';
 
@@ -9,6 +9,7 @@ interface HistoryProps {
 }
 
 const History: React.FC<HistoryProps> = ({ onSelectSession }) => {
+  const air4 = useAir4();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -18,10 +19,9 @@ const History: React.FC<HistoryProps> = ({ onSelectSession }) => {
     setSessions(air4.getSessions());
   };
 
+  // Load sessions on mount only (no polling)
   useEffect(() => {
     refreshSessions();
-    const interval = setInterval(refreshSessions, 3000);
-    return () => clearInterval(interval);
   }, []);
 
   const handleDelete = (e: React.MouseEvent, id: string) => {
@@ -60,8 +60,8 @@ const History: React.FC<HistoryProps> = ({ onSelectSession }) => {
   return (
     <div className="h-full flex flex-col p-8">
       <div className="mb-8">
-        <h2 className="text-2xl font-bold text-white mb-2">Session History</h2>
-        <p className="text-slate-400 text-sm">Full archive of your local interactions.</p>
+        <h2 className="text-2xl font-bold text-white mb-2">Recall</h2>
+        <p className="text-slate-400 text-sm">Return to past context.</p>
       </div>
 
       <div className="relative mb-6">

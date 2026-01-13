@@ -1,16 +1,18 @@
 
 import React, { useEffect, useState, useRef } from 'react';
-import { air4 } from '../services/air4Service';
+import { useAir4 } from '../contexts/Air4Context';
 import { SystemStats } from '../types';
 import { BrainCircuit, UploadCloud, Database, Settings, Sparkles, ArrowRight, Command } from 'lucide-react';
-import { Logo } from '../components/Logo';
+import Logo from '../assets/air4.svg';
 
 interface DashboardProps {
     onNavigate: (tab: string) => void;
     onQuery?: (query: string) => void;
+    onBrainstorm?: (query: string) => void;
 }
 
-const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onQuery }) => {
+const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onQuery, onBrainstorm }) => {
+  const air4 = useAir4();
   const [stats, setStats] = useState<SystemStats | null>(null);
   const [input, setInput] = useState('');
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
@@ -59,7 +61,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onQuery }) => {
       ></div>
 
       {/* Top Bar */}
-      <div className="w-full p-6 flex justify-between items-center z-10 animate-fade-in-up" style={{ animationDelay: '0.1s', opacity: 0 }}>
+      <div className="w-full p-6 flex justify-between items-center z-10">
           <div className="flex items-center gap-2 px-4 py-2 rounded-full glass-card text-xs font-medium text-slate-400">
              <span className={`w-2 h-2 rounded-full ${stats?.isOffline ? 'bg-red-500' : 'bg-emerald-500 animate-pulse'}`}></span>
              {stats?.isOffline ? 'Offline' : 'Core Active'}
@@ -75,10 +77,14 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onQuery }) => {
       <div className="flex-1 flex flex-col items-center justify-center p-8 z-10">
          
          {/* Floating Orb / Logo - Intensified */}
-         <div className="mb-10 relative animate-float opacity-0 animate-fade-in-up" style={{ animationDelay: '0.2s' }}>
+         <div className="mb-10 relative animate-float">
              {/* Core Glow */}
              <div className="w-28 h-28 rounded-full bg-gradient-to-br from-air-500 to-amber-600 neural-core-glow flex items-center justify-center relative z-10 shadow-[0_0_50px_rgba(249,115,22,0.4)]">
-                <Logo className="w-16 h-16 text-white brightness-200 drop-shadow-[0_0_10px_rgba(255,255,255,0.8)]" />
+                <img
+                  src={Logo}
+                  className="w-20 h-20 brightness-200 drop-shadow-[0_0_10px_rgba(255,255,255,0.8)]"
+                  alt="Air4 Logo"
+                />
              </div>
              
              {/* Orbital ring 1 */}
@@ -94,7 +100,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onQuery }) => {
              </div>
          </div>
 
-         <div className="animate-fade-in-up opacity-0 text-center relative" style={{ animationDelay: '0.3s' }}>
+         <div className="text-center relative">
              <h1 className="text-4xl md:text-5xl font-bold text-white mb-2 tracking-tight drop-shadow-2xl">
                  Ready to Expand Your Mind?
              </h1>
@@ -104,14 +110,22 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onQuery }) => {
          </div>
 
          {/* Quick Actions Chips */}
-         <div className="flex flex-wrap gap-3 mb-8 justify-center animate-fade-in-up opacity-0 relative z-20" style={{ animationDelay: '0.4s' }}>
+         <div className="flex flex-wrap gap-3 mb-8 justify-center relative z-20">
              <ActionChip icon={UploadCloud} label="Ingest Files" onClick={() => onNavigate('ingest')} />
-             <ActionChip icon={BrainCircuit} label="Brainstorm" onClick={() => onQuery && onQuery("Let's brainstorm ideas for...")} />
+             <ActionChip 
+             icon={BrainCircuit} 
+             label="Brainstorm" 
+             onClick={() => {
+                 const q = "Let's brainstorm ideas for...";
+                 if (onBrainstorm) onBrainstorm(q);
+                 else if (onQuery) onQuery(q);
+             }} 
+             />
              <ActionChip icon={Database} label="Check Memory" onClick={() => onNavigate('memory')} />
          </div>
 
          {/* Central Input */}
-         <form onSubmit={handleSubmit} className="w-full max-w-2xl relative group animate-fade-in-up opacity-0 z-20" style={{ animationDelay: '0.5s' }}>
+         <form onSubmit={handleSubmit} className="w-full max-w-2xl relative group z-20">
              <div className="absolute inset-0 bg-air-500/20 blur-xl rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none"></div>
              <div className="relative glass-card rounded-2xl p-2 flex items-center gap-2 transition-all group-focus-within:border-air-500/50 group-focus-within:bg-black/40">
                  <div className="p-3 text-air-500">
@@ -140,7 +154,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onQuery }) => {
       </div>
 
       {/* Bottom Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 p-8 pt-0 z-10 max-w-5xl mx-auto w-full animate-fade-in-up opacity-0" style={{ animationDelay: '0.6s' }}>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 p-8 pt-0 z-10 max-w-5xl mx-auto w-full">
           <FeatureCard 
             icon={UploadCloud} 
             title="Ingest Data" 

@@ -176,9 +176,8 @@ const SettingsPage: React.FC<SettingsProps> = ({ activeSessionId }) => {
       }
       keysToRemove.forEach(key => localStorage.removeItem(key));
       
-      // Hard reload на корень
-      window.location.href = '/';
-      window.location.reload();
+      // Переход на корень с параметром setup=1
+      window.location.href = '/?setup=1';
     }
   };
 

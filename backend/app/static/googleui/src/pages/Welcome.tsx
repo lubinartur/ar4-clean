@@ -1,6 +1,7 @@
 
 import React, { useState } from 'react';
-import { air4, AVAILABLE_AGENTS } from '../services/air4Service';
+import { useAir4 } from '../contexts/Air4Context';
+import { AVAILABLE_AGENTS } from '../services/air4Service';
 import { Agent } from '../types';
 import { ArrowRight, Check, Cpu, Sparkles, Activity, DollarSign, Terminal } from 'lucide-react';
 import { Logo } from '../components/Logo';
@@ -10,12 +11,15 @@ interface WelcomeProps {
 }
 
 const Welcome: React.FC<WelcomeProps> = ({ onComplete }) => {
+  const air4 = useAir4();
   const [step, setStep] = useState(1);
   const [name, setName] = useState('');
   const [selectedAgents, setSelectedAgents] = useState<Agent[]>(AVAILABLE_AGENTS);
   const [isBooting, setIsBooting] = useState(false);
 
   const toggleAgent = (id: string) => {
+    // Prime Core всегда включен, не переключается
+    if (id === 'general' || id === 'prime' || id === 'core') return;
     setSelectedAgents(prev => 
       prev.map(a => a.id === id ? { ...a, enabled: !a.enabled } : a)
     );
@@ -137,33 +141,47 @@ const Welcome: React.FC<WelcomeProps> = ({ onComplete }) => {
                {step === 2 && (
                    <div className="h-full flex flex-col animate-in slide-in-from-right-8 duration-500">
                        <div className="mb-6">
-                           <h2 className="text-2xl font-bold text-white mb-2">Select Modules</h2>
-                           <p className="text-slate-400 text-sm">Enable specialized agents for your workflow.</p>
+                           <h2 className="text-2xl font-bold text-white mb-2">Optional focus areas</h2>
+                           <p className="text-slate-400 text-sm">Enable specialized helpers now — you can change this later in Settings.</p>
                        </div>
 
                        <div className="flex-1 overflow-y-auto custom-scrollbar -mr-4 pr-4 space-y-3 pb-6">
-                           {selectedAgents.map(agent => (
-                               <div 
-                                    key={agent.id}
-                                    onClick={() => toggleAgent(agent.id)}
-                                    className={`p-4 rounded-2xl border cursor-pointer transition-all flex items-center gap-4 group ${
-                                        agent.enabled 
-                                        ? 'bg-air-500/10 border-air-500/30 shadow-[0_0_20px_rgba(249,115,22,0.05)]' 
-                                        : 'bg-white/5 border-white/5 hover:bg-white/10 hover:border-white/10'
-                                    }`}
-                               >
-                                   <div className={`p-3 rounded-xl transition-colors ${agent.enabled ? 'bg-air-500 text-white shadow-lg shadow-air-500/30' : 'bg-slate-800 text-slate-500'}`}>
-                                       {renderIcon(agent.icon)}
+                           {selectedAgents.map(agent => {
+                               const isPrimeCore = agent.id === 'general' || agent.name === 'Prime Core';
+                               return (
+                                   <div 
+                                        key={agent.id}
+                                        onClick={() => !isPrimeCore && toggleAgent(agent.id)}
+                                        className={`p-4 rounded-2xl border transition-all flex items-center gap-4 group ${
+                                            isPrimeCore
+                                                ? 'bg-air-500/10 border-air-500/30 shadow-[0_0_20px_rgba(249,115,22,0.05)]'
+                                                : agent.enabled 
+                                                ? 'bg-air-500/10 border-air-500/30 shadow-[0_0_20px_rgba(249,115,22,0.05)] cursor-pointer hover:bg-white/10 hover:border-white/10' 
+                                                : 'bg-white/5 border-white/5 cursor-pointer hover:bg-white/10 hover:border-white/10'
+                                        }`}
+                                   >
+                                       <div className={`p-3 rounded-xl transition-colors ${agent.enabled ? 'bg-air-500 text-white shadow-lg shadow-air-500/30' : 'bg-slate-800 text-slate-500'}`}>
+                                           {renderIcon(agent.icon)}
+                                       </div>
+                                       <div className="flex-1">
+                                           <div className="flex items-center gap-2">
+                                               <h4 className={`font-semibold transition-colors ${agent.enabled ? 'text-white' : 'text-slate-400'}`}>{agent.name}</h4>
+                                               {isPrimeCore && (
+                                                   <span className="text-[10px] font-semibold text-air-400 uppercase tracking-wider px-2 py-0.5 bg-air-500/10 rounded-full border border-air-500/20">
+                                                       Core • Always on
+                                                   </span>
+                                               )}
+                                           </div>
+                                           <p className="text-xs text-slate-500">{agent.description}</p>
+                                       </div>
+                                       {!isPrimeCore && (
+                                           <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${agent.enabled ? 'border-air-500 bg-air-500' : 'border-slate-700'}`}>
+                                               {agent.enabled && <Check className="w-3 h-3 text-white" />}
+                                           </div>
+                                       )}
                                    </div>
-                                   <div className="flex-1">
-                                       <h4 className={`font-semibold transition-colors ${agent.enabled ? 'text-white' : 'text-slate-400'}`}>{agent.name}</h4>
-                                       <p className="text-xs text-slate-500">{agent.description}</p>
-                                   </div>
-                                   <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${agent.enabled ? 'border-air-500 bg-air-500' : 'border-slate-700'}`}>
-                                       {agent.enabled && <Check className="w-3 h-3 text-white" />}
-                                   </div>
-                               </div>
-                           ))}
+                               );
+                           })}
                        </div>
 
                        <div className="pt-4 flex gap-3 mt-auto">
@@ -175,9 +193,9 @@ const Welcome: React.FC<WelcomeProps> = ({ onComplete }) => {
                            </button>
                            <button 
                                 onClick={() => setStep(3)}
-                                className="flex-1 py-4 bg-white text-black hover:bg-slate-200 font-bold rounded-2xl transition-all shadow-lg flex items-center justify-center gap-2"
+                                className="flex-1 py-4 bg-air-600 hover:bg-air-500 text-white font-bold rounded-2xl transition-all shadow-lg shadow-air-600/20 flex items-center justify-center gap-2"
                            >
-                               Finalize Setup
+                               Continue
                            </button>
                        </div>
                    </div>

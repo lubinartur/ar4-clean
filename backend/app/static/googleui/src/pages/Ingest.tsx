@@ -1,10 +1,11 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { air4 } from '../services/air4Service';
+import { useAir4 } from '../contexts/Air4Context';
 import { IngestItem } from '../types';
 import { UploadCloud, FileText, CheckCircle2, RefreshCw, File, AlertCircle, XCircle, CheckCircle, Loader2 } from 'lucide-react';
 
 const Ingest: React.FC = () => {
+  const air4 = useAir4();
   const [isDragging, setIsDragging] = useState(false);
   const [queue, setQueue] = useState<IngestItem[]>([]);
   const [activeUploads, setActiveUploads] = useState<{id: string, name: string, size: number, progress: number}[]>([]);
@@ -16,10 +17,9 @@ const Ingest: React.FC = () => {
       setQueue(q);
   };
 
+  // Load queue on mount only (polling is handled in Sidebar)
   useEffect(() => {
     refreshQueue();
-    const interval = setInterval(refreshQueue, 1000); // Faster polling for smoother "real-time" feel
-    return () => clearInterval(interval);
   }, []);
 
   const handleDragOver = (e: React.DragEvent) => {
