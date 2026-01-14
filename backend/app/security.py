@@ -132,6 +132,20 @@ class AuthManager:
 
         # В аудит не кладём полный токен
         self.audit.log("login", request, profile, ok=True, token=token[:8])
+        
+        # G3: Log duress enter event
+        if profile == "duress":
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "[DURESS]",
+                extra={
+                    "event": "enter",
+                    "session_id": None,
+                    "user": None
+                }
+            )
+        
         return {"token": token, "profile": profile, "ttl_sec": self.settings.TOKEN_TTL_SEC}
 
     def verify(self, token: Optional[str]) -> TokenInfo:
@@ -154,8 +168,22 @@ class AuthManager:
             if ti is None:
                 self.audit.log("logout", request, None, ok=False, reason="unknown-token")
                 return
+            profile = ti.profile
             ti.revoked = True
-        self.audit.log("logout", request, ti.profile, ok=True, token=token[:8])
+        self.audit.log("logout", request, profile, ok=True, token=token[:8])
+        
+        # G3: Log duress exit event
+        if profile == "duress":
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "[DURESS]",
+                extra={
+                    "event": "exit",
+                    "session_id": None,
+                    "user": None
+                }
+            )
 
 # ---------------- Secure State (lock flag) ----------------
 

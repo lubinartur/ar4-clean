@@ -15,7 +15,9 @@ const History: React.FC<HistoryProps> = ({ onSelectSession }) => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
 
-  const refreshSessions = () => {
+  const refreshSessions = async () => {
+    // G1: Always refresh from backend before getting sessions
+    await air4.refreshSessions();
     setSessions(air4.getSessions());
   };
 

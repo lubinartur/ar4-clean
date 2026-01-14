@@ -63,7 +63,7 @@ async def ingest_file(
             f.write(file_content)
 
         # формируем базовые метаданные (добавляем filename и source_path)
-        base_metadata = {
+        raw_meta = {
             "tag": tag or "phase10",
             "ts": int(time.time()),
             "kind": "file",
@@ -72,6 +72,9 @@ async def ingest_file(
             "source_path": file.filename or os.path.basename(tmp_path),
             "session_id": session_id,  # Include session_id in metadata
         }
+        # Phase E: Normalize metadata (add namespace, ensure tag)
+        from backend.app.memory.manager_chroma import ChromaMemoryManager
+        base_metadata = ChromaMemoryManager._normalize_metadata(raw_meta)
 
         added = ingest_path(mgr, tmp_path, base_metadata=base_metadata, chunk_size=512, overlap=64)
         # DEBUG: логируем, сколько чанков реально добавлено
@@ -108,7 +111,7 @@ async def ingest_url(
     mgr = _get_manager(request)
     # простая заглушка: сохраняем URL как документ
     text = f"URL: {body.url}"
-    meta = {
+    raw_meta = {
         "tag": tag or "phase10",
         "kind": "url",
         "ts": int(time.time()),
@@ -117,11 +120,12 @@ async def ingest_url(
         "source_path": body.url,
         "session_id": session_id,  # Include session_id in metadata
     }
+    # Phase E: Metadata normalization happens in manager methods
     _id = f"url::{int(time.time())}"
     if hasattr(mgr, "add_texts"):
-        mgr.add_texts([text], [meta], ids=[_id])
+        mgr.add_texts([text], [raw_meta], ids=[_id])
     else:
-        mgr.collection.add(documents=[text], metadatas=[meta], ids=[_id])
+        raise HTTPException(status_code=503, detail="Memory backend not available (add_texts required for ingest)")
     return {"ok": True, "saved": body.url}
 
 # --- ingest: server-side process queue ---
@@ -213,12 +217,11 @@ async def ingest_process(
             errors.append({"file": fname, "err": "empty text"})
             continue
 
-        meta = {"source": fname, "tag": "ingest", "session_id": session_id}
+        raw_meta = {"source": fname, "tag": "ingest", "session_id": session_id}
+        # Phase E: Metadata normalization happens in manager methods
         try:
             if hasattr(mgr, "add_texts"):
-                mgr.add_texts([text], [meta])
-            elif hasattr(mgr, "collection"):
-                mgr.collection.add(documents=[text], metadatas=[meta])
+                mgr.add_texts([text], [raw_meta])
             elif hasattr(mgr, "add_text"):
                 try:
                     mgr.add_text(user_id="dev", text=text, session_id=session_id, source="ingest")

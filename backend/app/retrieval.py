@@ -76,14 +76,15 @@ class Retriever:
                 items = res.get("results") if isinstance(res, dict) else res
                 out = []
                 for it in (items or []):
-                    # ожидаем ключи: text / metadata / score (но поддержим старый "meta")
+                    # ожидаем ключи: text / metadata / score / id (но поддержим старый "meta")
                     text = it.get("text")
                     meta = it.get("metadata") or it.get("meta") or {}
+                    item_id = it.get("id")
                     # Additional safety check: filter by session_id
                     if meta.get("session_id") != session_id:
                         continue
                     score = float(it.get("score", 0.0))
-                    out.append({"text": text or "", "metadata": meta or {}, "score": score})
+                    out.append({"id": item_id, "text": text or "", "meta": meta or {}, "score": score})
                 if out:
                     return out
             except Exception:
@@ -101,12 +102,13 @@ class Retriever:
                     where={"session_id": session_id},  # Filter by session_id
                     include=["documents", "metadatas", "distances"],
                 )
+                ids = (qr.get("ids") or [[]])[0]
                 docs = (qr.get("documents") or [[]])[0]
                 metas = (qr.get("metadatas") or [[]])[0]
                 dists = (qr.get("distances") or [[]])[0]
                 out = []
                 seen_texts = set()
-                for t, m, d in zip(docs, metas, dists):
+                for item_id, t, m, d in zip(ids, docs, metas, dists):
                     text = t or ""
                     # Additional safety check: ensure metadata matches session_id
                     meta_dict = m or {}
@@ -117,7 +119,7 @@ class Retriever:
                         continue
                     seen_texts.add(key)
                     score = 1.0 - float(d if d is not None else 1.0)
-                    out.append({"text": text, "metadata": meta_dict, "score": score})
+                    out.append({"id": item_id, "text": text, "meta": meta_dict, "score": score})
                 return out
             except Exception:
                 pass

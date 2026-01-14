@@ -69,6 +69,8 @@ const Memory: React.FC<MemoryProps> = ({ activeSessionId }) => {
   const [profileCategoriesOpen, setProfileCategoriesOpen] = useState<Record<string, boolean>>({
     profile: true,
   });
+  const [bulkDeleteBy, setBulkDeleteBy] = useState<"id" | "tag" | "namespace">("tag");
+  const [bulkDeleteValue, setBulkDeleteValue] = useState("");
   
   const toggleMeta = (id: string) => setMetaOpen(p => ({...p, [id]: !p[id]}));
   const toggleQuery = (id: string) => setQueryOpen(p => ({...p, [id]: !p[id]}));
@@ -124,10 +126,39 @@ const Memory: React.FC<MemoryProps> = ({ activeSessionId }) => {
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (!activeSessionId) {
+      alert('No active session selected');
+      return;
+    }
     if (confirm('Are you sure you want to delete this memory vector?\n\nThis action cannot be undone.')) {
-      const success = await air4.deleteMemory(id);
+      // Phase E: Pass sessionId for backend validation
+      const success = await air4.deleteMemory(id, activeSessionId || undefined);
       if (success) {
-        setMemories((prev) => prev.filter((m) => m.id !== id));
+        // Refresh memories from backend using the same method as initial load
+        await doSearch(searchTerm);
+      }
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (!activeSessionId) {
+      alert('No active session selected');
+      return;
+    }
+    if (!bulkDeleteValue.trim()) {
+      alert('Please enter a value to delete');
+      return;
+    }
+    const byLabel = bulkDeleteBy === 'id' ? 'ID' : bulkDeleteBy === 'tag' ? 'tag' : 'namespace';
+    const warning = `Are you sure you want to delete ALL memories with ${byLabel}="${bulkDeleteValue}"?\n\nThis action cannot be undone and will affect multiple items.`;
+    if (confirm(warning)) {
+      const success = await air4.deleteMemoryBy(bulkDeleteBy, bulkDeleteValue.trim(), activeSessionId || undefined);
+      if (success) {
+        setBulkDeleteValue("");
+        // Refresh memories from backend using the same method as initial load
+        await doSearch(searchTerm);
+      } else {
+        alert('Failed to delete memories');
       }
     }
   };
@@ -449,6 +480,33 @@ const Memory: React.FC<MemoryProps> = ({ activeSessionId }) => {
             <RefreshCw className="w-4 h-4 animate-spin" />
           </div>
         )}
+      </div>
+
+      {/* Bulk Delete Controls */}
+      <div className="mb-4 flex-shrink-0 flex items-center gap-2 animate-fade-in-up" style={{ animationDelay: '0.15s' }}>
+        <select
+          value={bulkDeleteBy}
+          onChange={(e) => setBulkDeleteBy(e.target.value as "id" | "tag" | "namespace")}
+          className="glass-input rounded-lg px-3 py-2 text-white bg-white/5 border border-white/5 focus:outline-none focus:border-red-500/50 focus:bg-white/10 transition-all text-sm"
+        >
+          <option value="id">ID</option>
+          <option value="tag">Tag</option>
+          <option value="namespace">Namespace</option>
+        </select>
+        <input
+          type="text"
+          placeholder={`Enter ${bulkDeleteBy}...`}
+          value={bulkDeleteValue}
+          onChange={(e) => setBulkDeleteValue(e.target.value)}
+          className="glass-input rounded-lg px-3 py-2 text-white bg-white/5 border border-white/5 focus:outline-none focus:border-red-500/50 focus:bg-white/10 transition-all text-sm flex-1"
+        />
+        <button
+          onClick={handleBulkDelete}
+          className="px-4 py-2 rounded-lg text-sm font-medium text-white bg-red-500/20 border border-red-500/30 hover:bg-red-500/30 hover:border-red-500/50 transition-all flex items-center gap-2"
+        >
+          <Trash2 className="w-4 h-4" />
+          Delete
+        </button>
       </div>
 
       {/* Results List */}

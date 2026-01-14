@@ -477,6 +477,10 @@ async def chat_stream(body: ChatStreamRequest):
     session_id = validate_session_id(session_id)
 
     async def stream_gen() -> AsyncGenerator[str, None]:
+        # G3 fix: Use local variable to avoid UnboundLocalError with += in nested scope
+        from backend.app.chat import ARCH_CORE_PROMPT
+        preamble = ARCH_CORE_PROMPT
+        
         try:
             if not q:
                 yield f'data: {json.dumps({"type": "error", "message": "empty query"})}\n\n'
@@ -651,8 +655,7 @@ async def chat_stream(body: ChatStreamRequest):
             # --- Подготовка system_preamble (Core Dialog) ---
             # Core Dialog: используем фиксированный ARCH_CORE_PROMPT
             # UI не может перезаписать system prompt через settings или systemPrompt
-            from backend.app.chat import ARCH_CORE_PROMPT
-            system_preamble = ARCH_CORE_PROMPT
+            # system_preamble уже инициализирован в начале stream_gen()
 
             # Настройки из validated body
             settings = body.get_settings_dict()
@@ -968,21 +971,50 @@ async def chat_stream(body: ChatStreamRequest):
                         hits = js.get("results", [])
                         if hits and isinstance(hits[0], dict) and hits[0].get("text") and hits[0].get("score") is not None and hits[0]["score"] >= RAG_SCORE_THRESHOLD:
                             rag_ctx = hits[0]["text"][:1200]
+                            # G3: Log memory hit
+                            logger.info(
+                                "[MEMORY_HIT]",
+                                extra={
+                                    "session_id": sess_id,
+                                    "user": "dev",
+                                    "count": len(hits),
+                                    "namespace": None
+                                }
+                            )
                 except httpx.TimeoutException:
                     logger.warning(f"[RAG TIMEOUT] RAG retrieval timed out for query (session_id={sess_id})")
+                    # G3: Log error
+                    logger.error(
+                        "[ERROR] RAG timeout",
+                        extra={
+                            "session_id": sess_id,
+                            "user": "dev",
+                            "exception": "RAG retrieval timed out"
+                        }
+                    )
                     rag_ctx = ""
                 except Exception as e:
                     logger.warning(f"[RAG ERROR] RAG retrieval failed: {e}")
+                    # G3: Log error
+                    logger.error(
+                        "[ERROR] RAG retrieval_failed",
+                        extra={
+                            "session_id": sess_id,
+                            "user": "dev",
+                            "exception": str(e)
+                        }
+                    )
                     rag_ctx = ""
 
             user_payload = f"{q}\n\n[MEMORY]\n{rag_ctx}" if rag_ctx else q
 
+            # Build preamble for LLM call (preamble already initialized at start of stream_gen())
             if rag_ctx:
-                system_preamble = system_preamble + " ВНИМАНИЕ: отвечай ТОЛЬКО на основе блока [MEMORY] ниже. Ничего не придумывай. Если пользователь просит точную фразу, верни её дословно из [MEMORY] без изменений."
+                preamble += " ВНИМАНИЕ: отвечай ТОЛЬКО на основе блока [MEMORY] ниже. Ничего не придумывай. Если пользователь просит точную фразу, верни её дословно из [MEMORY] без изменений."
             
-            # Добавляем memory_context (факты о пользователе) в system_preamble
+            # Добавляем memory_context (факты о пользователе) в preamble
             if memory_context:
-                system_preamble = system_preamble + "\n\n" + memory_context
+                preamble += "\n\n" + memory_context
 
             # Отправляем meta событие с resolved_model ДО начала стриминга
             meta_event = json.dumps({"type": "meta", "resolved_model": model_name}, ensure_ascii=False)
@@ -997,7 +1029,7 @@ async def chat_stream(body: ChatStreamRequest):
                         json={
                             "model": model_name,
                             "messages": [
-                                {"role": "system", "content": system_preamble},
+                                {"role": "system", "content": preamble},
                                 {"role": "user", "content": user_payload},
                             ],
                         },
@@ -1154,17 +1186,49 @@ async def chat_stream(body: ChatStreamRequest):
 
             except httpx.TimeoutException:
                 logger.error(f"[LLM TIMEOUT] LLM streaming timed out after 60s (session_id={sess_id})")
-                error_event = json.dumps({"type": "error", "message": "LLM request timed out"}, ensure_ascii=False)
+                # G3: Log error
+                logger.error(
+                    "[ERROR] chat/stream LLM_timeout",
+                    extra={
+                        "session_id": sess_id,
+                        "user": "dev",
+                        "exception": "LLM request timed out"
+                    }
+                )
+                import traceback
+                error_event = json.dumps({"type": "error", "message": "SRC=routes_stream.py\nTRACEBACK:\n" + traceback.format_exc()}, ensure_ascii=False)
                 yield f"data: {error_event}\n\n"
             except Exception as e:
-                logger.error(f"[LLM ERROR] LLM streaming failed: {e}")
-                error_msg = f"Ошибка при вызове LLM: {str(e)}"
-                error_event = json.dumps({"type": "error", "message": error_msg}, ensure_ascii=False)
+                import traceback
+                print("EXC_TYPE:", type(e), "EXC_REPR:", repr(e), flush=True)
+                print("TRACEBACK:\n", traceback.format_exc(), flush=True)
+                raise
+                # G3: Log error
+                logger.error(
+                    "[ERROR] chat/stream LLM_call_failed",
+                    extra={
+                        "session_id": sess_id,
+                        "user": "dev",
+                        "exception": str(e)
+                    }
+                )
+                import traceback
+                error_event = json.dumps({"type": "error", "message": "SRC=routes_stream.py\nTRACEBACK:\n" + traceback.format_exc()}, ensure_ascii=False)
                 yield f"data: {error_event}\n\n"
 
         except Exception as e:
             logger.error(f"[STREAM ERROR] Stream handler failed: {e}")
-            error_event = json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False)
+            # G3: Log error
+            logger.error(
+                "[ERROR] chat/stream handler_failed",
+                extra={
+                    "session_id": sess_id if 'sess_id' in locals() else None,
+                    "user": "dev",
+                    "exception": str(e)
+                }
+            )
+            import traceback
+            error_event = json.dumps({"type": "error", "message": "SRC=routes_stream.py\nTRACEBACK:\n" + traceback.format_exc()}, ensure_ascii=False)
             yield f"data: {error_event}\n\n"
 
     return StreamingResponse(

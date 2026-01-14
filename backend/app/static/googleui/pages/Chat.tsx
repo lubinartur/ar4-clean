@@ -11,7 +11,7 @@ interface ChatProps {
     clearInitialQuery?: () => void;
 }
 
-const STORAGE_KEY_LAST_SESSION = 'air4:lastSessionId';
+const STORAGE_KEY_ACTIVE_SESSION = 'air4.activeSessionId';
 
 const Chat: React.FC<ChatProps> = ({ sessionId: propSessionId, initialQuery, clearInitialQuery }) => {
   const { settings } = useSettings();
@@ -95,26 +95,41 @@ const Chat: React.FC<ChatProps> = ({ sessionId: propSessionId, initialQuery, cle
               }
           }
           
-          // Приоритет 2: localStorage
+          // Приоритет 2: localStorage (G1: activeSessionId only)
           if (!selectedId) {
-              const storedSessionId = localStorage.getItem(STORAGE_KEY_LAST_SESSION);
-              if (storedSessionId) {
-                  selectedId = storedSessionId;
-                  console.debug('[Chat.tsx] Found sessionId in localStorage:', storedSessionId);
+              const storedSessionId = localStorage.getItem(STORAGE_KEY_ACTIVE_SESSION);
+              if (storedSessionId && air4.isValidSessionId(storedSessionId)) {
+                  // Validate against backend sessions list
+                  const sessions = air4.getSessions();
+                  const sessionExists = sessions.some(s => s.id === storedSessionId);
+                  if (sessionExists) {
+                      selectedId = storedSessionId;
+                      console.debug('[Chat.tsx] Found valid sessionId in localStorage:', storedSessionId);
+                  } else {
+                      // Invalid sessionId, remove it
+                      localStorage.removeItem(STORAGE_KEY_ACTIVE_SESSION);
+                      console.debug('[Chat.tsx] Removed invalid sessionId from localStorage:', storedSessionId);
+                  }
               }
           }
           
-          // Приоритет 3: создание новой сессии
+          // Приоритет 3: первая сессия из backend или создание новой
           if (!selectedId) {
-              console.debug('[Chat.tsx] No sessionId found, creating new session');
-              const newSession = air4.createSession('');
-              selectedId = newSession.id;
+              const sessions = air4.getSessions();
+              if (sessions.length > 0) {
+                  selectedId = sessions[0].id;
+                  console.debug('[Chat.tsx] Using first session from backend:', selectedId);
+              } else {
+                  console.debug('[Chat.tsx] No sessions found, creating new session');
+                  const newSession = await air4.createSession('');
+                  selectedId = newSession.id;
+              }
           }
           
           // Устанавливаем id и всегда обновляем URL
           setSessionId(selectedId);
           console.debug('[Chat.tsx] sessionId set', selectedId);
-          localStorage.setItem(STORAGE_KEY_LAST_SESSION, selectedId);
+          localStorage.setItem(STORAGE_KEY_ACTIVE_SESSION, selectedId);
           setUrlSessionId(selectedId);
           console.debug('[Chat.tsx] SessionId initialized:', { 
               selectedId, 
@@ -132,7 +147,7 @@ const Chat: React.FC<ChatProps> = ({ sessionId: propSessionId, initialQuery, cle
           console.debug('[Chat.tsx] Updating sessionId from prop:', propSessionId);
           setSessionId(propSessionId);
           console.debug('[Chat.tsx] sessionId set', propSessionId);
-          localStorage.setItem(STORAGE_KEY_LAST_SESSION, propSessionId);
+          localStorage.setItem(STORAGE_KEY_ACTIVE_SESSION, propSessionId);
           setUrlSessionId(propSessionId);
       }
   }, [propSessionId, sessionId]); // Зависимость от propSessionId и sessionId
@@ -197,7 +212,7 @@ const Chat: React.FC<ChatProps> = ({ sessionId: propSessionId, initialQuery, cle
                   console.debug('[Chat.tsx] Session not found on server, creating new');
                   const newSession = air4.createSession('');
                   setSessionId(newSession.id);
-                  localStorage.setItem(STORAGE_KEY_LAST_SESSION, newSession.id);
+                  localStorage.setItem(STORAGE_KEY_ACTIVE_SESSION, newSession.id);
                   setUrlSessionId(newSession.id);
                   setMessages(newSession.messages || []);
               }
@@ -443,7 +458,7 @@ const Chat: React.FC<ChatProps> = ({ sessionId: propSessionId, initialQuery, cle
         if (part.newSessionId) {
             console.debug('[Chat.tsx] Received newSessionId from streamChat:', part.newSessionId);
             setSessionId(part.newSessionId);
-            localStorage.setItem(STORAGE_KEY_LAST_SESSION, part.newSessionId);
+            localStorage.setItem(STORAGE_KEY_ACTIVE_SESSION, part.newSessionId);
             setUrlSessionId(part.newSessionId);
         }
         

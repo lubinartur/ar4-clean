@@ -43,8 +43,10 @@ const Sidebar: React.FC<SidebarProps> = ({
     'Previous 7 Days': true,
   });
 
-  const refreshHistory = useCallback(() => {
+  const refreshHistory = useCallback(async () => {
     try {
+      // G1: Always refresh from backend before getting sessions
+      await air4.refreshSessions();
       const sessions = air4.getSessions();
       setHistory(Array.isArray(sessions) ? sessions : []);
     } catch (err) {

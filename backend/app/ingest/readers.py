@@ -116,15 +116,13 @@ def ingest_path(
         # Ensure session_id is in metadata
         if "session_id" not in md or not md.get("session_id"):
             raise ValueError("session_id is required in base_metadata for ingest_path")
+        # Phase E: Metadata normalization happens in manager methods (add_texts/add_text)
         docs.append(ch)
         metas.append(md)
 
     if hasattr(manager, "add_texts"):
+        # Metadata normalization happens in add_texts
         manager.add_texts(docs, metas, ids=ids)
-        return len(chunks)
-
-    if hasattr(manager, "collection"):
-        manager.collection.add(documents=docs, metadatas=metas, ids=ids)
         return len(chunks)
 
     if hasattr(manager, "add_text"):

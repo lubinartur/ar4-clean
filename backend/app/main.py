@@ -17,7 +17,12 @@ import os
 import time
 import uuid
 import re
+import traceback
+import logging
+from pathlib import Path
 from typing import Dict, Optional, List
+
+logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -259,6 +264,15 @@ def _retrieve_rag_context(query: str, session_id: str, k: int = 6, max_chars: in
             return ""
     except Exception as e:
         print(f"[RAG] search failed: {e}")
+        # G3: Log error
+        logger.error(
+            "[ERROR] RAG search_failed",
+            extra={
+                "session_id": session_id,
+                "user": "dev",
+                "exception": str(e)
+            }
+        )
         return ""
 
     # Нормализуем ответ так же, как в /memory/search
@@ -295,6 +309,16 @@ def _retrieve_rag_context(query: str, session_id: str, k: int = 6, max_chars: in
     ctx = "\n---\n".join(parts).strip()
     if ctx:
         print(f"[RAG] retrieved context, {len(parts)} chunks, {len(ctx)} chars")
+        # G3: Log memory hit
+        logger.info(
+            "[MEMORY_HIT]",
+            extra={
+                "session_id": session_id,
+                "user": "dev",
+                "count": len(parts),
+                "namespace": None
+            }
+        )
     else:
         print("[RAG] no context found")
     return ctx
@@ -399,8 +423,28 @@ async def memory_search(
                     "score": getattr(it, "score", None),
                     "meta": getattr(it, "meta", {}) or {},
                 })
+        # G3: Log memory hit if results found
+        if out:
+            logger.info(
+                "[MEMORY_HIT]",
+                extra={
+                    "session_id": session_id,
+                    "user": "dev",
+                    "count": len(out),
+                    "namespace": None
+                }
+            )
         return {"ok": True, "results": out}
     except Exception as e:
+        # G3: Log error
+        logger.error(
+            "[ERROR] memory search_failed",
+            extra={
+                "session_id": session_id,
+                "user": "dev",
+                "exception": str(e)
+            }
+        )
         raise HTTPException(status_code=500, detail=f"search failed: {e}")
 
 # -----------------------------------------------------------------------------
@@ -529,14 +573,42 @@ def _init_memory() -> str:
     collection = os.getenv("AIR4_CHROMA_COLLECTION", "air4")
     embed_model = os.getenv("AIR4_EMBED_MODEL_PATH") or os.getenv("AIR4_EMBED_MODEL", "all-MiniLM-L6-v2")
 
+    # Ensure persist_dir exists before initializing Chroma
+    try:
+        persist_path = Path(persist_dir)
+        persist_path.mkdir(parents=True, exist_ok=True)
+    except Exception as dir_error:
+        if memory_mode == "strict":
+            raise RuntimeError(
+                f"Failed to create persist_dir '{persist_dir}': {dir_error}"
+            ) from dir_error
+        else:
+            # Log directory creation failure but continue to try Chroma init
+            # (ChromaMemoryManager also tries to create it, might succeed)
+            print(f"[WARN] Failed to create persist_dir '{persist_dir}': {dir_error}")
+
     try:
         MEMORY = ChromaMemoryManager(persist_dir, collection, embed_model)
         return "ChromaMemoryManager"
     except Exception as e:
+        # Log full exception details with stack trace and config values
+        print("=" * 60)
+        print("[CHROMA INIT FAILED] ChromaMemoryManager initialization failed")
+        print(f"  MEMORY_MODE={memory_mode}")
+        print(f"  AIR4_CHROMA_DIR={persist_dir}")
+        print(f"  AIR4_CHROMA_COLLECTION={collection}")
+        print(f"  embed_model={embed_model}")
+        print(f"  Exception type: {type(e).__name__}")
+        print(f"  Exception message: {e}")
+        print("  Full traceback:")
+        print("  " + "\n  ".join(traceback.format_exc().splitlines()))
+        print("=" * 60)
+        
         if memory_mode == "strict":
             raise RuntimeError(f"Memory initialization failed in strict mode: {e}") from e
         else:
             # fallback mode (explicitly allowed)
+            print(f"[FALLBACK] Using InMemoryMemoryAdapter instead of ChromaMemoryManager")
             MEMORY = InMemoryMemoryAdapter()
             return "InMemoryMemoryAdapter"
 
@@ -1435,6 +1507,27 @@ except Exception:
 
 from backend.app.routes_memory import router as memory_router
 app.include_router(memory_router)
+
+# Phase F: Goals and Todos routers
+try:
+    from backend.app.routes_goals import router as goals_router  # noqa: E402
+    app.include_router(goals_router)
+except Exception:
+    try:
+        from .routes_goals import router as goals_router  # type: ignore
+        app.include_router(goals_router)
+    except Exception:
+        pass
+
+try:
+    from backend.app.routes_todos import router as todos_router  # noqa: E402
+    app.include_router(todos_router)
+except Exception:
+    try:
+        from .routes_todos import router as todos_router  # type: ignore
+        app.include_router(todos_router)
+    except Exception:
+        pass
 
 # @app.get("/ui/test", response_class=HTMLResponse)
 # async def ui_test(request: Request):

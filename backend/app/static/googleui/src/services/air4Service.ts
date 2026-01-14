@@ -2,7 +2,8 @@
 import { Agent, MemoryItem, Message, SystemStats, RouterDecision, AppState, Domain, IngestItem, Send3Out, ChatSession, ModelName, ResponseStyle, Language, IngestMode, SessionConfig } from '../types';
 
 const STORAGE_KEY_CONFIG = 'air4_config';
-const STORAGE_KEY_SESSIONS = 'air4_sessions';
+const STORAGE_KEY_SESSIONS = 'air4_sessions'; // Legacy, removed in G1
+const STORAGE_KEY_ACTIVE_SESSION = 'air4.activeSessionId';
 
 export interface Fact {
   id?: string;
@@ -63,6 +64,7 @@ function isValidBackendSessionId(id: string | null | undefined): boolean {
 export interface Air4Service {
   // Session Management
   getSessions(): ChatSession[];
+  refreshSessions(): Promise<void>;
   getSession(id: string): ChatSession | undefined;
   getSessionById(id: string, signal?: AbortSignal): Promise<ChatSession>;
   isValidSessionId(id: string | null | undefined): boolean;
@@ -100,7 +102,8 @@ export interface Air4Service {
   getFactsProfile(subject?: string): Promise<{ subject: string; profile?: string[]; }>;
   addManualMemory(content: string, source?: string): Promise<boolean>;
   addMemoryWithMeta(text: string, meta?: { source?: string; tag?: string; originalTag?: string; score?: number; query?: string; sessionId?: string; pinnedFrom?: string }): Promise<boolean>;
-  deleteMemory(id: string): Promise<boolean>;
+  deleteMemory(id: string, sessionId?: string): Promise<boolean>;
+  deleteMemoryBy(by: "id" | "tag" | "namespace", value: string, sessionId?: string): Promise<boolean>;
   uploadFile(file: File): Promise<boolean>;
   getIngestQueueStatus(): Promise<IngestItem[]>;
   streamChat(messages: Message[], sessionId: string, coreSettings?: { temperature?: number; responseTone?: string; outputDensity?: string; interfaceLanguage?: string; activeModel?: string }): AsyncGenerator<{ chunk?: string, context?: MemoryItem[], decision?: RouterDecision }, void, unknown>;
@@ -161,41 +164,51 @@ class Air4ServiceImpl implements Air4Service {
       };
     }
 
-    const savedSessions = localStorage.getItem(STORAGE_KEY_SESSIONS);
-    if (savedSessions) {
-      try {
-        const parsed = JSON.parse(savedSessions);
-        this.sessions = Array.isArray(parsed) ? parsed : [];
-      } catch (e) {
-        console.warn('Failed to parse stored sessions, resetting.', e);
-        this.sessions = [];
-        localStorage.removeItem(STORAGE_KEY_SESSIONS);
-      }
-    } else {
-      this.sessions = [];
+    // G1: Remove legacy sessions storage from localStorage
+    if (localStorage.getItem(STORAGE_KEY_SESSIONS)) {
+      localStorage.removeItem(STORAGE_KEY_SESSIONS);
+      console.info('[G1] removed legacy local sessions cache');
     }
 
-    // If after loading there are no sessions, create an initial one
-    // Note: This is fire-and-forget during initialization
-    if (this.sessions.length === 0) {
-      this.createSession('Local Core Online').catch(err => {
-        console.error('[air4Service] Failed to create initial session:', err);
-      });
-    }
+    // G1: Sessions are loaded from backend only, not from localStorage
+    this.sessions = [];
   }
 
   // --- SESSION MANAGEMENT ---
 
-  getSessions(): ChatSession[] {
-      // Filter out invalid (timestamp-based) session IDs from localStorage
-      const validSessions = this.sessions.filter(s => isValidBackendSessionId(s.id));
-      // If we filtered out invalid sessions, save the cleaned list
-      if (validSessions.length !== this.sessions.length) {
-          console.warn('[air4Service] Filtered out invalid session IDs from localStorage');
-          this.sessions = validSessions;
-          this.saveSessions();
+  async refreshSessions(): Promise<void> {
+      // G1: Load sessions from backend only
+      if (this.isOfflineMode) {
+          return;
       }
-      return validSessions.sort((a, b) => b.timestamp - a.timestamp);
+      
+      try {
+          const res = await fetch(`${this.apiBaseUrl}/sessions`);
+          if (!res.ok) {
+              console.warn('[air4Service] refreshSessions: failed to fetch sessions', res.statusText);
+              return;
+          }
+          
+          const data = await res.json();
+          if (data.ok && Array.isArray(data.sessions)) {
+              // Transform backend session format to ChatSession format
+              this.sessions = data.sessions.map((s: any) => ({
+                  id: s.id,
+                  title: s.title || 'New session',
+                  messages: [], // Messages are loaded separately via getSessionById
+                  lastMessage: '',
+                  timestamp: s.updated_at || s.created_at || Date.now(),
+              })).filter((s: ChatSession) => isValidBackendSessionId(s.id));
+          }
+      } catch (e) {
+          console.error('[air4Service] refreshSessions error:', e);
+      }
+  }
+
+  getSessions(): ChatSession[] {
+      // G1: Return sessions from memory (loaded via refreshSessions)
+      return this.sessions.filter(s => isValidBackendSessionId(s.id))
+          .sort((a, b) => b.timestamp - a.timestamp);
   }
 
   getSession(id: string): ChatSession | undefined {
@@ -280,6 +293,7 @@ class Air4ServiceImpl implements Air4Service {
   }
 
   upsertSession(session: ChatSession): void {
+      // G1: Update in-memory cache only, backend is source of truth
       const index = this.sessions.findIndex(s => s.id === session.id);
       if (index !== -1) {
           // Обновляем существующую сессию
@@ -288,7 +302,7 @@ class Air4ServiceImpl implements Air4Service {
           // Добавляем новую сессию
           this.sessions.unshift(session);
       }
-      this.saveSessions();
+      // Note: No localStorage save - backend is source of truth
   }
 
   async createSession(initialTitle: string = 'New Session'): Promise<ChatSession> {
@@ -325,18 +339,20 @@ class Air4ServiceImpl implements Air4Service {
           }]
       };
       this.sessions.unshift(newSession);
-      this.saveSessions();
+      // G1: No localStorage save - backend is source of truth
       return newSession;
   }
 
   deleteSession(id: string) {
+      // G1: Update in-memory cache only, backend handles actual deletion
       this.sessions = this.sessions.filter(s => s.id !== id);
-      this.saveSessions();
+      // Note: No localStorage save - backend is source of truth
   }
 
   deleteAllSessions() {
+      // G1: Update in-memory cache only, backend handles actual deletion
       this.sessions = [];
-      this.saveSessions();
+      // Note: No localStorage save - backend is source of truth
       // Immediately create a fresh one so the UI isn't empty
       this.createSession().catch(err => {
         console.error('[air4Service] Failed to create session after deleteAll:', err);
@@ -350,14 +366,12 @@ class Air4ServiceImpl implements Air4Service {
   duplicateSession(id: string) {
       const original = this.getSession(id);
       if (original) {
-          const newSession = {
-              ...original,
-              id: Date.now().toString(),
-              title: `${original.title} (Copy)`,
-              timestamp: Date.now()
-          };
-          this.sessions.unshift(newSession);
-          this.saveSessions();
+          // G1: Create duplicate via backend, then update cache
+          this.createSession(`${original.title} (Copy)`).then(newSession => {
+              // Note: createSession already adds to this.sessions
+          }).catch(err => {
+              console.error('[air4Service] Failed to duplicate session:', err);
+          });
       }
   }
 
@@ -374,15 +388,12 @@ class Air4ServiceImpl implements Air4Service {
       }
   }
 
-  private saveSessions() {
-      localStorage.setItem(STORAGE_KEY_SESSIONS, JSON.stringify(this.sessions));
-  }
-
   private updateSession(id: string, updates: Partial<ChatSession>) {
+      // G1: Update in-memory cache only, backend is source of truth
       const index = this.sessions.findIndex(s => s.id === id);
       if (index !== -1) {
           this.sessions[index] = { ...this.sessions[index], ...updates };
-          this.saveSessions();
+          // Note: No localStorage save - backend is source of truth
       }
   }
 
@@ -469,7 +480,8 @@ class Air4ServiceImpl implements Air4Service {
   
   resetSystem(): void {
       localStorage.removeItem(STORAGE_KEY_CONFIG);
-      localStorage.removeItem(STORAGE_KEY_SESSIONS);
+      localStorage.removeItem(STORAGE_KEY_SESSIONS); // Legacy, safe to remove
+      localStorage.removeItem(STORAGE_KEY_ACTIVE_SESSION);
       window.location.reload();
   }
 
@@ -762,26 +774,42 @@ class Air4ServiceImpl implements Air4Service {
       }
   }
 
-  async deleteMemory(id: string): Promise<boolean> {
+  async deleteMemoryBy(by: "id" | "tag" | "namespace", value: string, sessionId?: string): Promise<boolean> {
       if (this.isOfflineMode) return false;
       if (this.appState === AppState.PANIC) return false;
+      const sid = (sessionId || '').trim();
+      if (!sid) return false;
       try {
-          const res = await fetch(`${this.apiBaseUrl}/memory/delete`, {
-              method: 'POST',
+          // Phase E: Use DELETE endpoint with by=id|tag|namespace
+          // sessionId is required by backend
+          const res = await fetch(`${this.apiBaseUrl}/memory/delete?session_id=${encodeURIComponent(sid)}`, {
+              method: 'DELETE',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ id })
+              body: JSON.stringify({ by, value })
           });
-          if (!res.ok) return false;
+          if (!res.ok) {
+              if (res.status === 404) return false; // Not found
+              return false;
+          }
           const data = await res.json();
-          return data.ok === true;
+          return data.status === 'ok' && data.deleted > 0;
       } catch (e) {
           console.error("Failed to delete memory", e);
           return false;
       }
   }
 
+  async deleteMemory(id: string, sessionId?: string): Promise<boolean> {
+      return this.deleteMemoryBy("id", id, sessionId);
+  }
+
   private mapMetadataToNamespace(meta: any): MemoryItem['namespace'] {
       if (!meta) return 'facts';
+      // Phase E: Respect backend-provided metadata.namespace as source of truth
+      if (meta.namespace && typeof meta.namespace === 'string' && meta.namespace.trim() !== '') {
+          return meta.namespace as MemoryItem['namespace'];
+      }
+      // Fallback: existing mapping logic for old records without namespace
       if (meta.kind === 'file' || meta.source === 'file' || meta.source_path) return 'docs';
       if (meta.type === 'summary' || meta.source === 'summary') return 'sessions';
       if (meta.kind === 'note') return 'facts';
@@ -876,6 +904,7 @@ class Air4ServiceImpl implements Air4Service {
     const selectedModel = (coreSettings?.activeModel as ModelName) || this.config.activeModel || 'Mistral-7B';
     const currentStyle = this.config.responseStyle || 'normal';
     
+    // G2: Decision will be yielded from backend meta event, but yield initial for UI
     yield { 
         decision: { 
             domain: simulatedDomain, 
@@ -912,62 +941,140 @@ class Air4ServiceImpl implements Air4Service {
     }
 
     try {
-        // 2. Call Real Backend (unified /chat endpoint with strict RAG + profile)
+        // G2: Use real streaming via /chat/stream endpoint
         const settingsPayload = {
             temperature: coreSettings?.temperature,
             response_tone: coreSettings?.responseTone,
             output_density: coreSettings?.outputDensity,
             interface_language: coreSettings?.interfaceLanguage,
-            // передаём в backend и человекочитаемое имя модели, и активную модель
             model: selectedModel,
             active_model: selectedModel
         };
 
-        const res = await fetch(`${this.apiBaseUrl}/chat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                q: lastMessage.content,
-                session_id: sessionId,
-                style: currentStyle,
-                model_override: selectedModel,
-                settings: settingsPayload
-            })
-        });
-
-        if (!res.ok) {
-            throw new Error(`Server responded with status ${res.status}`);
-        }
-
-        const data: any = await res.json();
-        const memoryIds: string[] = Array.isArray(data.memory_ids) ? data.memory_ids : [];
-
-        if (memoryIds.length > 0) {
-             yield { 
-                 context: memoryIds.map(id => ({
-                     id, 
-                     content: `Ref: ${id.substring(0, 8)}...`, 
-                     category: 'fact' as const, 
-                     namespace: 'facts' as const, 
-                     timestamp: Date.now()
-                 }))
-             };
-        }
-
-        const reply = data.reply || "[No response payload]";
-        const chunkSize = 5;
         let fullReply = "";
-        
-        for (let i = 0; i < reply.length; i += chunkSize) {
-            const chunk = reply.slice(i, i + chunkSize);
-            fullReply += chunk;
-            yield { chunk };
-            await new Promise(r => setTimeout(r, 10));
+        let resolvedModel = selectedModel;
+        let streamSuccess = false;
+
+        try {
+            // G2: Direct SSE streaming from /chat/stream
+            const response = await fetch(`${this.apiBaseUrl}/chat/stream`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    q: lastMessage.content,
+                    text: lastMessage.content,
+                    session_id: sessionId,
+                    settings: settingsPayload
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Server responded with status ${response.status}`);
+            }
+
+            if (!response.body) {
+                throw new Error('Response body is null');
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let currentEventType: string | null = null;
+
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    
+                    if (done) {
+                        break;
+                    }
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        const trimmed = line.trim();
+                        if (!trimmed) continue;
+
+                        if (trimmed.startsWith('event: ')) {
+                            currentEventType = trimmed.slice(7).trim();
+                            continue;
+                        }
+
+                        if (trimmed.startsWith('data: ')) {
+                            const jsonStr = trimmed.slice(6);
+                            if (!jsonStr) continue;
+
+                            try {
+                                const event = JSON.parse(jsonStr);
+                                
+                                if (currentEventType === 'error' || event.type === 'error') {
+                                    throw new Error(event.message || 'Unknown error');
+                                }
+                                
+                                if (event.type === 'meta') {
+                                    if (event.model) {
+                                        resolvedModel = event.model;
+                                        yield { decision: { domain: simulatedDomain, model: event.model, confidence: 0.85, reason: 'Streaming from backend' } };
+                                    }
+                                } else if (event.type === 'token' && event.delta) {
+                                    fullReply += event.delta;
+                                    yield { chunk: event.delta };
+                                } else if (event.type === 'done') {
+                                    streamSuccess = true;
+                                    break;
+                                }
+                            } catch (e) {
+                                console.warn('[streamChat] Failed to parse SSE event:', jsonStr, e);
+                            }
+                            
+                            currentEventType = null;
+                        }
+                    }
+
+                    if (streamSuccess) {
+                        break;
+                    }
+                }
+            } finally {
+                reader.releaseLock();
+            }
+
+        } catch (streamError: any) {
+            // Fallback to /chat if streaming fails
+            console.warn('[streamChat] Streaming failed, falling back to /chat:', streamError);
+            
+            const res = await fetch(`${this.apiBaseUrl}/chat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    q: lastMessage.content,
+                    session_id: sessionId,
+                    style: currentStyle,
+                    model_override: selectedModel,
+                    settings: settingsPayload
+                })
+            });
+
+            if (!res.ok) {
+                throw new Error(`Server responded with status ${res.status}`);
+            }
+
+            const data: any = await res.json();
+            fullReply = data.reply || "[No response payload]";
+            
+            // Simulate streaming for fallback
+            const chunkSize = 5;
+            for (let i = 0; i < fullReply.length; i += chunkSize) {
+                const chunk = fullReply.slice(i, i + chunkSize);
+                yield { chunk };
+                await new Promise(r => setTimeout(r, 10));
+            }
         }
 
         // Save complete interaction to local history
-        if (session) {
-            // Re-fetch session to get any state updates
+        if (session && fullReply) {
             const currentSession = this.getSession(sessionId);
             if(currentSession) {
                  const updatedMsgs = [...messages, {
@@ -975,14 +1082,7 @@ class Air4ServiceImpl implements Air4Service {
                     role: 'assistant' as const,
                     content: fullReply,
                     timestamp: Date.now(),
-                    modelUsed: selectedModel,
-                    contextUsed: memoryIds.length > 0 ? [{
-                        id: '1', 
-                        content: 'Context used', 
-                        category: 'fact' as const, 
-                        namespace: 'facts' as const, 
-                        timestamp: 0
-                    }] : undefined
+                    modelUsed: resolvedModel as ModelName,
                 }];
                 this.updateSession(sessionId, { messages: updatedMsgs });
             }
@@ -1068,23 +1168,21 @@ class Air4ServiceImpl implements Air4Service {
               try {
                 const event = JSON.parse(jsonStr);
                 
+                // G2: Handle SSE events from /chat/stream
                 // Если был event: error, обрабатываем как ошибку
-                if (currentEventType === 'error') {
+                if (currentEventType === 'error' || event.type === 'error') {
                   handlers.onError(event.message || 'Unknown error');
                   return;
                 }
                 
-                // Иначе проверяем type в JSON (старый формат)
-                if (event.type === 'token' && event.delta) {
+                // Handle event types
+                if (event.type === 'meta') {
+                  handlers.onMeta?.(event.model || event.resolved_model);
+                } else if (event.type === 'token' && event.delta) {
                   handlers.onToken(event.delta);
                 } else if (event.type === 'done') {
                   handlers.onDone();
                   return;
-                } else if (event.type === 'error') {
-                  handlers.onError(event.message || 'Unknown error');
-                  return;
-                } else if (event.type === 'meta' && event.resolved_model) {
-                  handlers.onMeta?.(event.resolved_model);
                 }
               } catch (e) {
                 console.warn('[chatStream] Failed to parse SSE event:', jsonStr, e);

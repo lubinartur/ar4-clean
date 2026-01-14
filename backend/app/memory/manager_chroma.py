@@ -30,6 +30,48 @@ class ChromaMemoryManager:
         )
         self.collection = self.col  # совместимость с legacy-кодом
 
+    def get_collection(self) -> Any:
+        """
+        Phase E: Get the active Chroma collection instance.
+        Returns the live collection object used for add/search operations.
+        """
+        return self.col
+
+    @staticmethod
+    def _normalize_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Phase E: Normalize metadata to ensure namespace and tag are always present.
+        
+        Namespace derivation (stable, minimal):
+        - source == "facts" -> namespace="facts"
+        - source == "note" -> namespace="notes"
+        - source in ["ingest","file","url"] -> namespace="ingest"
+        - source in ["user","assistant"] -> namespace="chat"
+        - else -> namespace="general"
+        
+        Tag: default to "general" if missing/empty.
+        """
+        normalized = dict(meta)  # Copy to avoid mutating input
+        
+        # Derive namespace from source field
+        source = normalized.get("source", "").lower()
+        if source == "facts":
+            normalized["namespace"] = "facts"
+        elif source == "note":
+            normalized["namespace"] = "notes"
+        elif source in ("ingest", "file", "url"):
+            normalized["namespace"] = "ingest"
+        elif source in ("user", "assistant"):
+            normalized["namespace"] = "chat"
+        else:
+            normalized["namespace"] = "general"
+        
+        # Ensure tag is always present
+        if not normalized.get("tag") or not normalized.get("tag").strip():
+            normalized["tag"] = "general"
+        
+        return normalized
+
     # -------------------------
     # Bulk API для ingest_path(...)
     # -------------------------
@@ -42,6 +84,8 @@ class ChromaMemoryManager:
         for i, meta in enumerate(metas):
             if "session_id" not in meta or not meta.get("session_id"):
                 raise ValueError(f"session_id is required in metadata at index {i} for all memory records")
+            # Phase E: Normalize metadata (add namespace, ensure tag)
+            metas[i] = self._normalize_metadata(meta)
         
         # Write guards: validate all texts
         for i, text in enumerate(texts):
@@ -93,7 +137,13 @@ class ChromaMemoryManager:
             # Use IDs for non-duplicate texts
             final_ids = [ids[i] for i in final_indices]
         
-        self.col.add(ids=final_ids, documents=final_texts, metadatas=final_metas)
+        # Ensure metadata is always a dict (defensive check)
+        final_metas_clean = [m if isinstance(m, dict) else {} for m in final_metas]
+        
+        # Ensure all lists have the same length
+        assert len(final_ids) == len(final_texts) == len(final_metas_clean), "List length mismatch in add_texts"
+        
+        self.col.add(ids=final_ids, documents=final_texts, metadatas=final_metas_clean)
 
     # -------------------------
     # Легаси API (используется фолбэком ingest_path, /chat и т.п.)
@@ -144,13 +194,20 @@ class ChromaMemoryManager:
             cid = f"{ts}-{uuid.uuid4().hex}"
             ids.append(cid)
             docs.append(ch["text"])
-            metas.append({
+            raw_meta = {
                 "user_id": user_id,
                 "session_id": sid,
                 "source": source,
                 "chunk_index": ch["index"],
                 "created_at": ts,
-            })
+            }
+            # Phase E: Normalize metadata (add namespace, ensure tag)
+            normalized_meta = self._normalize_metadata(raw_meta)
+            metas.append(normalized_meta if isinstance(normalized_meta, dict) else {})
+        
+        # Ensure all lists have the same length
+        assert len(ids) == len(docs) == len(metas), "List length mismatch in add_text"
+        
         self.col.add(ids=ids, documents=docs, metadatas=metas)
         return {"ok": True, "added": len(ids)}
 
@@ -174,15 +231,16 @@ class ChromaMemoryManager:
             query_texts=[query],
             n_results=max(k * 2, k),
             where={"session_id": session_id},  # Filter by session_id
-            include=["documents", "metadatas", "distances"],  # убрали 'ids' чтобы Chroma не падал
+            include=["documents", "metadatas", "distances"],
         )
+        ids = (qr.get("ids") or [[]])[0]
         docs = (qr.get("documents") or [[]])[0]
         metas = (qr.get("metadatas") or [[]])[0]
         dists = (qr.get("distances") or [[]])[0]
 
         out: List[Dict[str, Any]] = []
         seen: set[str] = set()
-        for doc, meta, dist in zip(docs, metas, dists):
+        for item_id, doc, meta, dist in zip(ids, docs, metas, dists):
             if not doc:
                 continue
             # Additional safety check: ensure metadata matches session_id
@@ -196,7 +254,13 @@ class ChromaMemoryManager:
             if dedup and key in seen:
                 continue
             seen.add(key)
-            out.append({"text": doc, "metadata": meta_dict, "score": round(sim, 4)})
+            out.append({
+                "id": item_id,
+                "text": doc,
+                "meta": meta_dict,
+                "metadata": meta_dict,
+                "score": round(sim, 4),
+            })
             if len(out) >= k:
                 break
         return {"ok": True, "results": out}

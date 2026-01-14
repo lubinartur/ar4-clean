@@ -716,6 +716,11 @@ class Air4Service {
 
   private mapMetadataToNamespace(meta: any): MemoryItem['namespace'] {
       if (!meta) return 'facts';
+      // Phase E: Respect backend-provided metadata.namespace as source of truth
+      if (meta.namespace && typeof meta.namespace === 'string' && meta.namespace.trim() !== '') {
+          return meta.namespace as MemoryItem['namespace'];
+      }
+      // Fallback: existing mapping logic for old records without namespace
       if (meta.kind === 'file' || meta.source === 'file' || meta.source_path) return 'docs';
       if (meta.type === 'summary' || meta.source === 'summary') return 'sessions';
       if (meta.kind === 'note') return 'facts';

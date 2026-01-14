@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Request, Body, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
 import json
 import time
@@ -454,7 +454,19 @@ async def generate_summary(session_id: str) -> None:
                             continue
                     result_text = "".join(chunks).strip()
         except Exception as e:
-            logger.error(f"[summary] LLM call failed for session {session_id}: {e}")
+            import traceback
+            print("EXC_TYPE:", type(e), "EXC_REPR:", repr(e), flush=True)
+            print("TRACEBACK:\n", traceback.format_exc(), flush=True)
+            raise
+            # G3: Log error
+            logger.error(
+                "[ERROR] summary LLM_call_failed",
+                extra={
+                    "session_id": session_id,
+                    "user": "dev",
+                    "exception": str(e)
+                }
+            )
             return
         
         if not result_text:
@@ -474,6 +486,15 @@ async def generate_summary(session_id: str) -> None:
         
     except Exception as e:
         logger.error(f"[summary] generate_summary failed for session {session_id}: {e}", exc_info=True)
+        # G3: Log error
+        logger.error(
+            "[ERROR] summary generation_failed",
+            extra={
+                "session_id": session_id,
+                "user": "dev",
+                "exception": str(e)
+            }
+        )
 
 
 # --- end helpers ---
@@ -1144,12 +1165,40 @@ async def chat(body: ChatRequest):
                     ):
                         rag_ctx = hits[0]["text"][:1200]
                         rag_ok = True
+                        # G3: Log memory hit
+                        logger.info(
+                            "[MEMORY_HIT]",
+                            extra={
+                                "session_id": sess_id,
+                                "user": "dev",
+                                "count": len(hits),
+                                "namespace": None
+                            }
+                        )
             except httpx.TimeoutException:
                 logger.warning(f"[RAG TIMEOUT] RAG retrieval timed out for query (session_id={sess_id})")
+                # G3: Log error
+                logger.error(
+                    "[ERROR] RAG timeout",
+                    extra={
+                        "session_id": sess_id,
+                        "user": "dev",
+                        "exception": "RAG retrieval timed out"
+                    }
+                )
                 rag_ctx = ""
                 rag_ok = False
             except Exception as e:
                 logger.warning(f"[RAG ERROR] RAG retrieval failed: {e}")
+                # G3: Log error
+                logger.error(
+                    "[ERROR] RAG retrieval_failed",
+                    extra={
+                        "session_id": sess_id,
+                        "user": "dev",
+                        "exception": str(e)
+                    }
+                )
                 rag_ctx = ""
                 rag_ok = False
 
@@ -1195,12 +1244,7 @@ async def chat(body: ChatRequest):
             user_payload = f"CONTEXT:\n{rehydration_ctx}"
 
         if rag_ctx:
-            system_preamble = (
-                system_preamble
-                + " ВНИМАНИЕ: отвечай ТОЛЬКО на основе блока [MEMORY] ниже. "
-                  "Ничего не придумывай. Если пользователь просит точную фразу, "
-                  "верни её дословно из [MEMORY] без изменений."
-            )
+            system_preamble += " ВНИМАНИЕ: отвечай ТОЛЬКО на основе блока [MEMORY] ниже. Ничего не придумывай. Если пользователь просит точную фразу, верни её дословно из [MEMORY] без изменений."
 
         # --- call LLM via Ollama chat ---
         try:
@@ -1253,9 +1297,20 @@ async def chat(body: ChatRequest):
                             )
         except httpx.TimeoutException:
             logger.error(f"[LLM TIMEOUT] LLM call timed out after 60s (session_id={sess_id})")
+            # G3: Log error
+            logger.error(
+                "[ERROR] chat LLM_timeout",
+                extra={
+                    "session_id": sess_id,
+                    "user": "dev",
+                    "exception": "LLM request timed out"
+                }
+            )
             raise HTTPException(status_code=504, detail="LLM request timed out")
         except Exception as e:
-            logger.error(f"[LLM ERROR] LLM call failed: {e}")
+            import traceback
+            print("EXC_TYPE:", type(e), "EXC_REPR:", repr(e), flush=True)
+            print("TRACEBACK:\n", traceback.format_exc(), flush=True)
             raise
 
         # PERSIST: сохраняем user и assistant сообщения
@@ -1307,7 +1362,523 @@ async def chat(body: ChatRequest):
         
         return response
     except Exception as e:
+        # G3: Log error
+        logger.error(
+            "[ERROR] chat handler_failed",
+            extra={
+                "session_id": sess_id if 'sess_id' in locals() else None,
+                "user": "dev",
+                "exception": str(e)
+            }
+        )
         return {"reply": f"echo: {q} (ollama failed: {e})"}
+
+
+@router.post("/chat/stream")
+async def chat_stream(body: ChatRequest):
+    """
+    G2: Streaming version of /chat endpoint.
+    Uses same context building logic (rehydration + RAG) as /chat.
+    Returns SSE events: meta, token, done, error.
+    """
+    from backend.app.chat import ARCH_CORE_PROMPT
+    from typing import AsyncGenerator
+    
+    # G3 fix: Initialize system_preamble at the very beginning to avoid UnboundLocalError
+    system_preamble = ARCH_CORE_PROMPT
+    
+    # Extract and validate query text
+    q = body.get_query_text()
+    if not q:
+        async def error_gen() -> AsyncGenerator[str, None]:
+            error_event = json.dumps({"type": "error", "message": "Query text is required"}, ensure_ascii=False)
+            yield f"event: error\ndata: {error_event}\n\n"
+        return StreamingResponse(
+            error_gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+        )
+    
+    # Extract and validate session_id
+    sess_id = body.get_session_id()
+    from backend.app.main import validate_session_id
+    sess_id = validate_session_id(sess_id)
+    
+    # Extract settings (same as /chat)
+    settings = body.get_settings_dict()
+    tone = str(settings.get("response_tone", "") or "").lower()
+    density = str(settings.get("output_density", "") or "").lower()
+    ui_lang = str(settings.get("interface_language", "") or "").lower()
+    
+    # Model selection (same as /chat)
+    model_name = "mistral"
+    raw_model = str(
+        settings.get("model")
+        or settings.get("active_model")
+        or settings.get("activeModel")
+        or settings.get("active_model_weight")
+        or settings.get("model_name")
+        or settings.get("llm_model")
+        or ""
+    ).strip().lower()
+    if raw_model:
+        normalized = raw_model.replace("-local", "").replace("_local", "")
+        if normalized in ("mistral-7b", "mistral", "mistral_7b"):
+            model_name = "mistral"
+        elif normalized in ("hermes-7b", "hermes", "hermes:7b", "nous-hermes2:7b", "nous-hermes2-mistral-7b"):
+            model_name = "nous-hermes2:7b"
+        elif normalized in ("llama-3.1-8b", "llama3.1-8b", "llama3.1", "llama3", "llama3.1:8b"):
+            model_name = "llama3.1:8b"
+        elif normalized in ("qwen-2.5-14b", "qwen25-14b", "qwen2.5-14b"):
+            model_name = "qwen2.5:14b"
+        elif normalized in ("mixtral-8x7b", "mixtral", "mixtral-8x7b-instruct"):
+            model_name = "mixtral:8x7b"
+        elif normalized in ("deepseek-32b", "deepseek32b", "deepseek-v2:32b", "deepseek-v2.5:32b"):
+            model_name = "deepseek-v2:32b"
+        elif normalized in ("deepseek-14b", "deepseek", "deepseek-r1", "deepseek-r1:8b"):
+            model_name = "deepseek-r1:8b"
+    
+    # system_preamble already initialized at the beginning of the function
+    
+    # Extra parts from tone/density/lang (same as /chat)
+    extra_parts: list[str] = []
+    if tone == "bro":
+        extra_parts.append("Стиль: токсично-доброжелательный брат. Говори честно, прямо, иногда жёстко, но с уважением и поддержкой. Без лишних извинений и подлизывания.")
+    elif tone == "strict":
+        extra_parts.append("Стиль: строгий, деловой, без лишних эмоций и без воды.")
+    elif tone == "neutral":
+        extra_parts.append("Стиль: спокойный, нейтральный, без излишней эмоциональности.")
+    if density == "short":
+        extra_parts.append("Отвечай максимально кратко: 2–4 коротких предложения или список из 3–5 пунктов.")
+    elif density == "deep":
+        extra_parts.append("Отвечай подробно и глубоко: разбирай по шагам, добавляй примеры и выводы, но без воды.")
+    if ui_lang in ("ru", "ru-ru", "russian"):
+        extra_parts.append("Отвечай по-русски.")
+    elif ui_lang in ("en", "en-us", "en-gb", "english"):
+        extra_parts.append("Answer in English.")
+    
+    q_l = q.lower().strip()
+    
+    # Quick responses (same as /chat) - return immediately via SSE
+    # Zodiac date extraction
+    dob_match = re.search(r"(\d{1,2})[./-](\d{1,2})[./-](\d{4})", q)
+    if dob_match and ("дата рождения" in q_l or "родился" in q_l or "родилась" in q_l):
+        try:
+            day = int(dob_match.group(1))
+            month = int(dob_match.group(2))
+            zodiac = _zodiac_from_day_month(day, month)
+            FACTS_PROFILE["zodiac"] = zodiac
+            reply = f"Запомнил. Твой знак зодиака — {zodiac}."
+            try:
+                add_fact(Fact(subject="Arch", predicate="zodiac", object=zodiac, category="other", source_session=sess_id))
+            except Exception:
+                pass
+            try:
+                _append_msg(sess_id, "user", q)
+                _append_msg(sess_id, "assistant", reply)
+            except Exception:
+                pass
+            async def quick_reply_gen() -> AsyncGenerator[str, None]:
+                meta_event = json.dumps({"type": "meta", "session_id": sess_id, "model": model_name}, ensure_ascii=False)
+                yield f"event: meta\ndata: {meta_event}\n\n"
+                # Send reply as single token
+                token_event = json.dumps({"type": "token", "delta": reply}, ensure_ascii=False)
+                yield f"event: token\ndata: {token_event}\n\n"
+                done_event = json.dumps({"type": "done", "finish_reason": "stop"}, ensure_ascii=False)
+                yield f"event: done\ndata: {done_event}\n\n"
+            return StreamingResponse(quick_reply_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+        except Exception:
+            pass
+    
+    # Profile facts extraction
+    prof_reply = extract_profile_facts(q, sess_id)
+    if prof_reply is not None:
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", prof_reply)
+        except Exception:
+            pass
+        async def quick_reply_gen() -> AsyncGenerator[str, None]:
+            meta_event = json.dumps({"type": "meta", "session_id": sess_id, "model": model_name}, ensure_ascii=False)
+            yield f"event: meta\ndata: {meta_event}\n\n"
+            token_event = json.dumps({"type": "token", "delta": prof_reply}, ensure_ascii=False)
+            yield f"event: token\ndata: {token_event}\n\n"
+            done_event = json.dumps({"type": "done", "finish_reason": "stop"}, ensure_ascii=False)
+            yield f"event: done\ndata: {done_event}\n\n"
+        return StreamingResponse(quick_reply_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+    
+    # Hard facts from profile
+    if "знак зодиака" in q_l:
+        zodiac = FACTS_PROFILE.get("zodiac")
+        if zodiac:
+            reply = f"Твой знак зодиака — {zodiac}."
+        else:
+            reply = "У меня нет в профиле данных о твоём знаке зодиака. Могу запомнить, если скажешь."
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
+        except Exception:
+            pass
+        async def quick_reply_gen() -> AsyncGenerator[str, None]:
+            meta_event = json.dumps({"type": "meta", "session_id": sess_id, "model": model_name}, ensure_ascii=False)
+            yield f"event: meta\ndata: {meta_event}\n\n"
+            token_event = json.dumps({"type": "token", "delta": reply}, ensure_ascii=False)
+            yield f"event: token\ndata: {token_event}\n\n"
+            done_event = json.dumps({"type": "done", "finish_reason": "stop"}, ensure_ascii=False)
+            yield f"event: done\ndata: {done_event}\n\n"
+        return StreamingResponse(quick_reply_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+    
+    # Model questions
+    if any(tok in q_l for tok in ["какая модель", "какая у тебя модель", "какая сейчас модель", "активная модель", "что за модель", "что за движок", "какой движок", "какой вес модели", "нейросеть какая", "нейронка какая"]):
+        human_model = settings.get("model") or model_name
+        desc = ""
+        m_low = model_name.lower()
+        if "hermes" in m_low:
+            desc = "Hermes-7B обычно даёт более развернутые и разговорные ответы, в то время как Mistral-7B более сдержанный и лаконичный."
+        elif "llama" in m_low:
+            desc = "LLaMA-3.1-8B хорошо держит контекст и логические цепочки, по сравнению с Mistral-7B чуть свободнее формулирует ответы."
+        elif "qwen" in m_low:
+            desc = "Qwen-2.5-14B силён в фактах и коде, ответы обычно структурированные."
+        elif "mixtral" in m_low:
+            desc = "Mixtral-8x7B даёт более мощный и разнообразный вывод за счёт смеси экспертов."
+        elif "deepseek" in m_low:
+            desc = "DeepSeek часто хорош в рассуждениях и технических темах."
+        reply = f"Сейчас активна модель: {human_model} (Ollama: {model_name})."
+        if desc:
+            reply += " " + desc
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
+        except Exception:
+            pass
+        async def quick_reply_gen() -> AsyncGenerator[str, None]:
+            meta_event = json.dumps({"type": "meta", "session_id": sess_id, "model": model_name}, ensure_ascii=False)
+            yield f"event: meta\ndata: {meta_event}\n\n"
+            token_event = json.dumps({"type": "token", "delta": reply}, ensure_ascii=False)
+            yield f"event: token\ndata: {token_event}\n\n"
+            done_event = json.dumps({"type": "done", "finish_reason": "stop"}, ensure_ascii=False)
+            yield f"event: done\ndata: {done_event}\n\n"
+        return StreamingResponse(quick_reply_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+    
+    # Profile memory questions
+    if any(tok in q_l for tok in ["что ты помнишь обо мне", "что помнишь обо мне", "что ты обо мне помнишь", "что знаешь обо мне", "что ты обо мне знаешь", "что помнишь про меня"]):
+        parts: list[str] = []
+        loc = FACTS_PROFILE.get("location")
+        if loc:
+            parts.append(f"ты живёшь в {loc}")
+        zodiac = FACTS_PROFILE.get("zodiac")
+        if zodiac:
+            parts.append(f"твой знак зодиака — {zodiac}")
+        goals = FACTS_PROFILE.get("goals") or []
+        if isinstance(goals, list) and goals:
+            goals_str = "; ".join(str(g) for g in goals[:3])
+            if len(goals) > 3:
+                goals_str += " и ещё несколько целей"
+            parts.append(f"твои цели: {goals_str}")
+        tfreq = FACTS_PROFILE.get("training_freq")
+        if tfreq:
+            parts.append(f"ты тренируешься {tfreq} раза в неделю")
+        if parts:
+            reply = "Вот что я о тебе помню: " + "; ".join(parts) + "."
+        else:
+            reply = "Честно — в профиле почти нет данных именно о тебе. Расскажи мне о себе: где живёшь, какие цели и режим — я запомню."
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
+        except Exception:
+            pass
+        async def quick_reply_gen() -> AsyncGenerator[str, None]:
+            meta_event = json.dumps({"type": "meta", "session_id": sess_id, "model": model_name}, ensure_ascii=False)
+            yield f"event: meta\ndata: {meta_event}\n\n"
+            token_event = json.dumps({"type": "token", "delta": reply}, ensure_ascii=False)
+            yield f"event: token\ndata: {token_event}\n\n"
+            done_event = json.dumps({"type": "done", "finish_reason": "stop"}, ensure_ascii=False)
+            yield f"event: done\ndata: {done_event}\n\n"
+        return StreamingResponse(quick_reply_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+    
+    # Quick check modes
+    if any(tok in q_l for tok in ["#morning_check", "план на день", "план на сегодня", "что у нас по плану", "что по плану", "утро", "morning"]):
+        work = FACTS_PROFILE.get("work_time", "10:00–19:00")
+        gym = FACTS_PROFILE.get("gym_time", "19:30")
+        reply = f"План:\n— Работа {work}.\n— Зал {gym} (45–60 мин): базовые упражнения.\n— Вечер 20 мин: AIR4 — один микрошаг (экран/фикс), без перфекционизма.\nФинансы: резерва +600€ на неделе."
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
+        except Exception:
+            pass
+        async def quick_reply_gen() -> AsyncGenerator[str, None]:
+            meta_event = json.dumps({"type": "meta", "session_id": sess_id, "model": model_name}, ensure_ascii=False)
+            yield f"event: meta\ndata: {meta_event}\n\n"
+            token_event = json.dumps({"type": "token", "delta": reply}, ensure_ascii=False)
+            yield f"event: token\ndata: {token_event}\n\n"
+            done_event = json.dumps({"type": "done", "finish_reason": "stop"}, ensure_ascii=False)
+            yield f"event: done\ndata: {done_event}\n\n"
+        return StreamingResponse(quick_reply_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+    
+    if any(tok in q_l for tok in ["#evening_check", "итог дня", "вечер", "вечером", "закрыть день"]):
+        reply = "Итог дня:\n— Работа — закрыто, движ есть.\n— Тренировка — ✅ если был в зале.\n— AIR4 — +1 шаг, фиксанул без перфекционизма.\n— В целом — не идеально, но стабильно. Завтра дожмём."
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
+        except Exception:
+            pass
+        async def quick_reply_gen() -> AsyncGenerator[str, None]:
+            meta_event = json.dumps({"type": "meta", "session_id": sess_id, "model": model_name}, ensure_ascii=False)
+            yield f"event: meta\ndata: {meta_event}\n\n"
+            token_event = json.dumps({"type": "token", "delta": reply}, ensure_ascii=False)
+            yield f"event: token\ndata: {token_event}\n\n"
+            done_event = json.dumps({"type": "done", "finish_reason": "stop"}, ensure_ascii=False)
+            yield f"event: done\ndata: {done_event}\n\n"
+        return StreamingResponse(quick_reply_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+    
+    if any(tok in q_l for tok in ["#week_check", "итоги недели", "неделя", "неделю закрыть"]):
+        reply = "Неделя:\n— Финансы: +620€ (по плану).\n— Тренировки: 3 / 3 — стабильно.\n— AIR4: несколько шагов — идёт прогресс.\n— Общий вывод: ровно, без спешки, но в росте.\n— Следующая неделя — добавить 1 новый шаг или идею."
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
+        except Exception:
+            pass
+        async def quick_reply_gen() -> AsyncGenerator[str, None]:
+            meta_event = json.dumps({"type": "meta", "session_id": sess_id, "model": model_name}, ensure_ascii=False)
+            yield f"event: meta\ndata: {meta_event}\n\n"
+            token_event = json.dumps({"type": "token", "delta": reply}, ensure_ascii=False)
+            yield f"event: token\ndata: {token_event}\n\n"
+            done_event = json.dumps({"type": "done", "finish_reason": "stop"}, ensure_ascii=False)
+            yield f"event: done\ndata: {done_event}\n\n"
+        return StreamingResponse(quick_reply_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+    
+    # Small talk
+    if any(tok in q_l for tok in ["привет", "здравствуй", "здравствуйте", "hi", "hello", "hey"]) and len(q_l) <= 40:
+        reply = "Привет. Я на связи, давай разбираться, что нужно сделать."
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
+        except Exception:
+            pass
+        async def quick_reply_gen() -> AsyncGenerator[str, None]:
+            meta_event = json.dumps({"type": "meta", "session_id": sess_id, "model": model_name}, ensure_ascii=False)
+            yield f"event: meta\ndata: {meta_event}\n\n"
+            token_event = json.dumps({"type": "token", "delta": reply}, ensure_ascii=False)
+            yield f"event: token\ndata: {token_event}\n\n"
+            done_event = json.dumps({"type": "done", "finish_reason": "stop"}, ensure_ascii=False)
+            yield f"event: done\ndata: {done_event}\n\n"
+        return StreamingResponse(quick_reply_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+    
+    if any(phrase in q_l for phrase in ["как дела", "как у тебя дела", "как твои дела", "как поживаешь", "как настроение"]) and len(q_l) <= 60:
+        reply = "Нормально, работаю над твоими задачами. Главное — твои дела, давай говорить про них."
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
+        except Exception:
+            pass
+        async def quick_reply_gen() -> AsyncGenerator[str, None]:
+            meta_event = json.dumps({"type": "meta", "session_id": sess_id, "model": model_name}, ensure_ascii=False)
+            yield f"event: meta\ndata: {meta_event}\n\n"
+            token_event = json.dumps({"type": "token", "delta": reply}, ensure_ascii=False)
+            yield f"event: token\ndata: {token_event}\n\n"
+            done_event = json.dumps({"type": "done", "finish_reason": "stop"}, ensure_ascii=False)
+            yield f"event: done\ndata: {done_event}\n\n"
+        return StreamingResponse(quick_reply_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+    
+    if any(phrase in q_l for phrase in ["ок", "окей", "okay", "ладно", "норм", "супер", "круто", "огонь", "топ", "класс", "спасибо"]) and len(q_l) <= 40:
+        reply = "Принял. Двигаемся дальше."
+        try:
+            _append_msg(sess_id, "user", q)
+            _append_msg(sess_id, "assistant", reply)
+        except Exception:
+            pass
+        async def quick_reply_gen() -> AsyncGenerator[str, None]:
+            meta_event = json.dumps({"type": "meta", "session_id": sess_id, "model": model_name}, ensure_ascii=False)
+            yield f"event: meta\ndata: {meta_event}\n\n"
+            token_event = json.dumps({"type": "token", "delta": reply}, ensure_ascii=False)
+            yield f"event: token\ndata: {token_event}\n\n"
+            done_event = json.dumps({"type": "done", "finish_reason": "stop"}, ensure_ascii=False)
+            yield f"event: done\ndata: {done_event}\n\n"
+        return StreamingResponse(quick_reply_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+    
+    # Main streaming logic (same context building as /chat)
+    async def stream_gen() -> AsyncGenerator[str, None]:
+        # G3 fix: Use local variable to avoid UnboundLocalError with += in nested scope
+        from backend.app.chat import ARCH_CORE_PROMPT
+        preamble = ARCH_CORE_PROMPT
+        
+        try:
+            # Log user message
+            try:
+                _append_msg(sess_id, "user", q)
+            except Exception:
+                pass
+            
+            # Send meta event
+            meta_event = json.dumps({"type": "meta", "session_id": sess_id, "model": model_name}, ensure_ascii=False)
+            yield f"event: meta\ndata: {meta_event}\n\n"
+            
+            # RAG context (same as /chat)
+            rag_ctx = ""
+            use_rag = len(q_l) > 40
+            rag_ok = False
+            
+            if use_rag:
+                try:
+                    async with httpx.AsyncClient(timeout=10.0) as c:
+                        r = await c.get(
+                            "http://127.0.0.1:8000/memory/search",
+                            params={"q": q, "session_id": sess_id, "k": 3},
+                        )
+                        js = r.json()
+                        hits = js.get("results", [])
+                        if (
+                            hits
+                            and isinstance(hits[0], dict)
+                            and hits[0].get("text")
+                            and hits[0].get("score") is not None
+                            and hits[0]["score"] >= RAG_SCORE_THRESHOLD
+                        ):
+                            rag_ctx = hits[0]["text"][:1200]
+                            rag_ok = True
+                except Exception as e:
+                    logger.warning(f"[RAG ERROR] RAG retrieval failed: {e}")
+                    rag_ctx = ""
+                    rag_ok = False
+            
+            # Rehydration context (same as /chat)
+            summary = _get_full_summary(sess_id)
+            recent_dialogue = _get_recent_dialogue(sess_id, n_user_turns=12)
+            
+            rehydration_parts = []
+            if summary and summary.get("text"):
+                summary_text = summary.get("text", "")
+                summary_until = summary.get("until_user_turn", 0)
+                rehydration_parts.append("SUMMARY:")
+                rehydration_parts.append(summary_text)
+                rehydration_parts.append(f"SUMMARY_UNTIL_USER_TURN: {summary_until}")
+                rehydration_parts.append("")
+            
+            if recent_dialogue:
+                rehydration_parts.append("RECENT_DIALOGUE:")
+                for msg in recent_dialogue:
+                    role = msg.get("role", "")
+                    content = msg.get("content", "").strip()
+                    if content:
+                        rehydration_parts.append(f"{role}: {content}")
+                rehydration_parts.append("")
+            
+            rehydration_parts.append("CURRENT_INPUT:")
+            rehydration_parts.append(q)
+            rehydration_ctx = "\n".join(rehydration_parts)
+            
+            # User payload (same as /chat)
+            if rag_ctx:
+                user_payload = f"CONTEXT:\n{rehydration_ctx}\n\n[MEMORY]\n{rag_ctx}"
+            else:
+                user_payload = f"CONTEXT:\n{rehydration_ctx}"
+            
+            if rag_ctx:
+                preamble += " ВНИМАНИЕ: отвечай ТОЛЬКО на основе блока [MEMORY] ниже. Ничего не придумывай. Если пользователь просит точную фразу, верни её дословно из [MEMORY] без изменений."
+            
+            # Stream LLM response
+            full_answer = ""
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    async with client.stream(
+                        "POST",
+                        "http://localhost:11434/api/chat",
+                        json={
+                            "model": model_name,
+                            "messages": [
+                                {"role": "system", "content": preamble},
+                                {"role": "user", "content": user_payload},
+                            ],
+                            "stream": True,
+                        },
+                    ) as res:
+                        res.raise_for_status()
+                        async for line in res.aiter_lines():
+                            if not line.strip():
+                                continue
+                            try:
+                                json_line = json.loads(line)
+                                content = json_line.get("message", {}).get("content", "")
+                                if content:
+                                    full_answer += content
+                                    token_event = json.dumps({"type": "token", "delta": content}, ensure_ascii=False)
+                                    yield f"event: token\ndata: {token_event}\n\n"
+                            except Exception:
+                                continue
+            except httpx.TimeoutException:
+                logger.error(f"[LLM TIMEOUT] LLM call timed out after 60s (session_id={sess_id})")
+                import traceback
+                error_event = json.dumps({"type": "error", "message": "SRC=routes_chat.py\nTRACEBACK:\n" + traceback.format_exc()}, ensure_ascii=False)
+                yield f"event: error\ndata: {error_event}\n\n"
+                return
+            except Exception as e:
+                import traceback
+                print("EXC_TYPE:", type(e), "EXC_REPR:", repr(e), flush=True)
+                print("TRACEBACK:\n", traceback.format_exc(), flush=True)
+                raise
+                error_event = json.dumps({"type": "error", "message": "SRC=routes_chat.py\nTRACEBACK:\n" + traceback.format_exc()}, ensure_ascii=False)
+                yield f"event: error\ndata: {error_event}\n\n"
+                return
+            
+            answer = full_answer.strip()
+            
+            # Fallback if empty answer (same as /chat)
+            if not answer:
+                if rag_ctx:
+                    answer = rag_ctx
+                else:
+                    answer = "Я не получил нормальный ответ от модели на этот запрос. Сформулируй мысль ещё раз или чуть подробнее — и попробуем снова."
+                # Send fallback as single token
+                token_event = json.dumps({"type": "token", "delta": answer}, ensure_ascii=False)
+                yield f"event: token\ndata: {token_event}\n\n"
+            
+            # Persist messages (same as /chat)
+            try:
+                _append_msg(sess_id, "assistant", answer)
+            except Exception as e:
+                logger.debug(f"[PERSIST ERROR] {e}")
+            
+            # Memory (same as /chat)
+            try:
+                safe_memory_add(q, sess_id, "user")
+                safe_memory_add(answer, sess_id, "assistant")
+            except Exception as e:
+                logger.debug(f"[memory] skipped: {e}")
+            
+            # Summary pending (same as /chat)
+            summary_pending = False
+            try:
+                user_turn_count = _count_user_turns(sess_id)
+                summary_obj = _get_summary_stub(sess_id)
+                summary_pending = should_update_summary(user_turn_count, summary_obj)
+                if summary_pending:
+                    asyncio.create_task(_run_summary_task(sess_id))
+            except Exception as e:
+                logger.debug(f"[summary] failed to compute summary_pending: {e}")
+            
+            # Send done event
+            done_event = json.dumps({"type": "done", "finish_reason": "stop"}, ensure_ascii=False)
+            yield f"event: done\ndata: {done_event}\n\n"
+            
+        except Exception as e:
+            logger.error(f"[STREAM ERROR] {e}")
+            import traceback
+            error_event = json.dumps({"type": "error", "message": "SRC=routes_chat.py\nTRACEBACK:\n" + traceback.format_exc()}, ensure_ascii=False)
+            yield f"event: error\ndata: {error_event}\n\n"
+    
+    return StreamingResponse(
+        stream_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
 
 
 @router.post("/sessions")
