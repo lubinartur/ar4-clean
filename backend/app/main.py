@@ -601,7 +601,6 @@ def _init_memory() -> str:
         print(f"  Exception type: {type(e).__name__}")
         print(f"  Exception message: {e}")
         print("  Full traceback:")
-        print("  " + "\n  ".join(traceback.format_exc().splitlines()))
         print("=" * 60)
         
         if memory_mode == "strict":
