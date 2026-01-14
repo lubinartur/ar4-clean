@@ -1,6 +1,8 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 import httpx, urllib.parse
+from pydantic import BaseModel, Field
+from typing import Optional
 
 router = APIRouter()
 
@@ -19,12 +21,27 @@ async def fetch_memory(query: str, k: int = 4):
         j = r.json()
         return j.get("results", []) if isinstance(j, dict) else []
 
+class ChatRagRequest(BaseModel):
+    q: Optional[str] = Field(None, description="Query text")
+    msg: Optional[str] = Field(None, description="Query text (alias)")
+
+    def get_query_text(self) -> str:
+        """Extract query text from various possible fields."""
+        for field in [self.q, self.msg]:
+            if field and isinstance(field, str) and field.strip():
+                return field.strip()
+        return ""
+
+
 @router.post("/chat/rag")
-async def chat_rag(request: Request):
-    data = await request.json()
-    q = (data.get("q") or data.get("msg") or "").strip()
+async def chat_rag(body: ChatRagRequest):
+    """
+    @deprecated Not used by GoogleUI. Alternative RAG endpoint.
+    RAG chat endpoint (legacy, use /chat instead).
+    """
+    q = body.get_query_text()
     if not q:
-        return JSONResponse({"reply":"empty"}, status_code=200)
+        raise HTTPException(status_code=400, detail="Query text is required (provide 'q' or 'msg')")
 
     # ---- retrieve via HTTP API to ensure parity with /memory/search ----
     hits = await fetch_memory(q, k=4)

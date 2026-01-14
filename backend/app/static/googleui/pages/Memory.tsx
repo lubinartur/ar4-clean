@@ -1,7 +1,22 @@
 import React, { useState, useEffect } from 'react';
 import { air4 } from '../services/air4Service';
 import { MemoryItem } from '../types';
-import { Search, RefreshCw, Zap, Database, Filter, Hash, Trash2, User } from 'lucide-react';
+import {
+  Search,
+  RefreshCw,
+  Zap,
+  Database,
+  Filter,
+  Hash,
+  Trash2,
+  User,
+  MapPin,
+  Globe,
+  Utensils,
+  Target,
+  Layers,
+  ChevronDown,
+} from 'lucide-react';
 
 interface ProfileData {
   subject: string;
@@ -19,6 +34,14 @@ const Memory: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'all' | 'facts' | 'sessions' | 'docs' | 'profile'>('all');
   const [loading, setLoading] = useState(false);
   const [profile, setProfile] = useState<ProfileData | null>(null);
+  const [profileCategoriesOpen, setProfileCategoriesOpen] = useState<Record<string, boolean>>({
+    location: true,
+    country: true,
+    goals: true,
+    food: true,
+    vehicle: true,
+    other: true,
+  });
 
   const doSearch = async (query: string) => {
     setLoading(true);
@@ -79,9 +102,17 @@ const Memory: React.FC = () => {
     };
   }, [activeTab]);
 
-  const filteredMemories = memories.filter(
-    (m) => activeTab === 'all' || m.namespace === activeTab
-  );
+  const filteredMemories = memories.filter((m) => {
+    if (activeTab === 'all') return true;
+
+    if (activeTab === 'docs') {
+      // Документы: либо явный namespace 'docs', либо любые записи с непустым source
+      const src = (m as any).source || '';
+      return m.namespace === 'docs' || src !== '';
+    }
+
+    return m.namespace === activeTab;
+  });
 
   const tabs: { id: 'all' | 'facts' | 'sessions' | 'docs' | 'profile'; label: string }[] = [
     { id: 'all', label: 'All' },
@@ -103,6 +134,21 @@ const Memory: React.FC = () => {
     );
   };
 
+  // Фильтрация мусорных фактов
+  const filterValidFact = (fact: string): boolean => {
+    const trimmed = fact.trim();
+    if (!trimmed) return false;
+    
+    // Игнорируем факты < 3 символов
+    if (trimmed.length < 3) return false;
+    
+    // Игнорируем одно слово
+    const words = trimmed.split(/\s+/);
+    if (words.length === 1) return false;
+    
+    return true;
+  };
+
   const renderProfileTab = () => {
     if (!hasProfileData(profile)) {
       return (
@@ -122,38 +168,78 @@ const Memory: React.FC = () => {
 
     const p = profile!;
 
-    const section = (title: string, items?: string[], accentClasses?: string) => {
+    const section = (
+      categoryKey: string,
+      title: string,
+      items?: string[],
+      accentClasses?: string,
+      Icon?: React.ComponentType<{ className?: string }>
+    ) => {
       if (!items || items.length === 0) return null;
+      
+      // Фильтруем мусорные факты
+      const validItems = items.filter(filterValidFact);
+      if (validItems.length === 0) return null;
+      
+      // Для категории OTHER: скрываем если < 2 фактов
+      if (categoryKey === 'other' && validItems.length < 2) return null;
+      
+      const isOpen = profileCategoriesOpen[categoryKey] ?? true;
+      
       return (
         <div className="glass-card rounded-2xl p-4 border border-white/10 bg-white/5 flex flex-col gap-2">
-          <div className={`inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest px-2.5 py-1 rounded-full border ${
-            accentClasses || 'bg-purple-500/10 text-purple-300 border-purple-500/30'
-          }`}>
-            <Hash className="w-3 h-3" />
-            {title}
-          </div>
-          <div className="flex flex-wrap gap-1.5 mt-1">
-            {items.map((it) => (
-              <span
-                key={it}
-                className="px-2 py-1 rounded-full bg-black/30 border border-white/10 text-[11px] text-slate-100"
-              >
-                {it}
-              </span>
-            ))}
-          </div>
+          <button
+            onClick={() => setProfileCategoriesOpen(prev => ({ ...prev, [categoryKey]: !isOpen }))}
+            className="flex items-center justify-between w-full"
+          >
+            <div
+              className={`inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest px-2.5 py-1 rounded-full border ${
+                accentClasses || 'bg-purple-500/10 text-purple-300 border-purple-500/30'
+              }`}
+            >
+              {Icon ? (
+                <Icon className="w-3 h-3" />
+              ) : (
+                <Hash className="w-3 h-3" />
+              )}
+              {title}
+            </div>
+            <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+          </button>
+          {isOpen && (
+            <div className="flex flex-wrap gap-1.5 mt-1">
+              {validItems.map((it) => (
+                <span
+                  key={it}
+                  className="px-2 py-1 rounded-full bg-black/30 border border-white/10 text-[11px] text-slate-100"
+                >
+                  {it}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       );
     };
 
+    // Сортировка категорий: location, preferences (country), goals, food, other
+    const categoryOrder = ['location', 'country', 'goals', 'food', 'vehicle', 'other'];
+    const categoryMap: Record<string, React.ReactNode> = {
+      location: section('location', 'Location', p.location, 'bg-sky-500/10 text-sky-300 border-sky-500/30', MapPin),
+      country: section('country', 'Countries', p.country, 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30', Globe),
+      goals: section('goals', 'Goals', p.goals, 'bg-purple-500/15 text-purple-200 border-purple-500/40', Target),
+      food: section('food', 'Food', p.food, 'bg-amber-500/10 text-amber-200 border-amber-500/30', Utensils),
+      vehicle: section('vehicle', 'Vehicles', p.vehicle, 'bg-cyan-500/10 text-cyan-200 border-cyan-500/30', Layers),
+      other: section('other', 'Other', p.other, 'bg-slate-500/10 text-slate-200 border-slate-500/30', Hash),
+    };
+    
+    const sections = categoryOrder
+      .map(key => categoryMap[key])
+      .filter(Boolean);
+
     return (
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 animate-fade-in-up">
-        {section('Location', p.location, 'bg-sky-500/10 text-sky-300 border-sky-500/30')}
-        {section('Countries', p.country, 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30')}
-        {section('Food', p.food, 'bg-amber-500/10 text-amber-200 border-amber-500/30')}
-        {section('Vehicles', p.vehicle, 'bg-cyan-500/10 text-cyan-200 border-cyan-500/30')}
-        {section('Goals', p.goals, 'bg-purple-500/15 text-purple-200 border-purple-500/40')}
-        {section('Other', p.other, 'bg-slate-500/10 text-slate-200 border-slate-500/30')}
+        {sections}
       </div>
     );
   };
@@ -167,10 +253,10 @@ const Memory: React.FC = () => {
             <div className="p-2 rounded-lg bg-air-500/10 text-air-500 border border-air-500/20 shadow-[0_0_15px_rgba(249,115,22,0.1)]">
               <Database className="w-5 h-5" />
             </div>
-            <h2 className="text-2xl font-bold text-white tracking-tight">Memory Bank</h2>
+            <h2 className="text-2xl font-bold text-white tracking-tight">Store</h2>
           </div>
           <p className="text-sm text-slate-400 max-w-lg leading-relaxed ml-1">
-            Semantic vector retrieval system. Explore the core knowledge graph.
+            Documents, notes, and facts.
           </p>
         </div>
 

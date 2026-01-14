@@ -52,16 +52,18 @@ const History: React.FC<HistoryProps> = ({ onSelectSession }) => {
     setEditingId(null);
   };
 
-  const filteredSessions = sessions.filter(s => 
-    s.title.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    s.lastMessage.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const filteredSessions = sessions.filter(s => {
+    const title = (s.title || '').toLowerCase();
+    const lastMsg = (s.lastMessage || '').toLowerCase();
+    const search = searchTerm.toLowerCase();
+    return title.includes(search) || lastMsg.includes(search);
+  });
 
   return (
     <div className="h-full flex flex-col p-8">
       <div className="mb-8">
-        <h2 className="text-2xl font-bold text-white mb-2">Session History</h2>
-        <p className="text-slate-400 text-sm">Full archive of your local interactions.</p>
+        <h2 className="text-2xl font-bold text-white mb-2">Recall</h2>
+        <p className="text-slate-400 text-sm">Return to past context.</p>
       </div>
 
       <div className="relative mb-6">
@@ -111,7 +113,7 @@ const History: React.FC<HistoryProps> = ({ onSelectSession }) => {
                       </div>
                    ) : (
                       <h3 className="font-bold text-slate-200 group-hover:text-air-400 transition-colors truncate">
-                        {session.title || 'Untitled Session'}
+                        {session.title && session.title.trim() ? session.title : 'New Session'}
                       </h3>
                    )}
                 </div>

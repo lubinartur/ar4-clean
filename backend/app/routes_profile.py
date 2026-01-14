@@ -17,10 +17,10 @@ def _path(user_id: str) -> str:
     return os.path.join(STORAGE_DIR, f"{_safe_user_id(user_id)}.json")
 
 class Goal(BaseModel):
-    id: str
-    title: str
-    status: str = "active"
-    progress: float = 0.0
+    id: str = Field(..., description="Goal ID", min_length=1)
+    title: str = Field(..., description="Goal title", min_length=1)
+    status: str = Field(default="active", description="Goal status")
+    progress: float = Field(default=0.0, ge=0.0, le=1.0, description="Goal progress (0.0 to 1.0)")
 
 class UserProfile(BaseModel):
     user_id: str = Field(default="dev")
@@ -48,16 +48,28 @@ def save_profile(profile: UserProfile) -> None:
 
 @router.get("", response_model=UserProfile)
 def get_profile(user_id: str = "dev"):
+    """
+    @deprecated Not used by GoogleUI. Internal endpoint.
+    Get user profile (legacy profile system).
+    """
     return load_profile(user_id)
 
 class ProfilePatch(BaseModel):
-    name: Optional[str] = None
-    preferences: Optional[Dict[str, Any]] = None
-    facts: Optional[Dict[str, Any]] = None
-    goals: Optional[List[Goal]] = None
+    name: Optional[str] = Field(None, description="User name")
+    preferences: Optional[Dict[str, Any]] = Field(None, description="User preferences dict")
+    facts: Optional[Dict[str, Any]] = Field(None, description="User facts dict")
+    goals: Optional[List[Goal]] = Field(None, description="User goals list")
+    
+    class Config:
+        # Allow extra fields but validate types
+        extra = "forbid"
 
 @router.patch("", response_model=UserProfile)
 def patch_profile(patch: ProfilePatch, user_id: str = "dev"):
+    """
+    @deprecated Not used by GoogleUI. Internal endpoint.
+    Update user profile (legacy profile system).
+    """
     prof = load_profile(user_id)
     data = prof.model_dump()
     if patch.name is not None:
@@ -74,5 +86,9 @@ def patch_profile(patch: ProfilePatch, user_id: str = "dev"):
 
 @router.put("", response_model=UserProfile)
 def put_profile(profile: UserProfile):
+    """
+    @deprecated Not used by GoogleUI. Internal endpoint.
+    Replace user profile (legacy profile system).
+    """
     save_profile(profile)
     return profile

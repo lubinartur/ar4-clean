@@ -1,18 +1,23 @@
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useSettings } from "../hooks/useSettings";
 import { air4 } from '../services/air4Service';
 import { Message, MemoryItem, RouterDecision, SystemStats, ResponseStyle } from '../types';
-import { Send, Mic, Paperclip, BrainCircuit, Cpu, Sparkles, Activity, Database, Circle, ChevronDown, Check, Star, Copy, ClipboardCheck } from 'lucide-react';
+import { Send, Mic, Paperclip, BrainCircuit, Cpu, Sparkles, Activity, Database, Circle, ChevronDown, Check, Star, Copy, ClipboardCheck, PinOff } from 'lucide-react';
 
 interface ChatProps {
-    sessionId: string | null;
+    sessionId?: string | null; // Опциональный, Chat.tsx сам управляет sessionId
     initialQuery?: string;
     clearInitialQuery?: () => void;
 }
 
-const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery }) => {
+const STORAGE_KEY_LAST_SESSION = 'air4:lastSessionId';
+
+const Chat: React.FC<ChatProps> = ({ sessionId: propSessionId, initialQuery, clearInitialQuery }) => {
   const { settings } = useSettings();
+  
+  // Единый источник правды для sessionId
+  const [sessionId, setSessionId] = useState<string | null>(null);
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -31,17 +36,174 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const autoBrainstormRef = useRef(false);
 
+  // ---- Noisy memory guard (facts-only) ----
+  const SMALLTALK_RE = /\b(привет|здаров|здравствуйте|hi|hello|hey|спасибо|thx|ok|ок|ага|понял|ясно|норм|нормально|класс|лол|ха-ха|как дела|как ты|как у тебя дела)\b/i;
+
+  const isQuestionLike = (text: string) => {
+    const t = (text || '').trim();
+    if (!t) return false;
+    if (t.includes('?')) return true;
+    return /^(что|как|почему|когда|где|зачем|можно ли|подскажи|расскажи|объясни)\b/i.test(t);
+  };
+
+  const isTooShort = (text: string) => ((text || '').trim().length < 22);
+
+  const isNoisyMemory = (text: string) => {
+    const t = (text || '').trim();
+    if (!t) return true;
+    if (SMALLTALK_RE.test(t)) return true;
+    if (isQuestionLike(t)) return true;
+    if (isTooShort(t)) return true;
+    return false;
+  };
+  // ----------------------------------------
+
+  // Pinned facts should be stored as real facts (so they appear in Memory Bank → FACTS)
+  const PIN_SOURCE = 'rag_pin';
+
+  // Утилита для обновления sessionId в URL с сохранением всех query params
+  const setUrlSessionId = useCallback((id: string) => {
+      console.debug('[URL] before', window.location.href);
+      const url = new URL(window.location.href);
+      url.searchParams.set('session', id);
+      const newUrlString = url.toString();
+      window.history.replaceState({}, '', newUrlString);
+      console.debug('[URL] after', window.location.href);
+  }, []);
+
+  // Инициализация sessionId с приоритетом: prop → URL → localStorage → создание новой
+  useEffect(() => {
+      const initializeSessionId = async () => {
+          // ВАЖНО: сначала загружаем все сессии с сервера
+          console.debug('[Chat.tsx] Initializing: refreshing sessions from API');
+          await air4.refreshSessions();
+          
+          let selectedId: string | null = null;
+          
+          // Приоритет 0: prop
+          if (propSessionId) {
+              selectedId = propSessionId;
+              console.debug('[Chat.tsx] Using propSessionId:', propSessionId);
+          }
+          // Приоритет 1: URL параметр ?session=
+          else {
+              const urlParams = new URLSearchParams(window.location.search);
+              const urlSessionId = urlParams.get('session');
+              if (urlSessionId) {
+                  selectedId = urlSessionId;
+                  console.debug('[Chat.tsx] Found sessionId in URL:', urlSessionId);
+              }
+          }
+          
+          // Приоритет 2: localStorage
+          if (!selectedId) {
+              const storedSessionId = localStorage.getItem(STORAGE_KEY_LAST_SESSION);
+              if (storedSessionId) {
+                  selectedId = storedSessionId;
+                  console.debug('[Chat.tsx] Found sessionId in localStorage:', storedSessionId);
+              }
+          }
+          
+          // Приоритет 3: создание новой сессии
+          if (!selectedId) {
+              console.debug('[Chat.tsx] No sessionId found, creating new session');
+              const newSession = air4.createSession('');
+              selectedId = newSession.id;
+          }
+          
+          // Устанавливаем id и всегда обновляем URL
+          setSessionId(selectedId);
+          console.debug('[Chat.tsx] sessionId set', selectedId);
+          localStorage.setItem(STORAGE_KEY_LAST_SESSION, selectedId);
+          setUrlSessionId(selectedId);
+          console.debug('[Chat.tsx] SessionId initialized:', { 
+              selectedId, 
+              urlUpdated: true,
+              windowLocationHref: window.location.href,
+              windowLocationSearch: window.location.search
+          });
+      };
+      
+      // Инициализируем только если sessionId еще не установлен
+      if (!sessionId) {
+          initializeSessionId();
+      } else if (propSessionId && propSessionId !== sessionId) {
+          // Если propSessionId изменился извне - обновляем
+          console.debug('[Chat.tsx] Updating sessionId from prop:', propSessionId);
+          setSessionId(propSessionId);
+          console.debug('[Chat.tsx] sessionId set', propSessionId);
+          localStorage.setItem(STORAGE_KEY_LAST_SESSION, propSessionId);
+          setUrlSessionId(propSessionId);
+      }
+  }, [propSessionId, sessionId]); // Зависимость от propSessionId и sessionId
+
+  // Защита: сохраняем session param при изменениях URL через popstate
+  useEffect(() => {
+      if (!sessionId) return;
+      
+      const checkAndRestoreSession = () => {
+          const urlParams = new URLSearchParams(window.location.search);
+          const currentSession = urlParams.get('session');
+          
+          // Если session param отсутствует или отличается - восстанавливаем
+          if (currentSession !== sessionId) {
+              console.debug('[Chat.tsx] URL session param missing or changed, restoring', { 
+                  currentSession, 
+                  expectedSession: sessionId,
+                  currentUrl: window.location.href
+              });
+              setUrlSessionId(sessionId);
+          }
+      };
+      
+      // Слушаем изменения URL через popstate (навигация назад/вперед)
+      window.addEventListener('popstate', checkAndRestoreSession);
+      
+      return () => {
+          window.removeEventListener('popstate', checkAndRestoreSession);
+      };
+  }, [sessionId, setUrlSessionId]); // Следим за sessionId и setUrlSessionId
+
   // Load session messages when ID changes
   useEffect(() => {
       if (sessionId) {
-          const session = air4.getSession(sessionId);
-          if (session) {
-              setMessages(session.messages);
-          } else {
-              setMessages([]);
+          console.debug('[Chat.tsx] Loading session:', { sessionId });
+          
+          // Сначала проверяем локальный кэш
+          const localSession = air4.getSession(sessionId);
+          if (localSession && localSession.messages && localSession.messages.length > 0) {
+              console.debug('[Chat.tsx] Using local session cache', { 
+                  messagesCount: localSession.messages.length 
+              });
+              setMessages(localSession.messages);
+              setSavedMessageIds(new Set()); // Reset local saved state on session change
+              return;
           }
+          
+          // Если в кэше нет или нет сообщений - загружаем с сервера
+          console.debug('[Chat.tsx] Loading session from API:', { sessionId });
+          (async () => {
+              const session = await air4.getSessionById(sessionId);
+              if (session) {
+                  console.debug('[Chat.tsx] Session loaded from API', { 
+                      id: session.id,
+                      title: session.title,
+                      messagesCount: session.messages?.length || 0
+                  });
+                  // upsertSession уже вызван внутри getSessionById
+                  setMessages(session.messages || []);
+              } else {
+                  // Session doesn't exist on server - create new
+                  console.debug('[Chat.tsx] Session not found on server, creating new');
+                  const newSession = air4.createSession('');
+                  setSessionId(newSession.id);
+                  localStorage.setItem(STORAGE_KEY_LAST_SESSION, newSession.id);
+                  setUrlSessionId(newSession.id);
+                  setMessages(newSession.messages || []);
+              }
+              setSavedMessageIds(new Set()); // Reset local saved state on session change
+          })();
       }
-      setSavedMessageIds(new Set()); // Reset local saved state on session change
   }, [sessionId]);
 
   // Handle outside click for style menu
@@ -129,9 +291,82 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery 
 
   const handleSaveMemory = async (msg: Message) => {
       if (savedMessageIds.has(msg.id)) return;
-      const success = await air4.addManualMemory(msg.content, 'chat-selection');
+
+      // By default save the message content
+      let textToSave = String(msg.content ?? '').trim();
+
+      // If starring an assistant message, prefer the previous user message like "Запомни: ..." / "Remember: ..."
+      if (msg.role === 'assistant') {
+          const idx = messages.findIndex(m => m.id === msg.id);
+          const prev = idx > 0 ? messages[idx - 1] : null;
+
+          if (prev?.role === 'user') {
+              const raw = String(prev.content ?? '').trim();
+              // Accept variants like: "Запомни:", "\"Запомни: ...\"", "«Повтори и запомни полностью: ...»", "Remember: ..."
+              const rememberRe = /^\s*[«"'”]?\s*(?:повтори\s+и\s+)?(запомни|запомнить|remember)\b[:\s—-]*/i;
+              if (rememberRe.test(raw)) {
+                  const cleaned = raw.replace(rememberRe, '').trim();
+                  if (cleaned) textToSave = cleaned;
+              }
+          }
+      }
+
+      // Facts-only: do not store smalltalk/questions/too-short lines
+      if (isNoisyMemory(textToSave)) {
+          console.warn('[memory] blocked noisy memory:', textToSave);
+          return;
+      }
+
+      console.debug('[Chat.tsx] handleSaveMemory: saving fact', { 
+          sessionId, 
+          messageId: msg.id, 
+          textToSave, 
+          source: PIN_SOURCE 
+      });
+      const success = await air4.addManualMemory(textToSave, PIN_SOURCE);
+      console.debug('[Chat.tsx] handleSaveMemory: result', { success });
       if (success) {
           setSavedMessageIds(prev => new Set(prev).add(msg.id));
+      }
+  };
+
+  // Extract payload from a "remember" style message.
+  const getRememberPayload = (rawText: string) => {
+      const raw = String(rawText ?? '').trim();
+      const rememberRe = /^\s*[«"'”]?\s*(?:повтори\s+и\s+)?(запомни|запомнить|remember)\b[:\s—-]*/i;
+      return rememberRe.test(raw) ? raw.replace(rememberRe, '').trim() : raw;
+  };
+
+  // Save user's own message into memory as a pinned fact (useful when the fact is only in the user text).
+  const handleSaveUserMemory = async (msg: Message) => {
+      if (savedMessageIds.has(msg.id)) return;
+
+      // Сохраняем именно исходный текст user-сообщения
+      let textToSave = String(msg.content ?? '').trim();
+
+      // Нормализуем: если текст начинается с "Запомни:" / "Запомни," - вырезаем префикс и пробелы
+      const rememberPrefixRe = /^\s*(?:запомни|запомнить|remember)[:,]\s*/i;
+      if (rememberPrefixRe.test(textToSave)) {
+          textToSave = textToSave.replace(rememberPrefixRe, '').trim();
+      }
+
+      // Facts-only: do not store smalltalk/questions/too-short lines
+      if (isNoisyMemory(textToSave)) {
+          console.warn('[memory] blocked noisy memory:', textToSave);
+          return;
+      }
+
+      console.debug('[Chat.tsx] handleSaveUserMemory: saving fact', { 
+          sessionId, 
+          messageId: msg.id, 
+          textToSave, 
+          source: PIN_SOURCE 
+      });
+      const success = await air4.addManualMemory(textToSave, PIN_SOURCE);
+      console.debug('[Chat.tsx] handleSaveUserMemory: result', { success });
+      if (success) {
+          setSavedMessageIds(prev => new Set(prev).add(msg.id));
+          console.log('[memory] saved user message as fact:', textToSave);
       }
   };
 
@@ -169,9 +404,28 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery 
     setRouterState(null);
 
     try {
-      const stream = air4.streamChat(newMessages, sessionId, settings);
+  console.log('[CHAT settings]', settings);
+
+  // Собираем coreSettings для бэкенда:
+  // берём стиль/температуру из settings,
+  // а активную модель — напрямую из air4 (там свежий конфиг из localStorage)
+  const coreSettings = {
+    temperature: (settings as any).temperature,
+    responseTone: (settings as any).responseTone,
+    outputDensity: (settings as any).outputDensity,
+    interfaceLanguage: (settings as any).interfaceLanguage,
+    activeModel: air4.getActiveModel(),
+  };
+
+  console.debug('[Chat.tsx] handleSubmit: starting streamChat', { 
+      sessionId, 
+      messagesCount: newMessages.length,
+      lastMessage: newMessages[newMessages.length - 1]?.content?.slice(0, 50)
+  });
+  const stream = air4.streamChat(newMessages, sessionId, coreSettings);
       
-      const botMsgId = (Date.now() + 1).toString();
+  const botMsgId = (Date.now() + 1).toString();
+  // ...
       // Placeholder for bot message — контент появится по мере прихода чанков
       setMessages(prev => [...prev, {
         id: botMsgId,
@@ -185,6 +439,14 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery 
       let decision: RouterDecision | undefined = undefined;
 
       for await (const part of stream) {
+        // Обработка нового sessionId (если сессия была создана)
+        if (part.newSessionId) {
+            console.debug('[Chat.tsx] Received newSessionId from streamChat:', part.newSessionId);
+            setSessionId(part.newSessionId);
+            localStorage.setItem(STORAGE_KEY_LAST_SESSION, part.newSessionId);
+            setUrlSessionId(part.newSessionId);
+        }
+        
         if (part.decision) {
             decision = part.decision;
             setRouterState(decision);
@@ -252,14 +514,19 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery 
     <div className="flex flex-col h-full relative">
             {/* Enhanced System Status Header */}
             {/* Minimal top status bar */}
-      <div className="h-14 flex items-center justify-between px-4 md:px-6 border-b border-white/5 bg-black/30 backdrop-blur-md">
+      <div className="h-16 flex items-center justify-between px-4 md:px-6 border-b border-white/5 bg-black/30 backdrop-blur-md">
         {/* Left: лёгкий лейбл диалога + ID */}
-        <div className="flex items-center gap-2 text-[11px] text-slate-400">
-          <span className="hidden sm:inline text-slate-200 font-medium">
-            Core Dialog
-          </span>
-          <span className="hidden md:inline-block text-[10px] font-mono text-slate-600">
-            ID: {sessionId.slice(-8)}
+        <div className="flex flex-col gap-0.5">
+          <div className="flex items-center gap-2 text-[11px] text-slate-400">
+            <span className="hidden sm:inline text-slate-200 font-medium">
+              Think
+            </span>
+            <span className="hidden md:inline-block text-[10px] font-mono text-slate-600">
+              ID: {sessionId.slice(-8)}
+            </span>
+          </div>
+          <span className="hidden sm:inline text-[10px] text-slate-500">
+            Reasoning and decisions
           </span>
         </div>
 
@@ -434,24 +701,94 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery 
                 {/* AI Actions Footer */}
                 {msg.role === 'assistant' && !isThinking && (
                     <div className="mt-3 pt-2 border-t border-white/5 flex items-center gap-2 opacity-60 hover:opacity-100 transition-opacity">
-                        <button 
-                            onClick={() => handleSaveMemory(msg)}
-                            className={`p-1.5 rounded-lg transition-all ${
-                                savedMessageIds.has(msg.id) 
-                                ? 'bg-air-500/10 text-air-500' 
-                                : 'hover:bg-white/10 text-slate-500 hover:text-air-400'
-                            }`}
-                            title="Send to Memory Bank"
-                        >
-                            <Star className={`w-3.5 h-3.5 ${savedMessageIds.has(msg.id) ? 'fill-air-500' : ''}`} />
-                        </button>
-                        <button 
-                            onClick={() => handleCopy(msg.content, msg.id)}
-                            className="p-1.5 hover:bg-white/10 rounded-lg text-slate-500 hover:text-white transition-colors"
-                            title="Copy to Clipboard"
-                        >
-                            {copiedId === msg.id ? <ClipboardCheck className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
-                        </button>
+                        {(() => {
+                            // Compute candidate and noisy, following handleSaveMemory logic for assistant messages
+                            const idx = messages.findIndex(m => m.id === msg.id);
+                            const prev = idx > 0 ? messages[idx - 1] : null;
+                            let candidate = String(msg.content ?? '').trim();
+                            if (prev?.role === 'user') {
+                                const cleaned = getRememberPayload(String(prev.content ?? '')).trim();
+                                if (cleaned) candidate = cleaned;
+                            }
+                            const noisy = isNoisyMemory(candidate);
+
+                            return (
+                              <>
+                                {noisy && (
+                                    <span
+                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] bg-white/5 text-slate-400 border border-white/10"
+                                        title="Not a fact (short/smalltalk/question)"
+                                    >
+                                        <PinOff className="w-3 h-3" /> Not a fact
+                                    </span>
+                                )}
+                                <button 
+                                    onClick={() => handleSaveMemory(msg)}
+                                    disabled={noisy}
+                                    className={`p-1.5 rounded-lg transition-all ${
+                                        noisy
+                                        ? 'bg-white/5 text-slate-600 cursor-not-allowed'
+                                        : savedMessageIds.has(msg.id)
+                                          ? 'bg-air-500/10 text-air-500'
+                                          : 'hover:bg-white/10 text-slate-500 hover:text-air-400'
+                                    }`}
+                                    title={noisy ? 'Not a fact (short/smalltalk/question)' : 'Send to Memory Bank'}
+                                >
+                                    <Star className={`w-3.5 h-3.5 ${(!noisy && savedMessageIds.has(msg.id)) ? 'fill-air-500' : ''}`} />
+                                </button>
+                                <button 
+                                    onClick={() => handleCopy(msg.content, msg.id)}
+                                    className="p-1.5 hover:bg-white/10 rounded-lg text-slate-500 hover:text-white transition-colors"
+                                    title="Copy to Clipboard"
+                                >
+                                    {copiedId === msg.id ? <ClipboardCheck className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                                </button>
+                              </>
+                            );
+                        })()}
+                    </div>
+                )}
+                {/* User Actions Footer */}
+                {msg.role === 'user' && !isThinking && (
+                    <div className="mt-3 pt-2 border-t border-white/5 flex items-center gap-2 opacity-60 hover:opacity-100 transition-opacity">
+                        {(() => {
+                            const candidate = getRememberPayload(String(msg.content ?? '')).trim();
+                            const noisy = isNoisyMemory(candidate);
+
+                            return (
+                              <>
+                                {noisy && (
+                                    <span
+                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] bg-white/5 text-slate-400 border border-white/10"
+                                        title="Not a fact (short/smalltalk/question)"
+                                    >
+                                        <PinOff className="w-3 h-3" /> Not a fact
+                                    </span>
+                                )}
+                                <button
+                                    onClick={() => handleSaveUserMemory(msg)}
+                                    disabled={noisy}
+                                    className={`p-1.5 rounded-lg transition-all ${
+                                        noisy
+                                        ? 'bg-white/5 text-slate-600 cursor-not-allowed'
+                                        : savedMessageIds.has(msg.id)
+                                          ? 'bg-air-500/10 text-air-500'
+                                          : 'hover:bg-white/10 text-slate-500 hover:text-air-400'
+                                    }`}
+                                    title={noisy ? 'Not a fact (short/smalltalk/question)' : 'Save as fact'}
+                                >
+                                    <Star className={`w-3.5 h-3.5 ${(!noisy && savedMessageIds.has(msg.id)) ? 'fill-air-500' : ''}`} />
+                                </button>
+                                <button
+                                    onClick={() => handleCopy(String(msg.content ?? ''), msg.id)}
+                                    className="p-1.5 hover:bg-white/10 rounded-lg text-slate-500 hover:text-white transition-colors"
+                                    title="Copy to Clipboard"
+                                >
+                                    {copiedId === msg.id ? <ClipboardCheck className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                                </button>
+                              </>
+                            );
+                        })()}
                     </div>
                 )}
             </div>

@@ -5,11 +5,18 @@ import os
 import tempfile
 import time
 from typing import Optional, Any
+import logging
 
-from fastapi import APIRouter, UploadFile, File, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, UploadFile, File, Request, Query, HTTPException
+from pydantic import BaseModel, Field
 
 from backend.app.ingest.readers import ingest_path
+
+logger = logging.getLogger(__name__)
+
+# Runtime guard limits
+MAX_INGEST_BATCH_SIZE = 100  # Max files to process in one batch
+MAX_INGEST_FILE_SIZE_MB = 50  # Max file size in MB
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
@@ -24,16 +31,36 @@ def _get_manager(request: Request) -> Any:
 
 @router.post("/file")
 async def ingest_file(
-    request: Request, file: UploadFile = File(...), tag: Optional[str] = "phase10"
+    request: Request, 
+    file: UploadFile = File(...), 
+    session_id: str = Query(..., description="Session ID (required)", min_length=1),
+    tag: Optional[str] = Query("phase10", description="Tag for the ingested file", min_length=1, max_length=100)
 ):
+    """
+    @deprecated Not used by GoogleUI. Use /ingest/file (routes_ingest) instead.
+    Legacy ingest file endpoint.
+    """
+    # Validate session_id
+    from backend.app.main import validate_session_id
+    session_id = validate_session_id(session_id)
     mgr = _get_manager(request)
     suffix = os.path.splitext(file.filename or "")[1] or ".bin"
     fd, tmp_path = tempfile.mkstemp(suffix=suffix)
     os.close(fd)
 
     try:
+        # Runtime guard: file size limit
+        file_content = await file.read()
+        file_size_mb = len(file_content) / (1024 * 1024)
+        if file_size_mb > MAX_INGEST_FILE_SIZE_MB:
+            logger.warning(f"[INGEST GUARD] File size {file_size_mb:.2f}MB exceeds max {MAX_INGEST_FILE_SIZE_MB}MB")
+            raise HTTPException(
+                status_code=413,
+                detail=f"File size {file_size_mb:.2f}MB exceeds maximum allowed size of {MAX_INGEST_FILE_SIZE_MB}MB"
+            )
+        
         with open(tmp_path, "wb") as f:
-            f.write(await file.read())
+            f.write(file_content)
 
         # формируем базовые метаданные (добавляем filename и source_path)
         base_metadata = {
@@ -43,9 +70,15 @@ async def ingest_file(
             "source": "file",
             "filename": file.filename or os.path.basename(tmp_path),
             "source_path": file.filename or os.path.basename(tmp_path),
+            "session_id": session_id,  # Include session_id in metadata
         }
 
         added = ingest_path(mgr, tmp_path, base_metadata=base_metadata, chunk_size=512, overlap=64)
+        # DEBUG: логируем, сколько чанков реально добавлено
+        try:
+            print("[INGEST FILE] tmp_path=", tmp_path, "tag=", base_metadata.get("tag"), "added=", added)
+        except Exception:
+            pass
         return {"ok": True, "chunks": added, "file": file.filename}
     finally:
         try:
@@ -55,11 +88,23 @@ async def ingest_file(
 
 
 class URLIn(BaseModel):
-    url: str
+    url: str = Field(..., description="URL to ingest", min_length=1, max_length=2048)
 
 
 @router.post("/url")
-async def ingest_url(request: Request, body: URLIn, tag: Optional[str] = "phase10"):
+async def ingest_url(
+    request: Request, 
+    body: URLIn, 
+    session_id: str = Query(..., description="Session ID (required)", min_length=1),
+    tag: Optional[str] = Query("phase10", description="Tag for the ingested URL", min_length=1, max_length=100)
+):
+    """
+    @deprecated Not used by GoogleUI. Internal endpoint.
+    Ingest from URL (legacy).
+    """
+    # Validate session_id
+    from backend.app.main import validate_session_id
+    session_id = validate_session_id(session_id)
     mgr = _get_manager(request)
     # простая заглушка: сохраняем URL как документ
     text = f"URL: {body.url}"
@@ -70,6 +115,7 @@ async def ingest_url(request: Request, body: URLIn, tag: Optional[str] = "phase1
         "source": "url",
         "filename": body.url,
         "source_path": body.url,
+        "session_id": session_id,  # Include session_id in metadata
     }
     _id = f"url::{int(time.time())}"
     if hasattr(mgr, "add_texts"):
@@ -83,9 +129,18 @@ from typing import List, Dict, Any
 from fastapi import Request
 
 @router.post("/process")
-async def ingest_process(request: Request) -> Dict[str, Any]:
-    """Обрабатывает очередь: читает data/ingest/store/queue.json,
-    извлекает текст и кладёт в память (meta.source=имя файла)."""
+async def ingest_process(
+    request: Request,
+    session_id: str = Query(..., description="Session ID (required)", min_length=1)
+) -> Dict[str, Any]:
+    """
+    @deprecated Not used by GoogleUI. Internal endpoint.
+    Обрабатывает очередь: читает data/ingest/store/queue.json,
+    извлекает текст и кладёт в память (meta.source=имя файла).
+    """
+    # Validate session_id
+    from backend.app.main import validate_session_id
+    session_id = validate_session_id(session_id)
     from pathlib import Path
     import json
 
@@ -101,6 +156,11 @@ async def ingest_process(request: Request) -> Dict[str, Any]:
 
     if not isinstance(queue, list):
         return {"ok": False, "error": "queue.json is not a JSON list"}
+
+    # Runtime guard: batch size limit
+    if len(queue) > MAX_INGEST_BATCH_SIZE:
+        logger.warning(f"[INGEST GUARD] Queue size {len(queue)} exceeds max batch size {MAX_INGEST_BATCH_SIZE}, truncating")
+        queue = queue[:MAX_INGEST_BATCH_SIZE]
 
     def extract_text(p: Path) -> str:
         ext = ''.join(p.suffixes).lower() or p.suffix.lower()
@@ -153,7 +213,7 @@ async def ingest_process(request: Request) -> Dict[str, Any]:
             errors.append({"file": fname, "err": "empty text"})
             continue
 
-        meta = {"source": fname, "tag": "ingest"}
+        meta = {"source": fname, "tag": "ingest", "session_id": session_id}
         try:
             if hasattr(mgr, "add_texts"):
                 mgr.add_texts([text], [meta])
@@ -161,9 +221,9 @@ async def ingest_process(request: Request) -> Dict[str, Any]:
                 mgr.collection.add(documents=[text], metadatas=[meta])
             elif hasattr(mgr, "add_text"):
                 try:
-                    mgr.add_text(user_id="dev", text=text, session_id=None, source="ingest")
+                    mgr.add_text(user_id="dev", text=text, session_id=session_id, source="ingest")
                 except TypeError:
-                    mgr.add_text("dev", text, None, "ingest")
+                    mgr.add_text("dev", text, session_id, "ingest")
             else:
                 raise RuntimeError("No supported add method on memory manager")
             processed.append(fname)
@@ -183,21 +243,41 @@ from pathlib import Path as _Path
 import httpx as _httpx
 
 @router.post("/ingest/file")
-async def ingest_file(request: Request, file: UploadFile = File(...), tag: str = Query(default="ui-upload")):
+async def ingest_file(
+    request: Request, 
+    file: UploadFile = File(...), 
+    session_id: str = Query(..., description="Session ID (required)", min_length=1),
+    tag: str = Query(default="ui-upload", description="Tag for the ingested file", min_length=1, max_length=100)
+):
     """
     Save -> commit -> process. Возвращает {"ok":true, digest, stored,...}
+    Used by GoogleUI for file uploads.
     """
+    # Validate session_id
+    from backend.app.main import validate_session_id
+    session_id = validate_session_id(session_id)
     inbox = _Path("data/ingest/inbox")
     inbox.mkdir(parents=True, exist_ok=True)
 
     name = _Path(file.filename).name
     dst = inbox / name
 
+    # Runtime guard: file size limit (streaming check)
+    total_size = 0
     with dst.open("wb") as fh:
         while True:
             chunk = await file.read(1024*1024)
             if not chunk:
                 break
+            total_size += len(chunk)
+            if total_size > MAX_INGEST_FILE_SIZE_MB * 1024 * 1024:
+                fh.close()
+                dst.unlink(missing_ok=True)
+                logger.warning(f"[INGEST GUARD] File size exceeds max {MAX_INGEST_FILE_SIZE_MB}MB during upload")
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File size exceeds maximum allowed size of {MAX_INGEST_FILE_SIZE_MB}MB"
+                )
             fh.write(chunk)
 
     async with _httpx.AsyncClient(timeout=30.0) as c:
@@ -213,6 +293,7 @@ async def ingest_file(request: Request, file: UploadFile = File(...), tag: str =
 @router.get("/recent")
 def ingest_recent(limit: int = 10):
     """
+    @deprecated Not used by GoogleUI. Internal endpoint.
     AIR4: вернуть последние загруженные файлы из inbox.
     Основа для UI-индикатора "последние файлы".
     """

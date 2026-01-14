@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { air4, AVAILABLE_AGENTS } from '../services/air4Service';
 import { Agent } from '../types';
@@ -12,10 +11,14 @@ interface WelcomeProps {
 const Welcome: React.FC<WelcomeProps> = ({ onComplete }) => {
   const [step, setStep] = useState(1);
   const [name, setName] = useState('');
+  const [startMode, setStartMode] = useState<'think' | 'store' | 'recall'>('think');
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [selectedAgents, setSelectedAgents] = useState<Agent[]>(AVAILABLE_AGENTS);
   const [isBooting, setIsBooting] = useState(false);
 
   const toggleAgent = (id: string) => {
+    // Prime Core всегда включен, не переключается
+    if (id === 'general' || id === 'prime' || id === 'core') return;
     setSelectedAgents(prev => 
       prev.map(a => a.id === id ? { ...a, enabled: !a.enabled } : a)
     );
@@ -24,7 +27,14 @@ const Welcome: React.FC<WelcomeProps> = ({ onComplete }) => {
   const handleFinish = () => {
     setIsBooting(true);
     setTimeout(() => {
+        try {
+          localStorage.setItem('air4.startMode', startMode);
+        } catch (e) {
+          // ignore
+        }
         air4.saveConfig(selectedAgents, name);
+        // Очищаем параметр setup из URL чтобы не зациклило
+        window.history.replaceState({}, '', '/');
         onComplete();
     }, 2500);
   };
@@ -79,11 +89,12 @@ const Welcome: React.FC<WelcomeProps> = ({ onComplete }) => {
 
                 <div className="relative z-10">
                     <h1 className="text-4xl font-bold text-white mb-4 leading-tight">
-                        Your External <br/>
-                        <span className="text-transparent bg-clip-text bg-gradient-to-r from-air-400 to-amber-200">Local Mind.</span>
+                        Your <span className="text-transparent bg-clip-text bg-gradient-to-r from-air-400 to-amber-200">External Brain</span>
+                        <br/>
+                        — Local & Private.
                     </h1>
                     <p className="text-slate-400 text-sm leading-relaxed max-w-xs">
-                        Private, offline-first intelligence that remembers your context and helps you analyze complex data securely.
+                        Think. Store. Recall. AIR4 keeps your context on-device so you can continue decisions without loss.
                     </p>
                 </div>
 
@@ -107,8 +118,8 @@ const Welcome: React.FC<WelcomeProps> = ({ onComplete }) => {
                {step === 1 && (
                    <div className="space-y-8 animate-in slide-in-from-right-8 duration-500">
                        <div>
-                           <h2 className="text-2xl font-bold text-white mb-2">Welcome, Operator.</h2>
-                           <p className="text-slate-400">How should the system address you?</p>
+                           <h2 className="text-2xl font-bold text-white mb-2">Welcome.</h2>
+                           <p className="text-slate-400">How should AIR4 address you?</p>
                        </div>
 
                        <div className="space-y-6">
@@ -135,53 +146,142 @@ const Welcome: React.FC<WelcomeProps> = ({ onComplete }) => {
                )}
 
                {step === 2 && (
-                   <div className="h-full flex flex-col animate-in slide-in-from-right-8 duration-500">
-                       <div className="mb-6">
-                           <h2 className="text-2xl font-bold text-white mb-2">Select Modules</h2>
-                           <p className="text-slate-400 text-sm">Enable specialized agents for your workflow.</p>
-                       </div>
+    <div className="h-full flex flex-col animate-in slide-in-from-right-8 duration-500">
+      <div className="mb-6">
+        <h2 className="text-2xl font-bold text-white mb-2">Optional focus areas</h2>
+        <p className="text-slate-400 text-sm">Enable specialized helpers now — you can change this later in Settings.</p>
+      </div>
 
-                       <div className="flex-1 overflow-y-auto custom-scrollbar -mr-4 pr-4 space-y-3 pb-6">
-                           {selectedAgents.map(agent => (
-                               <div 
-                                    key={agent.id}
-                                    onClick={() => toggleAgent(agent.id)}
-                                    className={`p-4 rounded-2xl border cursor-pointer transition-all flex items-center gap-4 group ${
-                                        agent.enabled 
-                                        ? 'bg-air-500/10 border-air-500/30 shadow-[0_0_20px_rgba(249,115,22,0.05)]' 
-                                        : 'bg-white/5 border-white/5 hover:bg-white/10 hover:border-white/10'
-                                    }`}
-                               >
-                                   <div className={`p-3 rounded-xl transition-colors ${agent.enabled ? 'bg-air-500 text-white shadow-lg shadow-air-500/30' : 'bg-slate-800 text-slate-500'}`}>
-                                       {renderIcon(agent.icon)}
-                                   </div>
-                                   <div className="flex-1">
-                                       <h4 className={`font-semibold transition-colors ${agent.enabled ? 'text-white' : 'text-slate-400'}`}>{agent.name}</h4>
-                                       <p className="text-xs text-slate-500">{agent.description}</p>
-                                   </div>
-                                   <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${agent.enabled ? 'border-air-500 bg-air-500' : 'border-slate-700'}`}>
-                                       {agent.enabled && <Check className="w-3 h-3 text-white" />}
-                                   </div>
-                               </div>
-                           ))}
-                       </div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-6">
+        <button
+          type="button"
+          onClick={() => setStartMode('think')}
+          className={`p-4 rounded-2xl border transition-all text-left group ${
+            startMode === 'think'
+              ? 'bg-air-500/10 border-air-500/30 shadow-[0_0_20px_rgba(249,115,22,0.05)]'
+              : 'bg-white/5 border-white/5 hover:bg-white/10 hover:border-white/10'
+          }`}
+        >
+          <div className="flex items-center gap-3">
+            <div className={`p-3 rounded-xl transition-colors ${startMode === 'think' ? 'bg-air-500 text-white shadow-lg shadow-air-500/30' : 'bg-slate-800 text-slate-500'}`}>
+              <Sparkles className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="font-semibold text-white">Think</div>
+              <div className="text-xs text-slate-500">Continue reasoning and decisions.</div>
+            </div>
+          </div>
+        </button>
 
-                       <div className="pt-4 flex gap-3 mt-auto">
-                           <button 
-                                onClick={() => setStep(1)}
-                                className="px-6 py-4 rounded-2xl text-slate-400 hover:text-white hover:bg-white/5 transition-colors font-medium border border-transparent hover:border-white/10"
-                           >
-                               Back
-                           </button>
-                           <button 
-                                onClick={() => setStep(3)}
-                                className="flex-1 py-4 bg-white text-black hover:bg-slate-200 font-bold rounded-2xl transition-all shadow-lg flex items-center justify-center gap-2"
-                           >
-                               Finalize Setup
-                           </button>
-                       </div>
-                   </div>
-               )}
+        <button
+          type="button"
+          onClick={() => setStartMode('store')}
+          className={`p-4 rounded-2xl border transition-all text-left group ${
+            startMode === 'store'
+              ? 'bg-air-500/10 border-air-500/30 shadow-[0_0_20px_rgba(249,115,22,0.05)]'
+              : 'bg-white/5 border-white/5 hover:bg-white/10 hover:border-white/10'
+          }`}
+        >
+          <div className="flex items-center gap-3">
+            <div className={`p-3 rounded-xl transition-colors ${startMode === 'store' ? 'bg-air-500 text-white shadow-lg shadow-air-500/30' : 'bg-slate-800 text-slate-500'}`}>
+              <Cpu className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="font-semibold text-white">Store</div>
+              <div className="text-xs text-slate-500">Add documents and notes to memory.</div>
+            </div>
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setStartMode('recall')}
+          className={`p-4 rounded-2xl border transition-all text-left group ${
+            startMode === 'recall'
+              ? 'bg-air-500/10 border-air-500/30 shadow-[0_0_20px_rgba(249,115,22,0.05)]'
+              : 'bg-white/5 border-white/5 hover:bg-white/10 hover:border-white/10'
+          }`}
+        >
+          <div className="flex items-center gap-3">
+            <div className={`p-3 rounded-xl transition-colors ${startMode === 'recall' ? 'bg-air-500 text-white shadow-lg shadow-air-500/30' : 'bg-slate-800 text-slate-500'}`}>
+              <Activity className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="font-semibold text-white">Recall</div>
+              <div className="text-xs text-slate-500">Return to past context and continue.</div>
+            </div>
+          </div>
+        </button>
+      </div>
+
+      <div className="mb-4 flex items-center justify-between">
+        <button
+          type="button"
+          onClick={() => setShowAdvanced(v => !v)}
+          className="text-xs font-semibold text-slate-400 hover:text-white transition-colors"
+        >
+          {showAdvanced ? 'Hide advanced modules' : 'Show advanced modules'}
+        </button>
+        <div className="text-[11px] text-slate-600">Optional</div>
+      </div>
+
+      {showAdvanced && (
+        <div className="flex-1 overflow-y-auto custom-scrollbar -mr-4 pr-4 space-y-3 pb-6">
+          {selectedAgents.map(agent => {
+            const isPrimeCore = agent.id === 'general' || agent.name === 'Prime Core';
+            return (
+              <div
+                key={agent.id}
+                onClick={() => !isPrimeCore && toggleAgent(agent.id)}
+                className={`p-4 rounded-2xl border transition-all flex items-center gap-4 group ${
+                  isPrimeCore
+                    ? 'bg-air-500/10 border-air-500/30 shadow-[0_0_20px_rgba(249,115,22,0.05)]'
+                    : agent.enabled
+                    ? 'bg-air-500/10 border-air-500/30 shadow-[0_0_20px_rgba(249,115,22,0.05)] cursor-pointer hover:bg-white/10 hover:border-white/10'
+                    : 'bg-white/5 border-white/5 cursor-pointer hover:bg-white/10 hover:border-white/10'
+                }`}
+              >
+                <div className={`p-3 rounded-xl transition-colors ${agent.enabled ? 'bg-air-500 text-white shadow-lg shadow-air-500/30' : 'bg-slate-800 text-slate-500'}`}>
+                  {renderIcon(agent.icon)}
+                </div>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <h4 className={`font-semibold transition-colors ${agent.enabled ? 'text-white' : 'text-slate-400'}`}>{agent.name}</h4>
+                    {isPrimeCore && (
+                      <span className="text-[10px] font-semibold text-air-400 uppercase tracking-wider px-2 py-0.5 bg-air-500/10 rounded-full border border-air-500/20">
+                        Core • Always on
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-500">{agent.description}</p>
+                </div>
+                {!isPrimeCore && (
+                  <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${agent.enabled ? 'border-air-500 bg-air-500' : 'border-slate-700'}`}>
+                    {agent.enabled && <Check className="w-3 h-3 text-white" />}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="pt-4 flex gap-3 mt-auto">
+        <button
+          onClick={() => setStep(1)}
+          className="px-6 py-4 rounded-2xl text-slate-400 hover:text-white hover:bg-white/5 transition-colors font-medium border border-transparent hover:border-white/10"
+        >
+          Back
+        </button>
+        <button
+          onClick={() => setStep(3)}
+          className="flex-1 py-4 bg-air-600 hover:bg-air-500 text-white font-bold rounded-2xl transition-all shadow-lg shadow-air-600/20 flex items-center justify-center gap-2"
+        >
+          Continue
+        </button>
+      </div>
+    </div>
+  )}
 
                {step === 3 && (
                    <div className="flex-1 flex flex-col justify-center items-center text-center animate-in slide-in-from-right-8 duration-500">
@@ -190,16 +290,19 @@ const Welcome: React.FC<WelcomeProps> = ({ onComplete }) => {
                            <Logo className="w-10 h-10 text-air-500 relative z-10" />
                        </div>
                        
-                       <h2 className="text-3xl font-bold text-white mb-3">You're All Set!</h2>
-                       <p className="text-slate-400 max-w-sm mb-10 leading-relaxed">
-                           AIr4 is ready to run locally. Your data is encrypted and stored on this device.
+                       <h2 className="text-3xl font-bold text-white mb-3">Ready to begin</h2>
+                       <p className="text-slate-400 max-w-sm mb-6 leading-relaxed">
+                           AIR4 is ready to run locally. Your context stays on this device.
                        </p>
+                       <div className="text-xs text-slate-500 mb-10">
+                           Start with: <span className="text-white font-semibold">{startMode === 'think' ? 'Think' : startMode === 'store' ? 'Store' : 'Recall'}</span>
+                       </div>
 
                        <button 
                             onClick={handleFinish}
                             className="w-full max-w-sm py-4 bg-gradient-to-r from-air-600 to-amber-600 hover:from-air-500 hover:to-amber-500 text-white font-bold rounded-2xl shadow-xl shadow-air-600/20 transition-all transform hover:scale-[1.02]"
                        >
-                           Launch Interface
+                           Launch AIR4
                        </button>
                    </div>
                )}

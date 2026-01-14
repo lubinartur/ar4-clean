@@ -113,6 +113,9 @@ def ingest_path(
         md["chunk"] = i
         md["chunk_index"] = i
         md["title"] = title
+        # Ensure session_id is in metadata
+        if "session_id" not in md or not md.get("session_id"):
+            raise ValueError("session_id is required in base_metadata for ingest_path")
         docs.append(ch)
         metas.append(md)
 
@@ -126,12 +129,16 @@ def ingest_path(
 
     if hasattr(manager, "add_text"):
         user_id = getattr(manager, "default_user_id", "dev")
+        # Extract session_id from base_metadata (required)
+        session_id = base_metadata.get("session_id")
+        if not session_id:
+            raise ValueError("session_id is required in base_metadata for ingest_path")
         for ch in docs:
             try:
-                manager.add_text(user_id=user_id, text=ch, session_id=None, source=base_metadata.get("kind", "file"))
+                manager.add_text(user_id=user_id, text=ch, session_id=session_id, source=base_metadata.get("kind", "file"))
             except TypeError:
                 try:
-                    manager.add_text(user_id, ch, None, base_metadata.get("kind", "file"))
+                    manager.add_text(user_id, ch, session_id, base_metadata.get("kind", "file"))
                 except Exception:
                     pass
         return len(chunks)

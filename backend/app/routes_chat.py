@@ -9,8 +9,14 @@ from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
 import logging
 import uuid
+from datetime import datetime
+import os
+import asyncio
 
 logger = logging.getLogger(__name__)
+
+# Debug flag for rehydration diagnostics
+DEBUG_REHYDRATION = os.getenv("DEBUG_REHYDRATION", "0") == "1"
 
 from backend.app.memory.facts import Fact, add_fact
 import importlib
@@ -98,6 +104,11 @@ SESS_DIR.mkdir(parents=True, exist_ok=True)
 INDEX_PATH = SESS_DIR / "index.json"
 
 
+def _now_iso() -> str:
+    """Return current timestamp as ISO8601 string with timezone."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
 def _bump_session(session_id: str, title: str | None = None, role: str | None = None):
     try:
         idx = json.loads(INDEX_PATH.read_text(encoding="utf-8")) if INDEX_PATH.exists() else {}
@@ -110,6 +121,7 @@ def _bump_session(session_id: str, title: str | None = None, role: str | None = 
         "created_at": now,
         "updated_at": now,
         "turns": 0,
+        "summary": None,
     }
     if title:
         # обновляем заголовок только если он ещё дефолтный
@@ -118,6 +130,9 @@ def _bump_session(session_id: str, title: str | None = None, role: str | None = 
     rec["updated_at"] = now
     if role == "user":
         rec["turns"] = int(rec.get("turns", 0)) + 1
+    # Миграция: если нет поля summary, добавляем null
+    if "summary" not in rec:
+        rec["summary"] = None
     idx[session_id] = rec
     INDEX_PATH.write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
 
@@ -140,6 +155,325 @@ def _append_msg(session_id: str, role: str, content: str):
     )
     with f.open("a", encoding="utf-8") as fh:
         fh.write(line + "\n")
+
+
+def append_summary_event(session_id: str, summary_obj: Dict[str, Any]):
+    """
+    Append summary event to jsonl and update summary stub in index.json.
+    
+    Args:
+        session_id: Session ID
+        summary_obj: Summary object with fields: v, updated_at (ISO8601 string), until_user_turn, text, topics
+    """
+    if not session_id:
+        return
+    
+    # Normalize updated_at to ISO8601 string
+    updated_at = summary_obj.get("updated_at")
+    if not updated_at or not isinstance(updated_at, str):
+        updated_at = _now_iso()
+    
+    # Prepare summary event for jsonl
+    summary_event = {
+        "type": "summary",
+        "v": summary_obj.get("v", 1),
+        "updated_at": updated_at,
+        "until_user_turn": summary_obj.get("until_user_turn", 0),
+        "text": summary_obj.get("text", ""),
+        "topics": summary_obj.get("topics", [])
+    }
+    
+    # Append to jsonl
+    f = SESS_DIR / f"{session_id}.jsonl"
+    line = json.dumps(summary_event, ensure_ascii=False)
+    with f.open("a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+    
+    # Update summary stub in index.json
+    try:
+        idx = json.loads(INDEX_PATH.read_text(encoding="utf-8")) if INDEX_PATH.exists() else {}
+    except Exception:
+        idx = {}
+    
+    if session_id not in idx:
+        # Session doesn't exist in index, skip
+        return
+    
+    rec = idx[session_id]
+    rec["summary"] = {
+        "v": summary_event["v"],
+        "updated_at": summary_event["updated_at"],
+        "until_user_turn": summary_event["until_user_turn"]
+    }
+    idx[session_id] = rec
+    INDEX_PATH.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _get_summary_stub(session_id: str) -> Optional[Dict[str, Any]]:
+    """Get summary stub from index.json for a session."""
+    try:
+        idx = json.loads(INDEX_PATH.read_text(encoding="utf-8")) if INDEX_PATH.exists() else {}
+    except Exception:
+        return None
+    meta = idx.get(session_id)
+    if not meta:
+        return None
+    return meta.get("summary")
+
+
+def _count_user_turns(session_id: str) -> int:
+    """Count user messages (turns) from jsonl file.
+    
+    Counts only lines with role=="user", explicitly skips summary events (type=="summary").
+    Result should match: jq -s '[.[] | select(.role=="user")] | length'
+    """
+    f = SESS_DIR / f"{session_id}.jsonl"
+    if not f.exists():
+        return 0
+    count = 0
+    try:
+        with f.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg_data = json.loads(line)
+                    if not isinstance(msg_data, dict):
+                        continue
+                    # Explicitly skip summary events
+                    if msg_data.get("type") == "summary":
+                        continue
+                    # Count only user messages
+                    if msg_data.get("role") == "user":
+                        count += 1
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return count
+
+
+def should_update_summary(user_turn_count: int, summary_obj: Optional[Dict[str, Any]]) -> bool:
+    """
+    Determine if summary should be updated.
+    
+    Rules:
+    - N_START = 8: minimum turns before first summary
+    - N_DELTA = 6: minimum turns since last summary
+    
+    Args:
+        user_turn_count: Current number of user messages (turns)
+        summary_obj: Summary stub from index.json (None if no summary exists)
+    
+    Returns:
+        True if summary should be updated, False otherwise
+    """
+    N_START = 8
+    N_DELTA = 6
+    
+    if summary_obj is None:
+        return user_turn_count >= N_START
+    
+    until = summary_obj.get("until_user_turn", 0)
+    return (user_turn_count - until) >= N_DELTA
+
+
+def _get_full_summary(session_id: str) -> Optional[Dict[str, Any]]:
+    """Get full summary from jsonl file (last summary event)."""
+    f = SESS_DIR / f"{session_id}.jsonl"
+    if not f.exists():
+        return None
+    summary = None
+    try:
+        with f.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg_data = json.loads(line)
+                    if isinstance(msg_data, dict) and msg_data.get("type") == "summary":
+                        summary = msg_data
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return summary
+
+
+def _get_recent_dialogue(session_id: str, n_user_turns: int = 12) -> List[Dict[str, str]]:
+    """
+    Get recent dialogue: last N user turns + their assistant replies.
+    Returns list of {"role": "user"/"assistant", "content": "..."} in chronological order.
+    """
+    f = SESS_DIR / f"{session_id}.jsonl"
+    if not f.exists():
+        return []
+    
+    # Read all messages (excluding summary events)
+    messages = []
+    try:
+        with f.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg_data = json.loads(line)
+                    # Skip summary events
+                    if isinstance(msg_data, dict) and msg_data.get("type") == "summary":
+                        continue
+                    # Only include user/assistant messages
+                    if isinstance(msg_data, dict) and msg_data.get("role") in ("user", "assistant"):
+                        content = msg_data.get("content") or msg_data.get("text") or msg_data.get("message") or ""
+                        if content:
+                            messages.append({
+                                "role": msg_data.get("role"),
+                                "content": str(content)
+                            })
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    
+    # Find indices of last N user messages (going backwards from end)
+    user_indices = []
+    for j in range(len(messages) - 1, -1, -1):
+        if messages[j]["role"] == "user":
+            user_indices.append(j)
+            if len(user_indices) >= n_user_turns:
+                break
+    
+    # Sort user_indices to get chronological order
+    user_indices.sort()
+    
+    # Collect these user messages and their assistant replies (if exist)
+    result = []
+    for user_idx in user_indices:
+        result.append(messages[user_idx])  # user message
+        # Check if there's an assistant reply right after (next message in chronological order)
+        if user_idx + 1 < len(messages) and messages[user_idx + 1]["role"] == "assistant":
+            result.append(messages[user_idx + 1])  # assistant reply
+    
+    return result
+
+
+async def _run_summary_task(session_id: str) -> None:
+    """
+    Wrapper task for generate_summary that catches exceptions to avoid
+    "Task exception was never retrieved" warnings.
+    """
+    try:
+        await generate_summary(session_id)
+    except Exception as e:
+        logger.exception(f"[summary] background task failed for session {session_id}: {e}")
+
+
+async def generate_summary(session_id: str) -> None:
+    """
+    Generate summary for session and write it via append_summary_event.
+    
+    Steps:
+    1. Get current user_turn_count
+    2. Get previous full summary if exists
+    3. Get recent dialogue (last N_RECENT_USER_TURNS user turns + assistant replies)
+    4. Call LLM with prompt
+    5. Write summary via append_summary_event
+    """
+    N_RECENT_USER_TURNS = 12
+    
+    try:
+        # Get current user_turn_count
+        user_turn_count = _count_user_turns(session_id)
+        if user_turn_count == 0:
+            logger.warning(f"[summary] no user turns for session {session_id}")
+            return
+        
+        # Get previous full summary
+        prev_summary = _get_full_summary(session_id)
+        prev_summary_text = ""
+        if prev_summary:
+            prev_summary_text = prev_summary.get("text", "")
+        
+        # Get recent dialogue
+        recent_dialogue = _get_recent_dialogue(session_id, N_RECENT_USER_TURNS)
+        if not recent_dialogue:
+            logger.warning(f"[summary] no recent dialogue for session {session_id}")
+            return
+        
+        # Format dialogue for prompt
+        dialogue_lines = []
+        for msg in recent_dialogue:
+            role = msg.get("role", "")
+            content = msg.get("content", "").strip()
+            if content:
+                dialogue_lines.append(f"{role}: {content}")
+        dialogue_text = "\n".join(dialogue_lines)
+        
+        # Build prompt
+        system_prompt = (
+            "Ты — ассистент, который делает краткий конспект диалога для \"второго мозга\".\n"
+            "Правила: кратко, по делу, без домыслов, максимум 12 строк.\n"
+            "Включи: ключевые цели/решения, текущий статус, открытые вопросы/следующие шаги.\n"
+            "Если информации нет — не добавляй."
+        )
+        
+        user_prompt = "PREV_SUMMARY:\n"
+        if prev_summary_text:
+            user_prompt += prev_summary_text
+        else:
+            user_prompt += "(нет предыдущего конспекта)"
+        
+        user_prompt += "\n\nRECENT_DIALOGUE:\n" + dialogue_text + "\n\nСделай обновлённый конспект, который покрывает всё до текущего момента."
+        
+        # Call LLM (using same approach as /chat endpoint)
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream(
+                    "POST",
+                    "http://localhost:11434/api/chat",
+                    json={
+                        "model": "mistral",  # Default model, same as /chat
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                    },
+                ) as res:
+                    chunks = []
+                    async for line in res.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            json_line = json.loads(line)
+                            content = json_line.get("message", {}).get("content", "")
+                            if content:
+                                chunks.append(content)
+                        except Exception:
+                            continue
+                    result_text = "".join(chunks).strip()
+        except Exception as e:
+            logger.error(f"[summary] LLM call failed for session {session_id}: {e}")
+            return
+        
+        if not result_text:
+            logger.warning(f"[summary] empty LLM response for session {session_id}")
+            return
+        
+        # Write summary via append_summary_event
+        summary_obj = {
+            "v": 1,
+            "updated_at": _now_iso(),
+            "until_user_turn": user_turn_count,
+            "text": result_text,
+            "topics": []
+        }
+        append_summary_event(session_id, summary_obj)
+        logger.info(f"[summary] generated summary for session {session_id}, until_user_turn={user_turn_count}")
+        
+    except Exception as e:
+        logger.error(f"[summary] generate_summary failed for session {session_id}: {e}", exc_info=True)
 
 
 # --- end helpers ---
@@ -819,12 +1153,46 @@ async def chat(body: ChatRequest):
                 rag_ctx = ""
                 rag_ok = False
 
+        # --- D4: Rehydration context (summary + recent dialogue) ---
+        summary = _get_full_summary(sess_id)
+        recent_dialogue = _get_recent_dialogue(sess_id, n_user_turns=12)
+        
+        # Build rehydration context
+        rehydration_parts = []
+        
+        if summary and summary.get("text"):
+            summary_text = summary.get("text", "")
+            summary_until = summary.get("until_user_turn", 0)
+            rehydration_parts.append("SUMMARY:")
+            rehydration_parts.append(summary_text)
+            rehydration_parts.append(f"SUMMARY_UNTIL_USER_TURN: {summary_until}")
+            rehydration_parts.append("")
+        
+        if recent_dialogue:
+            rehydration_parts.append("RECENT_DIALOGUE:")
+            for msg in recent_dialogue:
+                role = msg.get("role", "")
+                content = msg.get("content", "").strip()
+                if content:
+                    rehydration_parts.append(f"{role}: {content}")
+            rehydration_parts.append("")
+        
+        rehydration_parts.append("CURRENT_INPUT:")
+        rehydration_parts.append(q)
+        
+        rehydration_ctx = "\n".join(rehydration_parts)
+        
+        # DEBUG log
+        using_summary = bool(summary and summary.get("text"))
+        summary_until = summary.get("until_user_turn") if summary else None
+        recent_user_turns = sum(1 for msg in recent_dialogue if msg.get("role") == "user")
+        logger.debug(f"[rehydration] using_summary={using_summary} summary_until={summary_until} recent_user_turns={recent_user_turns}")
 
-        # user payload (RAG only if available)
+        # user payload: combine rehydration context with RAG (if available)
         if rag_ctx:
-            user_payload = f"{q}\n\n[MEMORY]\n{rag_ctx}"
+            user_payload = f"CONTEXT:\n{rehydration_ctx}\n\n[MEMORY]\n{rag_ctx}"
         else:
-            user_payload = q
+            user_payload = f"CONTEXT:\n{rehydration_ctx}"
 
         if rag_ctx:
             system_preamble = (
@@ -907,7 +1275,37 @@ async def chat(body: ChatRequest):
         except Exception as e:
             logger.debug(f"[memory] skipped: {e}")
 
-        return {"reply": answer, "rag_ctx_head": (rag_ctx or "")[:200]}
+        # Compute summary_pending
+        summary_pending = False
+        try:
+            user_turn_count = _count_user_turns(sess_id)
+            summary_obj = _get_summary_stub(sess_id)
+            summary_pending = should_update_summary(user_turn_count, summary_obj)
+        except Exception as e:
+            logger.debug(f"[summary] failed to compute summary_pending: {e}")
+
+        # Generate summary if pending (D3: aut-summary generation)
+        # Run in background to avoid blocking /chat response
+        if summary_pending:
+            asyncio.create_task(_run_summary_task(sess_id))
+            # summary_pending remains True (summary is being generated in background)
+
+        # Build response
+        response = {
+            "reply": answer,
+            "rag_ctx_head": (rag_ctx or "")[:200],
+            "summary_pending": summary_pending
+        }
+        
+        # Add rehydration diagnostics only if DEBUG_REHYDRATION is enabled
+        if DEBUG_REHYDRATION:
+            response.update({
+                "rehydration_used": using_summary,
+                "rehydration_summary_until": summary_until,
+                "rehydration_recent_user_turns": recent_user_turns
+            })
+        
+        return response
     except Exception as e:
         return {"reply": f"echo: {q} (ollama failed: {e})"}
 
@@ -940,6 +1338,7 @@ def create_session(body: Optional[CreateSessionRequest] = None):
         "created_at": now,
         "updated_at": now,
         "turns": 0,
+        "summary": None,
     }
     
     # Add to index
@@ -988,6 +1387,11 @@ def list_sessions():
             session_data["id"] = session_key
             idx[session_key] = session_data
             idx_modified = True
+        # Миграция: если нет поля summary, добавляем null
+        if "summary" not in session_data:
+            session_data["summary"] = None
+            idx[session_key] = session_data
+            idx_modified = True
         sessions.append(session_data)
     
     # Сохраняем миграцию обратно в index.json если были изменения
@@ -1020,9 +1424,10 @@ def get_session(session_id: str):
     if not meta:
         return JSONResponse({"ok": False, "error": "Session not found"}, status_code=404)
 
-    # Читаем messages из JSONL
+    # Читаем messages и summary из JSONL
     f = SESS_DIR / f"{session_id}.jsonl"
     messages = []
+    summary = None
     if f.exists():
         try:
             with f.open("r", encoding="utf-8") as fh:
@@ -1032,6 +1437,10 @@ def get_session(session_id: str):
                         continue
                     try:
                         msg_data = json.loads(line)
+                        # Если это summary event, сохраняем (последний будет актуальным)
+                        if isinstance(msg_data, dict) and msg_data.get("type") == "summary":
+                            summary = msg_data
+                            continue
                         # Нормализация: если есть text или message, добавляем content для совместимости
                         if isinstance(msg_data, dict):
                             if "text" in msg_data and "content" not in msg_data:
@@ -1043,6 +1452,16 @@ def get_session(session_id: str):
                         continue
         except Exception as e:
             return {"ok": False, "error": str(e), "messages": []}
+    
+    # Если в index summary == null, summary должен быть null
+    # (мы уже прочитали jsonl, так что summary либо найден, либо None)
+    
+    # Normalize summary.updated_at to ISO8601 string if needed (for response only, don't rewrite jsonl)
+    if summary and isinstance(summary, dict):
+        updated_at = summary.get("updated_at")
+        if updated_at and not isinstance(updated_at, str):
+            summary = dict(summary)  # Make a copy to avoid modifying the original
+            summary["updated_at"] = _now_iso()
 
     # Определяем lastMessage из последнего сообщения
     last_message = ""
@@ -1091,7 +1510,8 @@ def get_session(session_id: str):
         "created_at": created_at,
         "updated_at": updated_at,
         "timestamp": updated_at,
-        "turns": turns
+        "turns": turns,
+        "summary": summary
     }
 
 
