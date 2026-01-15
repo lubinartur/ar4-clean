@@ -171,7 +171,13 @@ class Air4Service {
           });
           
           return chatSession;
-      } catch (e) {
+      } catch (e: any) {
+          // Ignore AbortError (expected when request is cancelled)
+          if (e?.name === 'AbortError' || e?.message?.includes('aborted')) {
+              return null; // Return null without logging
+          }
+          
+          // Log real network/API errors (404, 500, etc.)
           console.debug('[air4Service] getSessionById: error', e);
           return null;
       }

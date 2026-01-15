@@ -1,0 +1,4 @@
+version: "0.2"
+name: "AIR4 Question Bank — OPTIONAL"
+description: "Non-core questions. Enabled by state/flow rules. (Placeholder; extend later.)"
+questions: []

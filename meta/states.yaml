@@ -1,0 +1,62 @@
+version: "0.2"
+states:
+  - id: OVERLOADED
+    priority: 100
+    requires_any:
+      exhaustion_threshold: yes
+      emotional_overflow: yes
+      overload_risk: yes
+    behavior:
+      mode: stabilize
+      ask_budget: 1
+      forbid_domains: [identity_self_image, cognition_bias]
+
+  - id: STABLE_EXECUTION
+    priority: 90
+    requires:
+      baseline_energy: yes
+      attention_available: yes
+      execution_ready: yes
+      task_clarity: yes
+    forbids:
+      exhaustion_threshold: yes
+      emotional_overflow: yes
+      overload_risk: yes
+    behavior:
+      mode: execution
+      ask_budget: 0
+
+  - id: EMOTIONAL_DOMINANT
+    priority: 85
+    requires:
+      emotional_load_present: yes
+      emotion_action_interference: yes
+    behavior:
+      mode: contain
+      ask_budget: 2
+      forbid_actions: [optimize, persuade, argue]
+
+  - id: BLOCKED_WITH_ENERGY
+    priority: 80
+    requires:
+      baseline_energy: yes
+      goal_pull: yes
+      execution_ready: no
+    detects_any:
+      avoidance_pattern: yes
+      fear_blocking_action: yes
+      action_inertia: yes
+    behavior:
+      mode: unblock
+      ask_budget: 3
+
+  - id: IDENTITY_UNSTABLE
+    priority: 60
+    requires_any:
+      identity_conflict: yes
+      authenticity: no
+      role_pressure: yes
+    behavior:
+      mode: reframe
+      ask_budget: 2
+      pace: slow

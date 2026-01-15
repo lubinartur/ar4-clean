@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 import re
 import uuid
+import logging
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 import json
@@ -11,6 +13,8 @@ import json
 from pydantic import BaseModel, Field
 
 from backend.app.routes_profile import load_profile as _load_user_profile
+
+logger = logging.getLogger(__name__)
 
 # ==== ENV / defaults ====
 PORT = int(os.getenv("PORT", "8000"))
@@ -39,19 +43,76 @@ def _is_greeting(q: str) -> bool:
 
 
 # ===== Core Dialog System Prompt =====
-# Единый system prompt для Core Dialog (chat + stream)
-# UI не может перезаписать этот prompt
-ARCH_CORE_PROMPT = (
-    "Ты — ARCH, локальный персональный интеллект AIR4 (второй мозг) для одного пользователя.\n"
-    "Контекст: оффлайн, приватно, не SaaS. Мы доводим до честного v1.0 — новые фичи запрещены.\n\n"
-    "Стиль:\n"
-    "- Коротко, по делу, без философии и без \"давай фильм/шахматы/новости\".\n"
-    "- Всегда держись текущего плана/роадмапа. Если запрос не про план — возвращай к плану.\n"
-    "- Если не хватает данных — задай 1 уточняющий вопрос и предложи 1 следующий шаг.\n"
-    "- Не предлагай развлечения. Не предлагай темы \"для разговора\".\n\n"
-    "Правило:\n"
-    "Твоя задача — помогать вести проект AIR4 и задачи пользователя. Никаких посторонних инициатив."
-)
+# PHASE M: Load canonical AIR4 Core Behavior Prompt from file
+# This prompt is FROZEN and must always be first in the prompt chain
+
+_CORE_PROMPT_CACHE: Optional[str] = None
+_CORE_PROMPT_PATH = Path(__file__).parent / "prompts" / "AIR4_CORE_BEHAVIOR_PROMPT.md"
+
+def load_core_prompt() -> str:
+    """
+    Load AIR4 Core Behavior Prompt from disk.
+    Cached for performance. Always returns the full prompt content.
+    """
+    global _CORE_PROMPT_CACHE
+    if _CORE_PROMPT_CACHE is not None:
+        return _CORE_PROMPT_CACHE
+    
+    if not _CORE_PROMPT_PATH.exists():
+        # Fallback to legacy prompt if file doesn't exist
+        logger.warning(f"[PROMPT] Core prompt file not found at {_CORE_PROMPT_PATH}, using fallback")
+        _CORE_PROMPT_CACHE = (
+            "Ты — ARCH, локальный персональный интеллект AIR4 (второй мозг) для одного пользователя.\n"
+            "Контекст: оффлайн, приватно, не SaaS. Мы доводим до честного v1.0 — новые фичи запрещены.\n\n"
+            "Стиль:\n"
+            "- Коротко, по делу, без философии и без \"давай фильм/шахматы/новости\".\n"
+            "- Всегда держись текущего плана/роадмапа. Если запрос не про план — возвращай к плану.\n"
+            "- Если не хватает данных — задай 1 уточняющий вопрос и предложи 1 следующий шаг.\n"
+            "- Не предлагай развлечения. Не предлагай темы \"для разговора\".\n\n"
+            "Правило:\n"
+            "Твоя задача — помогать вести проект AIR4 и задачи пользователя. Никаких посторонних инициатив."
+        )
+        return _CORE_PROMPT_CACHE
+    
+    try:
+        # Read the markdown file and extract content (skip frontmatter only)
+        content = _CORE_PROMPT_PATH.read_text(encoding="utf-8")
+        
+        # Remove frontmatter (lines between --- markers at start)
+        lines = content.split('\n')
+        start_idx = 0
+        if lines[0].strip() == '---':
+            # Find closing ---
+            for i in range(1, len(lines)):
+                if lines[i].strip() == '---':
+                    start_idx = i + 1
+                    break
+        
+        # Extract the actual prompt content (everything after frontmatter, including headers)
+        prompt_content = '\n'.join(lines[start_idx:]).strip()
+        
+        _CORE_PROMPT_CACHE = prompt_content
+        logger.info(f"[PROMPT] Loaded AIR4 Core Behavior Prompt from {_CORE_PROMPT_PATH} ({len(prompt_content)} chars)")
+        return _CORE_PROMPT_CACHE
+    except Exception as e:
+        logger.error(f"[PROMPT] Failed to load core prompt from {_CORE_PROMPT_PATH}: {e}")
+        # Fallback to legacy prompt
+        _CORE_PROMPT_CACHE = (
+            "Ты — ARCH, локальный персональный интеллект AIR4 (второй мозг) для одного пользователя.\n"
+            "Контекст: оффлайн, приватно, не SaaS. Мы доводим до честного v1.0 — новые фичи запрещены.\n\n"
+            "Стиль:\n"
+            "- Коротко, по делу, без философии и без \"давай фильм/шахматы/новости\".\n"
+            "- Всегда держись текущего плана/роадмапа. Если запрос не про план — возвращай к плану.\n"
+            "- Если не хватает данных — задай 1 уточняющий вопрос и предложи 1 следующий шаг.\n"
+            "- Не предлагай развлечения. Не предлагай темы \"для разговора\".\n\n"
+            "Правило:\n"
+            "Твоя задача — помогать вести проект AIR4 и задачи пользователя. Никаких посторонних инициатив."
+        )
+        return _CORE_PROMPT_CACHE
+
+# PHASE M: ARCH_CORE_PROMPT now loads from canonical file
+# This ensures the frozen prompt is always used
+ARCH_CORE_PROMPT = load_core_prompt()
 
 
 # ===== Style presets =====

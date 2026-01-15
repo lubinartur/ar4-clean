@@ -417,6 +417,7 @@ class ChatStreamRequest(BaseModel):
     session: Optional[str] = Field(None, description="Session ID (alias)")
     sid: Optional[str] = Field(None, description="Session ID (alias)")
     settings: Optional[ChatStreamSettings] = Field(None, description="Chat settings")
+    thinking_mode: Optional[str] = Field(default=None, description="Thinking mode: analytical, structured, wide, hard, exploratory")
 
     def get_query_text(self) -> str:
         """Extract query text from various possible fields."""
@@ -446,7 +447,7 @@ class ChatStreamRequest(BaseModel):
 
 # --- Основной SSE-стрим ---
 @router.post("/chat/stream")
-async def chat_stream(body: ChatStreamRequest):
+async def chat_stream(body: ChatStreamRequest, request: Request = None):
     """
     SSE endpoint для стриминга чата.
     Использует тот же пайплайн, что и /chat (RAG/память/модель).
@@ -479,7 +480,22 @@ async def chat_stream(body: ChatStreamRequest):
     async def stream_gen() -> AsyncGenerator[str, None]:
         # G3 fix: Use local variable to avoid UnboundLocalError with += in nested scope
         from backend.app.chat import ARCH_CORE_PROMPT
+        from backend.app.routes_chat import _build_thinking_mode_directives
         preamble = ARCH_CORE_PROMPT
+        
+        # --- PHASE J2: Thinking Mode directives ---
+        # Extract thinking_mode: priority: body.thinking_mode, else query param, else default "structured"
+        thinking_mode = body.thinking_mode
+        if not thinking_mode and request:
+            # Try to get from query params as fallback
+            query_params = request.query_params
+            thinking_mode = query_params.get("thinking_mode")
+        if not thinking_mode:
+            thinking_mode = "structured"  # Default
+        
+        # Add thinking mode directives AFTER ARCH_CORE_PROMPT
+        thinking_directives = _build_thinking_mode_directives(thinking_mode)
+        preamble += thinking_directives
         
         try:
             if not q:
@@ -1195,14 +1211,9 @@ async def chat_stream(body: ChatStreamRequest):
                         "exception": "LLM request timed out"
                     }
                 )
-                import traceback
-                error_event = json.dumps({"type": "error", "message": "SRC=routes_stream.py\nTRACEBACK:\n" + traceback.format_exc()}, ensure_ascii=False)
+                error_event = json.dumps({"type": "error", "message": "LLM request timed out"}, ensure_ascii=False)
                 yield f"data: {error_event}\n\n"
             except Exception as e:
-                import traceback
-                print("EXC_TYPE:", type(e), "EXC_REPR:", repr(e), flush=True)
-                print("TRACEBACK:\n", traceback.format_exc(), flush=True)
-                raise
                 # G3: Log error
                 logger.error(
                     "[ERROR] chat/stream LLM_call_failed",
@@ -1212,8 +1223,7 @@ async def chat_stream(body: ChatStreamRequest):
                         "exception": str(e)
                     }
                 )
-                import traceback
-                error_event = json.dumps({"type": "error", "message": "SRC=routes_stream.py\nTRACEBACK:\n" + traceback.format_exc()}, ensure_ascii=False)
+                error_event = json.dumps({"type": "error", "message": f"LLM call failed: {str(e)}"}, ensure_ascii=False)
                 yield f"data: {error_event}\n\n"
 
         except Exception as e:
@@ -1227,8 +1237,7 @@ async def chat_stream(body: ChatStreamRequest):
                     "exception": str(e)
                 }
             )
-            import traceback
-            error_event = json.dumps({"type": "error", "message": "SRC=routes_stream.py\nTRACEBACK:\n" + traceback.format_exc()}, ensure_ascii=False)
+            error_event = json.dumps({"type": "error", "message": f"LLM call failed: {str(e)}"}, ensure_ascii=False)
             yield f"data: {error_event}\n\n"
 
     return StreamingResponse(

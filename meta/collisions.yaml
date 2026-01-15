@@ -1,0 +1,41 @@
+version: "0.2"
+collisions:
+  - id: COLL-001
+    name: "Energy–Action Mismatch"
+    when:
+      all:
+        baseline_energy: yes
+        execution_ready: no
+    output:
+      tag: energy_action_mismatch
+      hint: "check avoidance/fear/meaning"
+
+  - id: COLL-002
+    name: "Motivation–Avoidance Conflict"
+    when:
+      all:
+        goal_pull: yes
+        avoidance_pattern: yes
+    output:
+      tag: want_but_avoid
+      hint: "switch to micro-actions"
+
+  - id: COLL-003
+    name: "Emotional Blind Spot"
+    when:
+      all:
+        emotional_load_present: yes
+        emotion_identification: no
+    output:
+      tag: emotion_blind_spot
+      hint: "contain first; no rationalization"
+
+  - id: COLL-004
+    name: "Control Illusion"
+    when:
+      all:
+        sense_of_control: yes
+        decision_avoidance: yes
+    output:
+      tag: control_illusion
+      hint: "reduce pressure; clarify autonomy"

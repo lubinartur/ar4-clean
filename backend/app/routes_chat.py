@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fastapi import APIRouter, Request, Body, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
@@ -12,6 +14,12 @@ import uuid
 from datetime import datetime
 import os
 import asyncio
+
+# v0.7 QB integration imports
+from backend.app.question_bank.store_singleton import store as qb_store
+from backend.app.question_bank.engine import run_engine
+from backend.app.question_bank.context import build_qb_context
+from backend.app.question_bank.chat_bridge import build_chat_preamble
 
 logger = logging.getLogger(__name__)
 
@@ -454,10 +462,6 @@ async def generate_summary(session_id: str) -> None:
                             continue
                     result_text = "".join(chunks).strip()
         except Exception as e:
-            import traceback
-            print("EXC_TYPE:", type(e), "EXC_REPR:", repr(e), flush=True)
-            print("TRACEBACK:\n", traceback.format_exc(), flush=True)
-            raise
             # G3: Log error
             logger.error(
                 "[ERROR] summary LLM_call_failed",
@@ -646,6 +650,118 @@ class ChatSettings(BaseModel):
     llm_model: Optional[str] = None
 
 
+# --------------------------------------------------------------------
+# v0.7: QB -> /chat bridge
+# --------------------------------------------------------------------
+
+class ChatRequestQBMixin(BaseModel):
+    qb_session_id: Optional[str] = Field(default=None)
+    qb_enabled: bool = Field(default=True)
+    thinking_mode: Optional[str] = Field(default=None, description="Thinking mode: analytical, structured, wide, hard, exploratory")
+
+
+def _sse_event(event: str, data: Dict[str, Any]) -> str:
+    """
+    Server-Sent Events format:
+      event: <name>\n
+      data: <json>\n
+      \n
+    """
+    return f"event: {event}\n" + "data: " + json.dumps(data, ensure_ascii=False) + "\n\n"
+
+
+def _build_thinking_mode_directives(thinking_mode: Optional[str] = None) -> str:
+    """
+    Build thinking mode directives for system preamble.
+    
+    Args:
+        thinking_mode: One of: analytical, structured, wide, hard, exploratory
+        
+    Returns:
+        Formatted directives string or empty string if mode is unknown
+    """
+    mode = (thinking_mode or "structured").lower().strip()
+    
+    directives_map = {
+        "analytical": (
+            "• Ask causal/clarifying questions.\n"
+            "• Provide structured hypotheses.\n"
+            "• Avoid emotional language."
+        ),
+        "structured": (
+            "• Ask step-by-step questions.\n"
+            "• Provide ordered summaries or checklists.\n"
+            "• Avoid expanding scope."
+        ),
+        "wide": (
+            "• Ask broadening questions.\n"
+            "• Offer alternatives and scenarios.\n"
+            "• Avoid final decisions."
+        ),
+        "hard": (
+            "• Ask direct, uncomfortable questions.\n"
+            "• Use concise, firm wording.\n"
+            "• Avoid empathy or reassurance."
+        ),
+        "exploratory": (
+            "• Ask open, associative questions.\n"
+            "• Share observations and patterns.\n"
+            "• Avoid concrete advice."
+        ),
+    }
+    
+    # Default to structured if mode is unknown
+    if mode not in directives_map:
+        mode = "structured"
+    
+    directives = directives_map[mode]
+    
+    return f"\n\nTHINKING MODE: {mode.capitalize()}\nDirectives:\n{directives}\n"
+
+
+def _get_qb_payload(qb_session_id: str):
+    session = qb_store.get(qb_session_id)
+    if session is None:
+        return None
+
+    out = run_engine(
+        session.answers,
+        asked_ids=session.asked_ids,
+        asked_at=session.asked_at,
+        domain_last_asked_at=session.domain_last_asked_at,
+        answered_at=session.answered_at,
+    )
+
+    qb_ctx = build_qb_context(
+        state_id=out.state_id,
+        mode=out.mode,
+        tags=out.tags,
+        signals=session.answers,
+        ask_budget=out.ask_budget,
+        forbid_domains=out.forbid_domains,
+        forbid_actions=out.forbid_actions,
+        thinking_mode="structured",  # Default for chat context
+    )
+
+    preamble = build_chat_preamble(qb_ctx.to_dict())
+
+    return {
+        "qb_context": qb_ctx.to_dict(),
+        "chat_preamble": preamble,
+        "state": {
+            "id": out.state_id,
+            "mode": out.mode,
+            "tags": out.tags,
+        },
+        "constraints": {
+            "ask_budget": out.ask_budget,
+            "forbid_domains": out.forbid_domains,
+            "forbid_actions": out.forbid_actions,
+        },
+        "expired": out.expired_signals,
+    }
+
+
 class CreateSessionRequest(BaseModel):
     title: Optional[str] = Field(None, description="Session title (optional)")
 
@@ -653,7 +769,7 @@ class CreateSessionRequest(BaseModel):
 # Runtime guard limits
 MAX_CHAT_INPUT_LENGTH = 10000  # Max characters for chat input text
 
-class ChatRequest(BaseModel):
+class ChatRequest(ChatRequestQBMixin):
     q: Optional[str] = Field(None, description="Query text", max_length=MAX_CHAT_INPUT_LENGTH)
     text: Optional[str] = Field(None, description="Query text (alias)", max_length=MAX_CHAT_INPUT_LENGTH)
     input: Optional[str] = Field(None, description="Query text (alias)", max_length=MAX_CHAT_INPUT_LENGTH)
@@ -703,11 +819,32 @@ class ChatRequest(BaseModel):
 
 
 @router.post("/chat")
-async def chat(body: ChatRequest):
+async def chat(body: ChatRequest, request: Request = None):
     # Core Dialog: используем фиксированный ARCH_CORE_PROMPT
     # UI не может перезаписать system prompt через settings или systemPrompt
     from backend.app.chat import ARCH_CORE_PROMPT
     system_preamble = ARCH_CORE_PROMPT
+
+    # --- v0.7: QB -> /chat bridge ---
+    qb_payload = None
+    if body.qb_enabled and body.qb_session_id:
+        qb_payload = _get_qb_payload(body.qb_session_id)
+        if qb_payload and qb_payload.get("chat_preamble"):
+            system_preamble += "\n\n" + qb_payload["chat_preamble"] + "\n"
+    
+    # --- PHASE J2: Thinking Mode directives ---
+    # Extract thinking_mode: priority: body.thinking_mode, else query param, else default "structured"
+    thinking_mode = body.thinking_mode
+    if not thinking_mode and request:
+        # Try to get from query params as fallback
+        query_params = request.query_params
+        thinking_mode = query_params.get("thinking_mode")
+    if not thinking_mode:
+        thinking_mode = "structured"  # Default
+    
+    # Add thinking mode directives AFTER ARCH_CORE_PROMPT and AFTER QB preamble
+    thinking_directives = _build_thinking_mode_directives(thinking_mode)
+    system_preamble += thinking_directives
 
     # Extract query text from validated body
     q = body.get_query_text()
@@ -1308,9 +1445,6 @@ async def chat(body: ChatRequest):
             )
             raise HTTPException(status_code=504, detail="LLM request timed out")
         except Exception as e:
-            import traceback
-            print("EXC_TYPE:", type(e), "EXC_REPR:", repr(e), flush=True)
-            print("TRACEBACK:\n", traceback.format_exc(), flush=True)
             raise
 
         # PERSIST: сохраняем user и assistant сообщения
@@ -1351,6 +1485,10 @@ async def chat(body: ChatRequest):
             "rag_ctx_head": (rag_ctx or "")[:200],
             "summary_pending": summary_pending
         }
+        
+        # Add QB payload if available (for debugging/UI)
+        if qb_payload:
+            response["qb"] = qb_payload
         
         # Add rehydration diagnostics only if DEBUG_REHYDRATION is enabled
         if DEBUG_REHYDRATION:
@@ -1444,6 +1582,21 @@ async def chat_stream(body: ChatRequest):
     
     # system_preamble already initialized at the beginning of the function
     
+    # --- v0.7: QB -> /chat bridge ---
+    qb_payload = None
+    if body.qb_enabled and body.qb_session_id:
+        qb_payload = _get_qb_payload(body.qb_session_id)
+        if qb_payload and qb_payload.get("chat_preamble"):
+            system_preamble += "\n\n" + qb_payload["chat_preamble"] + "\n"
+    
+    # --- PHASE J2: Thinking Mode directives ---
+    # Extract thinking_mode: priority: body.thinking_mode, else default "structured"
+    thinking_mode = body.thinking_mode or "structured"
+    
+    # Add thinking mode directives AFTER ARCH_CORE_PROMPT and AFTER QB preamble
+    thinking_directives = _build_thinking_mode_directives(thinking_mode)
+    system_preamble += thinking_directives
+    
     # Extra parts from tone/density/lang (same as /chat)
     extra_parts: list[str] = []
     if tone == "bro":
@@ -1483,8 +1636,10 @@ async def chat_stream(body: ChatRequest):
             except Exception:
                 pass
             async def quick_reply_gen() -> AsyncGenerator[str, None]:
-                meta_event = json.dumps({"type": "meta", "session_id": sess_id, "model": model_name}, ensure_ascii=False)
-                yield f"event: meta\ndata: {meta_event}\n\n"
+                meta_data = {"type": "meta", "session_id": sess_id, "model": model_name}
+                if qb_payload:
+                    meta_data["qb"] = qb_payload
+                yield _sse_event("meta", meta_data)
                 # Send reply as single token
                 token_event = json.dumps({"type": "token", "delta": reply}, ensure_ascii=False)
                 yield f"event: token\ndata: {token_event}\n\n"
@@ -1713,9 +1868,11 @@ async def chat_stream(body: ChatRequest):
             except Exception:
                 pass
             
-            # Send meta event
-            meta_event = json.dumps({"type": "meta", "session_id": sess_id, "model": model_name}, ensure_ascii=False)
-            yield f"event: meta\ndata: {meta_event}\n\n"
+            # first packet: meta (UI uses it to render mode/buttons before tokens)
+            meta_data = {"type": "meta", "session_id": sess_id, "model": model_name}
+            if qb_payload:
+                meta_data["qb"] = qb_payload
+            yield _sse_event("meta", meta_data)
             
             # RAG context (same as /chat)
             rag_ctx = ""
@@ -1811,16 +1968,11 @@ async def chat_stream(body: ChatRequest):
                                 continue
             except httpx.TimeoutException:
                 logger.error(f"[LLM TIMEOUT] LLM call timed out after 60s (session_id={sess_id})")
-                import traceback
-                error_event = json.dumps({"type": "error", "message": "SRC=routes_chat.py\nTRACEBACK:\n" + traceback.format_exc()}, ensure_ascii=False)
+                error_event = json.dumps({"type": "error", "message": "LLM request timed out"}, ensure_ascii=False)
                 yield f"event: error\ndata: {error_event}\n\n"
                 return
             except Exception as e:
-                import traceback
-                print("EXC_TYPE:", type(e), "EXC_REPR:", repr(e), flush=True)
-                print("TRACEBACK:\n", traceback.format_exc(), flush=True)
-                raise
-                error_event = json.dumps({"type": "error", "message": "SRC=routes_chat.py\nTRACEBACK:\n" + traceback.format_exc()}, ensure_ascii=False)
+                error_event = json.dumps({"type": "error", "message": f"LLM call failed: {str(e)}"}, ensure_ascii=False)
                 yield f"event: error\ndata: {error_event}\n\n"
                 return
             
@@ -1866,8 +2018,7 @@ async def chat_stream(body: ChatRequest):
             
         except Exception as e:
             logger.error(f"[STREAM ERROR] {e}")
-            import traceback
-            error_event = json.dumps({"type": "error", "message": "SRC=routes_chat.py\nTRACEBACK:\n" + traceback.format_exc()}, ensure_ascii=False)
+            error_event = json.dumps({"type": "error", "message": f"LLM call failed: {str(e)}"}, ensure_ascii=False)
             yield f"event: error\ndata: {error_event}\n\n"
     
     return StreamingResponse(

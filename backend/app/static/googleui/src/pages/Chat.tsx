@@ -4,6 +4,7 @@ import { useSettings } from "../hooks/useSettings";
 import { useAir4 } from '../contexts/Air4Context';
 import { Message, MemoryItem, RouterDecision, SystemStats, ResponseStyle, ModelName, ModelMode } from '../types';
 import { Send, Mic, Paperclip, BrainCircuit, Cpu, Sparkles, Activity, Database, Circle, ChevronDown, Check, Star, Copy, ClipboardCheck, Square, Pin, PinOff, Eye, EyeOff, RotateCw } from 'lucide-react';
+import { QBPanel } from '../components/qb/QBPanel';
 
 interface ChatProps {
     sessionId: string | null;
@@ -22,6 +23,15 @@ function clean<T extends Record<string, any>>(obj: T): Partial<T> {
   }
   return result;
 }
+
+// Helper: hash function for generating stable keys
+const hash = (s: string): string => {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = (h * 31 + s.charCodeAt(i)) | 0;
+  }
+  return String(Math.abs(h));
+};
 
 
 const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery, onSessionChange }) => {
@@ -51,6 +61,8 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
   const [sourcesOpen, setSourcesOpen] = useState<Record<string, boolean>>({});
   const [retryAvailable, setRetryAvailable] = useState(false);
   const [userJustSentMessage, setUserJustSentMessage] = useState(false);
+  const [qbSessionId, setQbSessionId] = useState<string | null>(null);
+  const [qbEnabled, setQbEnabled] = useState(true);
   const styleMenuRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -63,6 +75,25 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
   const persistThrottleRef = useRef<NodeJS.Timeout | null>(null);
   const scrollThrottleRef = useRef<NodeJS.Timeout | null>(null);
   const lastPersistTimeRef = useRef<number>(0);
+
+  // QB session management
+  const QB_KEY = "air4.qb_session_id";
+
+  async function ensureQbSession(): Promise<string> {
+    const existing = localStorage.getItem(QB_KEY);
+    if (existing) return existing;
+    const res = await fetch("/qb/sessions", { method: "POST" });
+    const json = await res.json();
+    const sid = json?.session_id;
+    if (!sid) throw new Error("QB session create failed");
+    localStorage.setItem(QB_KEY, sid);
+    return sid;
+  }
+
+  useEffect(() => {
+    if (!qbEnabled) return;
+    ensureQbSession().then(setQbSessionId).catch(console.error);
+  }, [qbEnabled]);
 
   // Load session messages when ID changes
   useEffect(() => {
@@ -567,7 +598,9 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
           {
             text: requestText,
             session_id: currentSessionId,
-            settings: cleanedSettings
+            settings: cleanedSettings,
+            qb_enabled: qbEnabled,
+            qb_session_id: qbSessionId
           },
           {
             onToken: (delta: string) => {
@@ -1084,8 +1117,16 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
       )}
 
       {/* Messages Area */}
+      {/* QB Panel */}
+      <QBPanel
+        enabled={qbEnabled}
+        onAnswered={(payload) => {
+          // optional: can update local UI state with payload.snapshot/score
+        }}
+      />
+
       <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6 custom-scrollbar scroll-smooth">
-        {messages.map((msg) => {
+        {messages.map((msg, index) => {
           const isAssistant = msg.role === 'assistant';
 
           let displayContent = msg.content as string;
@@ -1099,9 +1140,14 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
               }
           }
 
+          // Generate stable, unique key
+          const msgKey = msg.id 
+            ? `msg:${msg.id}` 
+            : `msg:${msg.role}:${msg.timestamp ?? index}:${hash(msg.content ?? '').slice(0, 8)}`;
+
           return (
           <div 
-            key={msg.id} 
+            key={msgKey} 
             className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'} animate-message-in`}
             style={{ animationFillMode: 'both' }}
           >

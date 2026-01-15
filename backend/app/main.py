@@ -65,6 +65,10 @@ app.include_router(router_chat)
 app.include_router(stream_router)
 app.include_router(models_router)
 
+# --- Question Bank (AIR4 v2.0) ---
+from .routes_question_bank import router as qb_router
+app.include_router(qb_router)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],  # Vite dev server

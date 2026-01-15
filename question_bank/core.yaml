@@ -1,0 +1,1165 @@
+version: "0.2"
+name: "AIR4 Question Bank — CORE"
+description: "Fast signals (<=1s), no free text. Used for state detection & flow control."
+conventions:
+  answers:
+    yes_no: [yes, no]
+    tri_level: [low, mid, high]
+  domains:
+    - energy_state
+    - focus_attention
+    - emotion_regulation
+    - control_agency_pressure
+    - motivation_drive
+    - risk_defense
+    - identity_self_image
+    - action_execution
+    - social_relational
+    - time_temporal
+    - body_physiology
+    - cognition_bias
+    - learning_growth
+    - environment_context
+    - work_load
+    - focus_chaos
+    - body_sport
+    - interests_hobbies
+    - finances_perception
+    - thinking_decisions
+
+questions:
+  # --- ENERGY_STATE ---
+  - id: Q-ES-001
+    domain: energy_state
+    signal: baseline_energy
+    question: "Сейчас у тебя есть ощущение энергии?"
+    answers: ["yes", "no"]
+
+  - id: Q-ES-002
+    domain: energy_state
+    signal: physical_fatigue
+    question: "Ты чувствуешь физическую усталость?"
+    answers: ["yes", "no"]
+
+  - id: Q-ES-003
+    domain: energy_state
+    signal: mental_fatigue
+    question: "Есть ощущение ментального выгорания прямо сейчас?"
+    answers: ["yes", "no"]
+
+  - id: Q-ES-004
+    domain: energy_state
+    signal: sleep_deficit
+    question: "Ты не выспался сегодня?"
+    answers: ["yes", "no"]
+
+  - id: Q-ES-005
+    domain: energy_state
+    signal: recovery_state
+    question: "Ты чувствуешь себя восстановленным?"
+    answers: ["yes", "no"]
+
+  - id: Q-ES-006
+    domain: energy_state
+    signal: alertness_level
+    question: "Насколько ты сейчас бодр?"
+    answers: [low, mid, high]
+
+  - id: Q-ES-026
+    domain: energy_state
+    signal: energy_fluctuation
+    question: "Энергия сегодня скачет?"
+    answers: ["yes", "no"]
+
+  - id: Q-ES-029
+    domain: energy_state
+    signal: stimulation_overuse
+    question: "Стимуляции сегодня уже слишком много?"
+    answers: ["yes", "no"]
+
+  - id: Q-ES-030
+    domain: energy_state
+    signal: nervous_system_load
+    question: "Ощущение, что нервная система перегружена?"
+    answers: ["yes", "no"]
+
+  - id: Q-ES-041
+    domain: energy_state
+    signal: exhaustion_threshold
+    question: "Ты близко к истощению?"
+    answers: ["yes", "no"]
+
+  - id: Q-ES-024
+    domain: energy_state
+    signal: overload_risk
+    question: "Любая новая задача сейчас будет лишней?"
+    answers: ["yes", "no"]
+
+  - id: Q-ES-055
+    domain: energy_state
+    signal: continue_interaction
+    question: "Есть энергия продолжать взаимодействие с AIR4?"
+    answers: ["yes", "no"]
+
+  # --- FOCUS_ATTENTION ---
+  - id: Q-FA-001
+    domain: focus_attention
+    signal: attention_available
+    question: "Ты сейчас способен удерживать внимание?"
+    answers: ["yes", "no"]
+
+  - id: Q-FA-002
+    domain: focus_attention
+    signal: attention_fragmented
+    question: "Внимание сейчас распадается?"
+    answers: ["yes", "no"]
+
+  - id: Q-FA-005
+    domain: focus_attention
+    signal: focus_depth
+    question: "Ты сейчас способен на глубокую концентрацию?"
+    answers: ["yes", "no"]
+
+  - id: Q-FA-007
+    domain: focus_attention
+    signal: rumination
+    question: "Ты застрял в повторяющихся мыслях?"
+    answers: ["yes", "no"]
+
+  - id: Q-FA-010
+    domain: focus_attention
+    signal: cognitive_noise
+    question: "В голове сейчас «шумно»?"
+    answers: ["yes", "no"]
+
+  - id: Q-FA-011
+    domain: focus_attention
+    signal: clarity
+    question: "Есть ощущение ясности?"
+    answers: ["yes", "no"]
+
+  - id: Q-FA-013
+    domain: focus_attention
+    signal: attention_fatigue
+    question: "Внимание уже уставшее?"
+    answers: ["yes", "no"]
+
+  - id: Q-FA-019
+    domain: focus_attention
+    signal: sustained_attention_limit
+    question: "Дольше 15 минут внимание удержать сложно?"
+    answers: ["yes", "no"]
+
+  # --- EMOTION_REGULATION ---
+  - id: Q-ER-001
+    domain: emotion_regulation
+    signal: emotional_load_present
+    question: "Эмоционально сейчас тяжело?"
+    answers: ["yes", "no"]
+
+  - id: Q-ER-002
+    domain: emotion_regulation
+    signal: emotion_identification
+    question: "Ты понимаешь, что именно чувствуешь?"
+    answers: ["yes", "no"]
+
+  - id: Q-ER-005
+    domain: emotion_regulation
+    signal: emotional_overflow
+    question: "Эмоций слишком много?"
+    answers: ["yes", "no"]
+
+  - id: Q-ER-006
+    domain: emotion_regulation
+    signal: numbness
+    question: "Есть ощущение онемения?"
+    answers: ["yes", "no"]
+
+  - id: Q-ER-007
+    domain: emotion_regulation
+    signal: irritability_emotional
+    question: "Эмоционально легко сорваться?"
+    answers: ["yes", "no"]
+
+  - id: Q-ER-008
+    domain: emotion_regulation
+    signal: emotional_control
+    question: "Ты контролируешь эмоциональные реакции?"
+    answers: ["yes", "no"]
+
+  - id: Q-ER-010
+    domain: emotion_regulation
+    signal: emotion_action_interference
+    question: "Эмоции мешают действовать?"
+    answers: ["yes", "no"]
+
+  - id: Q-ER-019
+    domain: emotion_regulation
+    signal: emotional_safety
+    question: "Ты чувствуешь себя эмоционально в безопасности?"
+    answers: ["yes", "no"]
+
+  # --- CONTROL_AGENCY_PRESSURE ---
+  - id: Q-CP-001
+    domain: control_agency_pressure
+    signal: sense_of_control
+    question: "Ты чувствуешь контроль над происходящим?"
+    answers: ["yes", "no"]
+
+  - id: Q-CP-002
+    domain: control_agency_pressure
+    signal: external_pressure
+    question: "Есть внешнее давление?"
+    answers: ["yes", "no"]
+
+  - id: Q-CP-003
+    domain: control_agency_pressure
+    signal: internal_pressure
+    question: "Ты давишь на себя сам?"
+    answers: ["yes", "no"]
+
+  - id: Q-CP-005
+    domain: control_agency_pressure
+    signal: autonomy
+    question: "Ты сам выбираешь, что делать дальше?"
+    answers: ["yes", "no"]
+
+  - id: Q-CP-006
+    domain: control_agency_pressure
+    signal: trapped_feeling
+    question: "Есть ощущение загнанности?"
+    answers: ["yes", "no"]
+
+  - id: Q-CP-013
+    domain: control_agency_pressure
+    signal: boundary_violation
+    question: "Твои границы сейчас нарушаются?"
+    answers: ["yes", "no"]
+
+  - id: Q-CP-014
+    domain: control_agency_pressure
+    signal: decision_avoidance
+    question: "Ты избегаешь принятия решений?"
+    answers: ["yes", "no"]
+
+  # --- MOTIVATION_DRIVE ---
+  - id: Q-MD-001
+    domain: motivation_drive
+    signal: intrinsic_motivation
+    question: "Ты хочешь делать что-то ради самого процесса?"
+    answers: ["yes", "no"]
+
+  - id: Q-MD-002
+    domain: motivation_drive
+    signal: extrinsic_motivation
+    question: "Ты сейчас движим внешними причинами?"
+    answers: ["yes", "no"]
+
+  - id: Q-MD-003
+    domain: motivation_drive
+    signal: motivation_deficit
+    question: "Мотивации сейчас нет?"
+    answers: ["yes", "no"]
+
+  - id: Q-MD-004
+    domain: motivation_drive
+    signal: avoidance_pattern
+    question: "Ты избегаешь конкретного действия?"
+    answers: ["yes", "no"]
+
+  - id: Q-MD-005
+    domain: motivation_drive
+    signal: fear_based_avoidance
+    question: "Избегание связано со страхом?"
+    answers: ["yes", "no"]
+
+  - id: Q-MD-007
+    domain: motivation_drive
+    signal: meaning_deficit
+    question: "В действиях сейчас мало смысла?"
+    answers: ["yes", "no"]
+
+  - id: Q-MD-008
+    domain: motivation_drive
+    signal: goal_pull
+    question: "Есть цель, которая реально тянет?"
+    answers: ["yes", "no"]
+
+  # --- RISK_DEFENSE ---
+  - id: Q-RF-001
+    domain: risk_defense
+    signal: fear_presence
+    question: "Сейчас есть страх?"
+    answers: ["yes", "no"]
+
+  - id: Q-RF-002
+    domain: risk_defense
+    signal: fear_blocking_action
+    question: "Страх мешает действовать?"
+    answers: ["yes", "no"]
+
+  - id: Q-RF-005
+    domain: risk_defense
+    signal: loss_aversion
+    question: "Ты больше боишься потерять, чем выиграть?"
+    answers: ["yes", "no"]
+
+  - id: Q-RF-006
+    domain: risk_defense
+    signal: safety_seeking
+    question: "Ты сейчас выбираешь безопасность?"
+    answers: ["yes", "no"]
+
+  - id: Q-RF-007
+    domain: risk_defense
+    signal: defensive_posture
+    question: "Ты в защитной позиции?"
+    answers: ["yes", "no"]
+
+  - id: Q-RF-014
+    domain: risk_defense
+    signal: vulnerability_tolerance
+    question: "Ты можешь быть уязвимым?"
+    answers: ["yes", "no"]
+
+  # --- IDENTITY_SELF_IMAGE (core only) ---
+  - id: Q-ID-005
+    domain: identity_self_image
+    signal: authenticity
+    question: "Ты сейчас настоящий?"
+    answers: ["yes", "no"]
+
+  - id: Q-ID-002
+    domain: identity_self_image
+    signal: identity_conflict
+    question: "Есть конфликт внутри тебя?"
+    answers: ["yes", "no"]
+
+  - id: Q-ID-003
+    domain: identity_self_image
+    signal: self_trust_identity
+    question: "Ты доверяешь себе как личности?"
+    answers: ["yes", "no"]
+
+  - id: Q-ID-004
+    domain: identity_self_image
+    signal: role_pressure
+    question: "Ты играешь роль, а не живёшь?"
+    answers: ["yes", "no"]
+
+  - id: Q-ID-013
+    domain: identity_self_image
+    signal: shame_presence
+    question: "Есть чувство стыда?"
+    answers: ["yes", "no"]
+
+  # --- ACTION_EXECUTION ---
+  - id: Q-AE-001
+    domain: action_execution
+    signal: execution_ready
+    question: "Ты готов действовать прямо сейчас?"
+    answers: ["yes", "no"]
+
+  - id: Q-AE-003
+    domain: action_execution
+    signal: task_clarity
+    question: "Ты понимаешь следующий шаг?"
+    answers: ["yes", "no"]
+
+  - id: Q-AE-002
+    domain: action_execution
+    signal: action_inertia
+    question: "Трудно начать действие?"
+    answers: ["yes", "no"]
+
+  - id: Q-AE-006
+    domain: action_execution
+    signal: execution_confidence
+    question: "Ты веришь, что справишься?"
+    answers: ["yes", "no"]
+
+  - id: Q-AE-011
+    domain: action_execution
+    signal: procrastination_active
+    question: "Ты прямо сейчас прокрастинируешь?"
+    answers: ["yes", "no"]
+
+  - id: Q-AE-013
+    domain: action_execution
+    signal: execution_window
+    question: "Сейчас хорошее окно для выполнения?"
+    answers: ["yes", "no"]
+
+  - id: Q-AE-014
+    domain: action_execution
+    signal: stop_signal
+    question: "Тебе сейчас лучше остановиться?"
+    answers: ["yes", "no"]
+
+  # --- SOCIAL_RELATIONAL ---
+  - id: Q-SR-001
+    domain: social_relational
+    signal: social_energy_available
+    question: "Есть энергия на взаимодействие с людьми?"
+    answers: ["yes", "no"]
+
+  - id: Q-SR-002
+    domain: social_relational
+    signal: social_overload
+    question: "Людей сегодня было слишком много?"
+    answers: ["yes", "no"]
+
+  - id: Q-SR-003
+    domain: social_relational
+    signal: relational_tension
+    question: "Есть напряжение с кем-то конкретным?"
+    answers: ["yes", "no"]
+
+  - id: Q-SR-005
+    domain: social_relational
+    signal: approval_seeking
+    question: "Тебе важно одобрение других прямо сейчас?"
+    answers: ["yes", "no"]
+
+  - id: Q-SR-008
+    domain: social_relational
+    signal: loneliness_signal
+    question: "Ты чувствуешь одиночество?"
+    answers: ["yes", "no"]
+
+  - id: Q-SR-006
+    domain: social_relational
+    signal: boundary_setting_capacity
+    question: "Ты способен сейчас ставить границы?"
+    answers: ["yes", "no"]
+
+  # --- TIME_TEMPORAL ---
+  - id: Q-TM-001
+    domain: time_temporal
+    signal: time_pressure
+    question: "Есть ощущение нехватки времени?"
+    answers: ["yes", "no"]
+
+  - id: Q-TM-002
+    domain: time_temporal
+    signal: urgency_stress
+    question: "Срочность сейчас давит?"
+    answers: ["yes", "no"]
+
+  - id: Q-TM-004
+    domain: time_temporal
+    signal: time_control
+    question: "Ты контролируешь своё время?"
+    answers: ["yes", "no"]
+
+  - id: Q-TM-008
+    domain: time_temporal
+    signal: temporal_overwhelm
+    question: "Задачи во времени наваливаются?"
+    answers: ["yes", "no"]
+
+  - id: Q-TM-012
+    domain: time_temporal
+    signal: recovery_time_absent
+    question: "Нет времени на восстановление?"
+    answers: ["yes", "no"]
+
+  # --- BODY_PHYSIOLOGY ---
+  - id: Q-BH-002
+    domain: body_physiology
+    signal: pain_presence
+    question: "Есть физическая боль или дискомфорт?"
+    answers: ["yes", "no"]
+
+  - id: Q-BH-003
+    domain: body_physiology
+    signal: tension_body
+    question: "Тело зажато?"
+    answers: ["yes", "no"]
+
+  - id: Q-BH-004
+    domain: body_physiology
+    signal: fatigue_body
+    question: "Физическая усталость выражена?"
+    answers: ["yes", "no"]
+
+  - id: Q-BH-008
+    domain: body_physiology
+    signal: sleepiness
+    question: "Тянет в сон?"
+    answers: ["yes", "no"]
+
+  - id: Q-BH-006
+    domain: body_physiology
+    signal: hunger_signal
+    question: "Ты голоден?"
+    answers: ["yes", "no"]
+
+  - id: Q-BH-007
+    domain: body_physiology
+    signal: thirst_signal
+    question: "Есть жажда?"
+    answers: ["yes", "no"]
+
+  - id: Q-BH-011
+    domain: body_physiology
+    signal: rest_need
+    question: "Телу нужен отдых?"
+    answers: ["yes", "no"]
+
+  # --- COGNITION_BIAS ---
+  - id: Q-CB-001
+    domain: cognition_bias
+    signal: negative_assumption
+    question: "Ты ожидаешь негативный исход?"
+    answers: ["yes", "no"]
+
+  - id: Q-CB-002
+    domain: cognition_bias
+    signal: catastrophic_thinking
+    question: "Ты сейчас драматизируешь ситуацию?"
+    answers: ["yes", "no"]
+
+  - id: Q-CB-003
+    domain: cognition_bias
+    signal: all_or_nothing
+    question: "Ты видишь всё в крайностях?"
+    answers: ["yes", "no"]
+
+  - id: Q-CB-005
+    domain: cognition_bias
+    signal: helpless_belief
+    question: "Есть ощущение, что ты ничего не можешь изменить?"
+    answers: ["yes", "no"]
+
+  - id: Q-CB-010
+    domain: cognition_bias
+    signal: cognitive_rigidity
+    question: "Сложно рассмотреть альтернативную точку зрения?"
+    answers: ["yes", "no"]
+
+  - id: Q-CB-014
+    domain: cognition_bias
+    signal: belief_flexibility
+    question: "Ты готов пересмотреть убеждение?"
+    answers: ["yes", "no"]
+
+  - id: Q-CB-011
+    domain: cognition_bias
+    signal: self_limiting_belief
+    question: "Есть убеждение, которое тебя ограничивает?"
+    answers: ["yes", "no"]
+
+  # --- LEARNING_GROWTH ---
+  - id: Q-LG-001
+    domain: learning_growth
+    signal: learning_readiness
+    question: "Ты сейчас открыт новому?"
+    answers: ["yes", "no"]
+
+  - id: Q-LG-003
+    domain: learning_growth
+    signal: feedback_tolerance
+    question: "Ты готов принимать обратную связь?"
+    answers: ["yes", "no"]
+
+  - id: Q-LG-008
+    domain: learning_growth
+    signal: adaptability
+    question: "Ты легко адаптируешься к изменениям?"
+    answers: ["yes", "no"]
+
+  - id: Q-LG-009
+    domain: learning_growth
+    signal: stuck_pattern
+    question: "Ты повторяешь один и тот же сценарий?"
+    answers: ["yes", "no"]
+
+  - id: Q-LG-013
+    domain: learning_growth
+    signal: unlearning_capacity
+    question: "Ты можешь отказаться от старого подхода?"
+    answers: ["yes", "no"]
+
+  # --- ENVIRONMENT_CONTEXT ---
+  - id: Q-EC-001
+    domain: environment_context
+    signal: environment_supportive
+    question: "Текущая среда тебя поддерживает?"
+    answers: ["yes", "no"]
+
+  - id: Q-EC-002
+    domain: environment_context
+    signal: environment_distracting
+    question: "Окружение сейчас мешает?"
+    answers: ["yes", "no"]
+
+  - id: Q-EC-003
+    domain: environment_context
+    signal: noise_level
+    question: "Шум мешает сосредоточиться?"
+    answers: ["yes", "no"]
+
+  - id: Q-EC-005
+    domain: environment_context
+    signal: digital_overload
+    question: "Экраны и уведомления перегружают?"
+    answers: ["yes", "no"]
+
+  - id: Q-EC-008
+    domain: environment_context
+    signal: privacy_available
+    question: "Есть приватность?"
+    answers: ["yes", "no"]
+
+  - id: Q-EC-009
+    domain: environment_context
+    signal: interruption_risk
+    question: "Тебя могут прервать в любой момент?"
+    answers: ["yes", "no"]
+
+  # --- WORK_LOAD ---
+  - id: Q-WL-001
+    domain: work_load
+    signal: work_overload
+    question: "Работы сейчас слишком много?"
+    answers: ["yes", "no"]
+
+  - id: Q-WL-002
+    domain: work_load
+    signal: deadline_pressure
+    question: "Давят дедлайны?"
+    answers: ["yes", "no"]
+
+  - id: Q-WL-003
+    domain: work_load
+    signal: work_task_clarity
+    question: "Задачи сейчас понятны?"
+    answers: ["yes", "no"]
+
+  - id: Q-WL-004
+    domain: work_load
+    signal: priority_conflict
+    question: "Сложно расставить приоритеты?"
+    answers: ["yes", "no"]
+
+  - id: Q-WL-005
+    domain: work_load
+    signal: constant_interruptions
+    question: "Тебя часто отвлекают?"
+    answers: ["yes", "no"]
+
+  - id: Q-WL-006
+    domain: work_load
+    signal: meeting_overload
+    question: "Слишком много созвонов?"
+    answers: ["yes", "no"]
+
+  - id: Q-WL-007
+    domain: work_load
+    signal: context_switching
+    question: "Часто переключаешься между задачами?"
+    answers: ["yes", "no"]
+
+  - id: Q-WL-008
+    domain: work_load
+    signal: unfinished_tasks
+    question: "Много незакрытых дел?"
+    answers: ["yes", "no"]
+
+  - id: Q-WL-009
+    domain: work_load
+    signal: work_after_hours
+    question: "Работаешь вне рабочего времени?"
+    answers: ["yes", "no"]
+
+  - id: Q-WL-010
+    domain: work_load
+    signal: work_fatigue
+    question: "Работа утомляет?"
+    answers: ["yes", "no"]
+
+  - id: Q-WL-011
+    domain: work_load
+    signal: motivation_drop
+    question: "Мотивация по работе падает?"
+    answers: ["yes", "no"]
+
+  - id: Q-WL-012
+    domain: work_load
+    signal: control_loss
+    question: "Теряешь контроль над задачами?"
+    answers: ["yes", "no"]
+
+  - id: Q-WL-013
+    domain: work_load
+    signal: reactive_mode
+    question: "Работаешь больше реактивно?"
+    answers: ["yes", "no"]
+
+  - id: Q-WL-014
+    domain: work_load
+    signal: planning_gap
+    question: "Нет чёткого плана?"
+    answers: ["yes", "no"]
+
+  - id: Q-WL-015
+    domain: work_load
+    signal: workload_sustainable
+    question: "Нагрузка сейчас ок?"
+    answers: ["yes", "no"]
+
+  # --- FOCUS_CHAOS ---
+  - id: Q-FC-001
+    domain: focus_chaos
+    signal: focus_available
+    question: "Сейчас можешь удерживать фокус?"
+    answers: ["yes", "no"]
+
+  - id: Q-FC-002
+    domain: focus_chaos
+    signal: chaos_attention_fragmented
+    question: "Мысли скачут?"
+    answers: ["yes", "no"]
+
+  - id: Q-FC-003
+    domain: focus_chaos
+    signal: distraction_level_high
+    question: "Легко отвлекаешься?"
+    answers: ["yes", "no"]
+
+  - id: Q-FC-004
+    domain: focus_chaos
+    signal: single_task_ability
+    question: "Можешь делать одну задачу?"
+    answers: ["yes", "no"]
+
+  - id: Q-FC-005
+    domain: focus_chaos
+    signal: mental_noise
+    question: "В голове шум?"
+    answers: ["yes", "no"]
+
+  - id: Q-FC-006
+    domain: focus_chaos
+    signal: focus_fatigue
+    question: "Фокус быстро устаёт?"
+    answers: ["yes", "no"]
+
+  - id: Q-FC-007
+    domain: focus_chaos
+    signal: interruption_sensitivity
+    question: "Сбиваешься от мелочей?"
+    answers: ["yes", "no"]
+
+  - id: Q-FC-008
+    domain: focus_chaos
+    signal: clarity_of_thought
+    question: "Мысли сейчас ясные?"
+    answers: ["yes", "no"]
+
+  - id: Q-FC-009
+    domain: focus_chaos
+    signal: focus_recovery_easy
+    question: "Легко возвращаешь фокус?"
+    answers: ["yes", "no"]
+
+  - id: Q-FC-010
+    domain: focus_chaos
+    signal: cognitive_overload
+    question: "Много одновременно в голове?"
+    answers: ["yes", "no"]
+
+  - id: Q-FC-011
+    domain: focus_chaos
+    signal: task_switching_often
+    question: "Часто переключаешься?"
+    answers: ["yes", "no"]
+
+  - id: Q-FC-012
+    domain: focus_chaos
+    signal: deep_work_possible
+    question: "Можешь уйти в глубину?"
+    answers: ["yes", "no"]
+
+  - id: Q-FC-013
+    domain: focus_chaos
+    signal: focus_blocked
+    question: "Фокус будто заблокирован?"
+    answers: ["yes", "no"]
+
+  - id: Q-FC-014
+    domain: focus_chaos
+    signal: mental_restlessness
+    question: "Внутренняя суета есть?"
+    answers: ["yes", "no"]
+
+  - id: Q-FC-015
+    domain: focus_chaos
+    signal: attention_stability
+    question: "Внимание стабильное?"
+    answers: ["yes", "no"]
+
+  # --- BODY_SPORT ---
+  - id: Q-BS-001
+    domain: body_sport
+    signal: body_energy_available
+    question: "В теле сейчас есть энергия?"
+    answers: ["yes", "no"]
+
+  - id: Q-BS-002
+    domain: body_sport
+    signal: physical_tension_present
+    question: "Есть напряжение в теле?"
+    answers: ["yes", "no"]
+
+  - id: Q-BS-003
+    domain: body_sport
+    signal: muscle_fatigue
+    question: "Мышцы уставшие?"
+    answers: ["yes", "no"]
+
+  - id: Q-BS-004
+    domain: body_sport
+    signal: soreness_present
+    question: "Есть болезненность?"
+    answers: ["yes", "no"]
+
+  - id: Q-BS-005
+    domain: body_sport
+    signal: body_recovered
+    question: "Тело восстановилось?"
+    answers: ["yes", "no"]
+
+  - id: Q-BS-006
+    domain: body_sport
+    signal: sleep_body_effective
+    question: "Сон дал восстановление?"
+    answers: ["yes", "no"]
+
+  - id: Q-BS-007
+    domain: body_sport
+    signal: breathing_free
+    question: "Дышится свободно?"
+    answers: ["yes", "no"]
+
+  - id: Q-BS-008
+    domain: body_sport
+    signal: posture_comfortable
+    question: "Поза сейчас комфортная?"
+    answers: ["yes", "no"]
+
+  - id: Q-BS-009
+    domain: body_sport
+    signal: movement_desire
+    question: "Хочется двигаться?"
+    answers: ["yes", "no"]
+
+  - id: Q-BS-010
+    domain: body_sport
+    signal: workout_recent
+    question: "Была недавняя тренировка?"
+    answers: ["yes", "no"]
+
+  - id: Q-BS-011
+    domain: body_sport
+    signal: overtraining_risk
+    question: "Есть риск перегруза?"
+    answers: ["yes", "no"]
+
+  - id: Q-BS-012
+    domain: body_sport
+    signal: body_heaviness
+    question: "Тело ощущается тяжёлым?"
+    answers: ["yes", "no"]
+
+  - id: Q-BS-013
+    domain: body_sport
+    signal: physical_comfort
+    question: "В теле комфортно?"
+    answers: ["yes", "no"]
+
+  - id: Q-BS-014
+    domain: body_sport
+    signal: need_rest
+    question: "Нужно отдохнуть?"
+    answers: ["yes", "no"]
+
+  - id: Q-BS-015
+    domain: body_sport
+    signal: readiness_for_activity
+    question: "Готов к физической активности?"
+    answers: ["yes", "no"]
+
+  # --- INTERESTS_HOBBIES ---
+  - id: Q-IH-001
+    domain: interests_hobbies
+    signal: interest_present
+    question: "Сейчас есть интерес?"
+    answers: ["yes", "no"]
+
+  - id: Q-IH-002
+    domain: interests_hobbies
+    signal: boredom_present
+    question: "Тебе сейчас скучно?"
+    answers: ["yes", "no"]
+
+  - id: Q-IH-003
+    domain: interests_hobbies
+    signal: curiosity_active
+    question: "Любопытство активно?"
+    answers: ["yes", "no"]
+
+  - id: Q-IH-004
+    domain: interests_hobbies
+    signal: desire_to_explore
+    question: "Хочется исследовать новое?"
+    answers: ["yes", "no"]
+
+  - id: Q-IH-005
+    domain: interests_hobbies
+    signal: engagement_drop
+    question: "Вовлечённость падает?"
+    answers: ["yes", "no"]
+
+  - id: Q-IH-006
+    domain: interests_hobbies
+    signal: hobby_intrinsic_motivation
+    question: "Есть внутренняя мотивация?"
+    answers: ["yes", "no"]
+
+  - id: Q-IH-007
+    domain: interests_hobbies
+    signal: creative_drive
+    question: "Есть творческий импульс?"
+    answers: ["yes", "no"]
+
+  - id: Q-IH-008
+    domain: interests_hobbies
+    signal: hobby_pull
+    question: "Тянет к хобби?"
+    answers: ["yes", "no"]
+
+  - id: Q-IH-009
+    domain: interests_hobbies
+    signal: mental_freshness
+    question: "Чувствуешь свежесть ума?"
+    answers: ["yes", "no"]
+
+  - id: Q-IH-010
+    domain: interests_hobbies
+    signal: novelty_seeking
+    question: "Ищешь новое?"
+    answers: ["yes", "no"]
+
+  - id: Q-IH-011
+    domain: interests_hobbies
+    signal: playfulness_present
+    question: "Есть игривость?"
+    answers: ["yes", "no"]
+
+  - id: Q-IH-012
+    domain: interests_hobbies
+    signal: joy_from_activity
+    question: "Действия радуют?"
+    answers: ["yes", "no"]
+
+  - id: Q-IH-013
+    domain: interests_hobbies
+    signal: routine_fatigue
+    question: "Устал от рутины?"
+    answers: ["yes", "no"]
+
+  - id: Q-IH-014
+    domain: interests_hobbies
+    signal: exploration_blocked
+    question: "Интерес будто заблокирован?"
+    answers: ["yes", "no"]
+
+  - id: Q-IH-015
+    domain: interests_hobbies
+    signal: desire_for_change
+    question: "Хочется перемен?"
+    answers: ["yes", "no"]
+
+  # --- FINANCES_PERCEPTION ---
+  - id: Q-FP-001
+    domain: finances_perception
+    signal: financial_calm
+    question: "С деньгами сейчас спокойно?"
+    answers: ["yes", "no"]
+
+  - id: Q-FP-002
+    domain: finances_perception
+    signal: money_stress_present
+    question: "Деньги сейчас напрягают?"
+    answers: ["yes", "no"]
+
+  - id: Q-FP-003
+    domain: finances_perception
+    signal: income_stability_feel
+    question: "Чувствуешь стабильность дохода?"
+    answers: ["yes", "no"]
+
+  - id: Q-FP-004
+    domain: finances_perception
+    signal: expense_pressure
+    question: "Давят расходы?"
+    answers: ["yes", "no"]
+
+  - id: Q-FP-005
+    domain: finances_perception
+    signal: money_control_feel
+    question: "Контроль над деньгами есть?"
+    answers: ["yes", "no"]
+
+  - id: Q-FP-006
+    domain: finances_perception
+    signal: financial_uncertainty
+    question: "Есть неопределённость с деньгами?"
+    answers: ["yes", "no"]
+
+  - id: Q-FP-007
+    domain: finances_perception
+    signal: spending_anxiety
+    question: "Траты вызывают тревогу?"
+    answers: ["yes", "no"]
+
+  - id: Q-FP-008
+    domain: finances_perception
+    signal: saving_confidence
+    question: "Уверен в накоплениях?"
+    answers: ["yes", "no"]
+
+  - id: Q-FP-009
+    domain: finances_perception
+    signal: financial_planning_ready
+    question: "Готов планировать финансы?"
+    answers: ["yes", "no"]
+
+  - id: Q-FP-010
+    domain: finances_perception
+    signal: money_avoidance
+    question: "Избегаешь думать о деньгах?"
+    answers: ["yes", "no"]
+
+  - id: Q-FP-011
+    domain: finances_perception
+    signal: financial_pressure_background
+    question: "Деньги фоном давят?"
+    answers: ["yes", "no"]
+
+  - id: Q-FP-012
+    domain: finances_perception
+    signal: money_confidence
+    question: "Уверенность в деньгах есть?"
+    answers: ["yes", "no"]
+
+  - id: Q-FP-013
+    domain: finances_perception
+    signal: financial_overwhelm
+    question: "Финансы перегружают?"
+    answers: ["yes", "no"]
+
+  - id: Q-FP-014
+    domain: finances_perception
+    signal: money_safety_feel
+    question: "Чувствуешь финансовую безопасность?"
+    answers: ["yes", "no"]
+
+  - id: Q-FP-015
+    domain: finances_perception
+    signal: desire_financial_order
+    question: "Хочется навести порядок в деньгах?"
+    answers: ["yes", "no"]
+
+  # --- THINKING_DECISIONS ---
+  - id: Q-TD-001
+    domain: thinking_decisions
+    signal: decision_clarity
+    question: Сейчас ясно, что делать?
+    answers: ["yes","no"]
+
+  - id: Q-TD-002
+    domain: thinking_decisions
+    signal: td_decision_avoidance
+    question: Откладываешь решения?
+    answers: ["yes","no"]
+
+  - id: Q-TD-003
+    domain: thinking_decisions
+    signal: mental_overthinking
+    question: Перемысливаешь слишком много?
+    answers: ["yes","no"]
+
+  - id: Q-TD-004
+    domain: thinking_decisions
+    signal: confidence_in_choice
+    question: Уверен в выборе?
+    answers: ["yes","no"]
+
+  - id: Q-TD-005
+    domain: thinking_decisions
+    signal: decision_fatigue
+    question: Устал принимать решения?
+    answers: ["yes","no"]
+
+  - id: Q-TD-006
+    domain: thinking_decisions
+    signal: options_overload
+    question: Слишком много вариантов?
+    answers: ["yes","no"]
+
+  - id: Q-TD-007
+    domain: thinking_decisions
+    signal: trust_own_judgement
+    question: Доверяешь своему мнению?
+    answers: ["yes","no"]
+
+  - id: Q-TD-008
+    domain: thinking_decisions
+    signal: mental_stuck
+    question: Мысли застряли?
+    answers: ["yes","no"]
+
+  - id: Q-TD-009
+    domain: thinking_decisions
+    signal: impulsive_decisions
+    question: Решения импульсивны?
+    answers: ["yes","no"]
+
+  - id: Q-TD-010
+    domain: thinking_decisions
+    signal: need_external_validation
+    question: Ищешь подтверждения от других?
+    answers: ["yes","no"]
+
+  - id: Q-TD-011
+    domain: thinking_decisions
+    signal: inner_conflict_present
+    question: Есть внутренний конфликт?
+    answers: ["yes","no"]
+
+  - id: Q-TD-012
+    domain: thinking_decisions
+    signal: decision_pressure
+    question: Давит необходимость решать?
+    answers: ["yes","no"]
+
+  - id: Q-TD-013
+    domain: thinking_decisions
+    signal: clarity_after_pause
+    question: Пауза проясняет мысли?
+    answers: ["yes","no"]
+
+  - id: Q-TD-014
+    domain: thinking_decisions
+    signal: readiness_to_decide
+    question: Готов принять решение?
+    answers: ["yes","no"]
+
+  - id: Q-TD-015
+    domain: thinking_decisions
+    signal: decision_regret_fear
+    question: Боишься ошибиться?
+    answers: ["yes","no"]

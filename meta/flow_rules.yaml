@@ -1,0 +1,70 @@
+version: "0.2"
+rules:
+  - id: FLOW-001
+    name: "Ask Minimum"
+    description: "Never ask more than needed to determine state + next action."
+    type: policy
+
+  - id: FLOW-002
+    name: "Stop Authority"
+    if:
+      signal: stop_signal
+      equals: yes
+    then:
+      action: stop_questioning
+      mode: stabilize
+
+  - id: FLOW-003
+    name: "Overload Stop"
+    if:
+      signal: overload_risk
+      equals: yes
+    then:
+      action: stop_questioning
+      mode: stabilize
+      forbid_domains: [identity_self_image, cognition_bias]
+
+  - id: FLOW-004
+    name: "Action Locks Questions"
+    if:
+      signal: execution_window
+      equals: yes
+    then:
+      action: stop_questioning
+      mode: execution
+
+  - id: FLOW-005
+    name: "No Rationalization Under Overflow"
+    if:
+      signal: emotional_overflow
+      equals: yes
+    then:
+      mode: contain
+      forbid_actions: [argue, optimize, persuade]
+
+  - id: FLOW-006
+    name: "Safety Gate"
+    if:
+      signal: emotional_safety
+      equals: no
+    then:
+      forbid_domains: [cognition_bias, identity_self_image]
+
+  - id: FLOW-007
+    name: "Domain Priority"
+    type: priority
+    order:
+      - energy_state
+      - focus_attention
+      - emotion_regulation
+      - action_execution
+      - control_agency_pressure
+      - motivation_drive
+      - risk_defense
+      - time_temporal
+      - body_physiology
+      - environment_context
+      - social_relational
+      - cognition_bias
+      - learning_growth
+      - identity_self_image

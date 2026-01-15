@@ -107,7 +107,7 @@ export interface Air4Service {
   uploadFile(file: File): Promise<boolean>;
   getIngestQueueStatus(): Promise<IngestItem[]>;
   streamChat(messages: Message[], sessionId: string, coreSettings?: { temperature?: number; responseTone?: string; outputDensity?: string; interfaceLanguage?: string; activeModel?: string }): AsyncGenerator<{ chunk?: string, context?: MemoryItem[], decision?: RouterDecision }, void, unknown>;
-  chatStream(payload: { text: string; session_id: string; settings?: any }, handlers: { onToken: (delta: string) => void; onDone: () => void; onError: (message: string) => void; onMeta?: (resolvedModel: string) => void }, signal?: AbortSignal): Promise<void>;
+  chatStream(payload: { text: string; session_id: string; settings?: any; qb_session_id?: string | null; qb_enabled?: boolean }, handlers: { onToken: (delta: string) => void; onDone: () => void; onError: (message: string) => void; onMeta?: (resolvedModel: string) => void }, signal?: AbortSignal): Promise<void>;
   getSessionConfig(sessionId: string): SessionConfig | undefined;
   setSessionConfig(sessionId: string, config: SessionConfig): void;
 }
@@ -286,7 +286,13 @@ class Air4ServiceImpl implements Air4Service {
           };
 
           return session;
-      } catch (error) {
+      } catch (error: any) {
+          // Ignore AbortError (expected when request is cancelled)
+          if (error?.name === 'AbortError' || error?.message?.includes('aborted')) {
+              throw error; // Re-throw without logging
+          }
+          
+          // Log real network/API errors (404, 500, etc.)
           console.error('[air4Service] getSessionById error:', error);
           throw error;
       }
@@ -1106,20 +1112,30 @@ class Air4ServiceImpl implements Air4Service {
   }
 
   async chatStream(
-    payload: { text: string; session_id: string; settings?: any },
+    payload: { text: string; session_id: string; settings?: any; qb_session_id?: string | null; qb_enabled?: boolean },
     handlers: { onToken: (delta: string) => void; onDone: () => void; onError: (message: string) => void; onMeta?: (resolvedModel: string) => void },
     signal?: AbortSignal
   ): Promise<void> {
     try {
+      const body: any = {
+        text: payload.text,
+        session_id: payload.session_id,
+        q: payload.text, // для совместимости
+        settings: payload.settings
+      };
+      
+      // Add QB fields if provided
+      if (payload.qb_session_id) {
+        body.qb_session_id = payload.qb_session_id;
+      }
+      if (payload.qb_enabled !== undefined) {
+        body.qb_enabled = payload.qb_enabled;
+      }
+      
       const response = await fetch(`${this.apiBaseUrl}/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: payload.text,
-          session_id: payload.session_id,
-          q: payload.text, // для совместимости
-          settings: payload.settings
-        }),
+        body: JSON.stringify(body),
         signal
       });
 
@@ -1211,18 +1227,28 @@ class Air4ServiceImpl implements Air4Service {
   }
 
   private async chatStreamFallback(
-    payload: { text: string; session_id: string; settings?: any },
+    payload: { text: string; session_id: string; settings?: any; qb_session_id?: string | null; qb_enabled?: boolean },
     handlers: { onToken: (delta: string) => void; onDone: () => void; onError: (message: string) => void; onMeta?: (resolvedModel: string) => void }
   ): Promise<void> {
     try {
+      const body: any = {
+        q: payload.text,
+        session_id: payload.session_id,
+        settings: payload.settings
+      };
+      
+      // Add QB fields if provided
+      if (payload.qb_session_id) {
+        body.qb_session_id = payload.qb_session_id;
+      }
+      if (payload.qb_enabled !== undefined) {
+        body.qb_enabled = payload.qb_enabled;
+      }
+      
       const response = await fetch(`${this.apiBaseUrl}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          q: payload.text,
-          session_id: payload.session_id,
-          settings: payload.settings
-        })
+        body: JSON.stringify(body)
       });
 
       if (!response.ok) {

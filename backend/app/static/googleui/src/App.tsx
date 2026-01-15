@@ -41,7 +41,19 @@ const AppContent: React.FC = () => {
         if (air4.isValidSessionId(urlSessionId)) {
           setActiveSessionId(urlSessionId);
         } else {
-          console.warn('[App] Invalid session ID in popstate, ignoring:', urlSessionId);
+          console.debug('[App] Invalid session ID in popstate, ignoring:', urlSessionId);
+          
+          // Clean up invalid session ID from URL
+          const url = new URL(window.location.href);
+          url.searchParams.delete('session');
+          window.history.replaceState({}, '', url.toString());
+          
+          // Also check and remove from localStorage
+          const STORAGE_KEY_ACTIVE_SESSION = 'air4.activeSessionId';
+          const storedSessionId = localStorage.getItem(STORAGE_KEY_ACTIVE_SESSION);
+          if (storedSessionId === urlSessionId) {
+            localStorage.removeItem(STORAGE_KEY_ACTIVE_SESSION);
+          }
         }
       }
     };
@@ -109,7 +121,21 @@ const AppContent: React.FC = () => {
               if (air4.isValidSessionId(id)) {
                 setActiveSessionId(id);
               } else {
-                console.warn('[App] Invalid session ID from Chat, ignoring:', id);
+                console.debug('[App] Invalid session ID from Chat, ignoring:', id);
+                
+                // Clean up invalid session ID from sources
+                const url = new URL(window.location.href);
+                const urlSessionId = url.searchParams.get('session');
+                if (urlSessionId === id) {
+                  url.searchParams.delete('session');
+                  window.history.replaceState({}, '', url.toString());
+                }
+                
+                const STORAGE_KEY_ACTIVE_SESSION = 'air4.activeSessionId';
+                const storedSessionId = localStorage.getItem(STORAGE_KEY_ACTIVE_SESSION);
+                if (storedSessionId === id) {
+                  localStorage.removeItem(STORAGE_KEY_ACTIVE_SESSION);
+                }
               }
             }}
           />
@@ -127,7 +153,21 @@ const AppContent: React.FC = () => {
                 setActiveSessionId(id);
                 setActiveTab('chat');
               } else {
-                console.warn('[App] Invalid session ID from History, ignoring:', id);
+                console.debug('[App] Invalid session ID from History, ignoring:', id);
+                
+                // Clean up invalid session ID from sources
+                const url = new URL(window.location.href);
+                const urlSessionId = url.searchParams.get('session');
+                if (urlSessionId === id) {
+                  url.searchParams.delete('session');
+                  window.history.replaceState({}, '', url.toString());
+                }
+                
+                const STORAGE_KEY_ACTIVE_SESSION = 'air4.activeSessionId';
+                const storedSessionId = localStorage.getItem(STORAGE_KEY_ACTIVE_SESSION);
+                if (storedSessionId === id) {
+                  localStorage.removeItem(STORAGE_KEY_ACTIVE_SESSION);
+                }
               }
             }}
           />
@@ -166,7 +206,23 @@ const AppContent: React.FC = () => {
               setActiveSessionId(id);
               setActiveTab('chat');
             } else {
-              console.warn('[App] Invalid session ID from Sidebar, ignoring:', id);
+              console.debug('[App] Invalid session ID from Sidebar, ignoring:', id);
+              
+              // Clean up invalid session ID from sources
+              // 1. Check and remove from URL query param
+              const url = new URL(window.location.href);
+              const urlSessionId = url.searchParams.get('session');
+              if (urlSessionId === id) {
+                url.searchParams.delete('session');
+                window.history.replaceState({}, '', url.toString());
+              }
+              
+              // 2. Check and remove from localStorage
+              const STORAGE_KEY_ACTIVE_SESSION = 'air4.activeSessionId';
+              const storedSessionId = localStorage.getItem(STORAGE_KEY_ACTIVE_SESSION);
+              if (storedSessionId === id) {
+                localStorage.removeItem(STORAGE_KEY_ACTIVE_SESSION);
+              }
             }
           }}
         />

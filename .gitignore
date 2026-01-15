@@ -75,3 +75,16 @@ data/sessions/
 # macOS
 .DS_Store
 
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+
+# local memory (do not commit)
+backend/app/memory/facts_store.json
+
+
+# local memory (do not commit)
+backend/app/memory/facts_store.json
+
