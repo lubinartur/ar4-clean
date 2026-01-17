@@ -30,3 +30,11 @@ uvicorn backend.app.main:app --reload --port 8000
 - UI: /ui/chat
 - Health: /health
 - Поиск: /memory/search
+
+## AIR4 v3.0
+AIR4 v3.0 introduces thinking-in-time:
+- longitudinal memory
+- cross-session patterns
+- trend awareness
+- full user control
+Core v2.0 remains locked and unchanged.
