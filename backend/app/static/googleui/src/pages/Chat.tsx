@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useSettings } from "../hooks/useSettings";
 import { useAir4 } from '../contexts/Air4Context';
 import { Message, MemoryItem, RouterDecision, SystemStats, ResponseStyle, ModelName, ModelMode } from '../types';
@@ -63,6 +63,7 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
   const [userJustSentMessage, setUserJustSentMessage] = useState(false);
   const [qbSessionId, setQbSessionId] = useState<string | null>(null);
   const [qbEnabled, setQbEnabled] = useState(true);
+  const [qbRefreshTrigger, setQbRefreshTrigger] = useState(0);
   const styleMenuRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -90,10 +91,9 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
     return sid;
   }
 
-  useEffect(() => {
-    if (!qbEnabled) return;
-    ensureQbSession().then(setQbSessionId).catch(console.error);
-  }, [qbEnabled]);
+  // REMOVED: Automatic QB session creation on mount
+  // QB session is now created only after first user message or first AIR4 message
+  // This prevents QB from being the first message in a new session
 
   // Load session messages when ID changes
   useEffect(() => {
@@ -143,8 +143,33 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
               }
               
               console.debug('[CHAT] fetched', { id: s.id, messages: s.messages?.length });
-              setMessages(s.messages || []);
-              air4.upsertSession(s);
+              const loadedMessages = s.messages || [];
+              
+              // Add opening message for new empty sessions
+              if (loadedMessages.length === 0) {
+                const openingMessage: Message = {
+                  id: `opening-${Date.now()}`,
+                  role: 'assistant',
+                  content: 'Я здесь.\nЕсли хочешь — можем продолжить с того, что было,\nили начать с того, что сейчас важно.',
+                  timestamp: Date.now()
+                };
+                const messagesWithOpening = [openingMessage];
+                setMessages(messagesWithOpening);
+                // Persist opening message to session (local)
+                air4.upsertSession({
+                  ...s,
+                  messages: messagesWithOpening
+                });
+              } else {
+                setMessages(loadedMessages);
+                air4.upsertSession(s);
+              }
+              
+              // Create QB session if session has messages (not a new session)
+              // This allows QB to work in existing sessions, but prevents auto-start on new sessions
+              if (qbEnabled && !qbSessionId && loadedMessages.length > 0) {
+                ensureQbSession().then(setQbSessionId).catch(console.error);
+              }
           } catch (e: any) {
               // Ignore AbortError (expected when session changes)
               if (e.name === 'AbortError' || e.message?.includes('aborted')) {
@@ -159,6 +184,22 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
                   try {
                       const newSession = await air4.createSession('');
                       const newSessionId = newSession.id;
+                      
+                      // Add opening message for new session
+                      const openingMessage: Message = {
+                          id: `opening-${Date.now()}`,
+                          role: 'assistant',
+                          content: 'Я здесь.\nЕсли хочешь — можем продолжить с того, что было,\nили начать с того, что сейчас важно.',
+                          timestamp: Date.now()
+                      };
+                      const messagesWithOpening = [openingMessage];
+                      setMessages(messagesWithOpening);
+                      
+                      // Update session with opening message
+                      air4.upsertSession({
+                          ...newSession,
+                          messages: messagesWithOpening
+                      });
                       
                       // Update URL parameter (replaceState to avoid adding history entry)
                       const url = new URL(window.location.href);
@@ -501,6 +542,12 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
     const streamingEnabled = sessionConfig?.streaming !== undefined 
       ? sessionConfig.streaming 
       : (settings.streaming !== false); // default true
+    
+    // PHASE Q5: Get thinking_mode from localStorage (same key as QB panel uses)
+    const thinkingMode = typeof window !== 'undefined' 
+      ? (localStorage.getItem("air4.thinking_mode") || "structured")
+      : "structured";
+    
     const botMsgId = retryRequest?.botMsgId || (Date.now() + 1).toString();
     
     // CRITICAL: Store request for retry IMMEDIATELY, before any network calls
@@ -545,6 +592,24 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
     setIsThinking(true);
     setRouterState(null);
     setUserJustSentMessage(true); // Flag for auto-scroll
+
+    // Count user messages before adding this one
+    const userMessagesCountBefore = currentMessages.filter(m => m.role === 'user').length;
+    
+    // Create QB session only after first user message (not on session creation)
+    // This prevents QB from being the first message in a new session
+    if (qbEnabled && !qbSessionId && userMessagesCountBefore === 0) {
+      // First user message in new session - create QB session now
+      try {
+        const qbSid = await ensureQbSession();
+        setQbSessionId(qbSid);
+      } catch (e) {
+        console.warn('[Chat] Failed to create QB session', e);
+      }
+    }
+    
+    // Enable QB only after first user message (not on the first message itself)
+    const qbEnabledForRequest = qbEnabled && userMessagesCountBefore >= 1;
 
     let didFail = false;
     try {
@@ -594,13 +659,15 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
 
       if (streamingEnabled) {
         // Используем новый SSE стриминг
+        // PHASE Q5: Pass thinking_mode from localStorage
         await air4.chatStream(
           {
             text: requestText,
             session_id: currentSessionId,
             settings: cleanedSettings,
-            qb_enabled: qbEnabled,
-            qb_session_id: qbSessionId
+            qb_enabled: qbEnabledForRequest,
+            qb_session_id: qbSessionId,
+            thinking_mode: thinkingMode
           },
           {
             onToken: (delta: string) => {
@@ -647,6 +714,13 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
                   }
                 } catch (e) {
                   console.warn('[Chat] Failed to persist on done', e);
+                }
+                
+                // Trigger QB refresh after AIR4 response (only after first user message)
+                // Count user messages from finalMessages (includes the message we just sent)
+                const userCount = finalMessages.filter(m => m.role === 'user').length;
+                if (qbEnabled && userCount >= 1) {
+                  setQbRefreshTrigger(trigger => trigger + 1);
                 }
                 
                 return finalMessages;
@@ -722,12 +796,14 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
       } else {
         // Fallback на старый метод streamChat
         // Преобразуем в формат для streamChat (camelCase)
+        // PHASE Q5: Add thinkingMode from localStorage
         const streamChatSettings = {
           temperature: backendSettings.temperature,
           responseTone: backendSettings.response_tone,
           outputDensity: backendSettings.output_density,
           interfaceLanguage: backendSettings.interface_language,
           activeModel: backendSettings.model || backendSettings.active_model,
+          thinkingMode: thinkingMode
         };
         const cleanedStreamChatSettings = clean(streamChatSettings);
         console.log("[CHAT SEND settings]", cleanedStreamChatSettings);
@@ -1120,6 +1196,8 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
       {/* QB Panel */}
       <QBPanel
         enabled={qbEnabled}
+        refreshTrigger={qbRefreshTrigger}
+        userTurnsCount={useMemo(() => messages.filter(m => m.role === 'user').length, [messages])}
         onAnswered={(payload) => {
           // optional: can update local UI state with payload.snapshot/score
         }}

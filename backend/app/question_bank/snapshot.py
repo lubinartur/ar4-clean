@@ -20,6 +20,7 @@ def build_snapshot(mode: str, state_id: str, tags: List[str], signals: Dict[str,
             {"k": "overflow", "v": yn("emotional_overflow")},
             {"k": "ready", "v": yn("execution_ready")},
             {"k": "clarity", "v": yn("task_clarity")},
+            {"k": "fatigue", "v": yn("physical_fatigue")},
         ],
         "signals_count": len(signals),
     }

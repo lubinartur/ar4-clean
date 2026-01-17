@@ -11,6 +11,45 @@ class Selection:
     questions: List[Question]
     reason: str
 
+def compute_profile(calib: Dict[str, int]) -> str:
+    """
+    PHASE L: Compute personal calibration profile from counters.
+    
+    Args:
+        calib: Calibration dict with keys: continue_count, capture_count, go_deeper_count, answers_count
+    
+    Returns:
+        Profile string: "push"|"balanced"|"gentle"|"base"
+    """
+    continue_count = calib.get("continue_count", 0)
+    capture_count = calib.get("capture_count", 0)
+    go_deeper_count = calib.get("go_deeper_count", 0)
+    
+    total_actions = continue_count + capture_count + go_deeper_count
+    
+    # Force push profile if go_deeper_count >= 3 and continue_count == 0
+    force_push = go_deeper_count >= 3 and continue_count == 0
+    
+    # If total_actions < 3 and not forcing push: return base
+    if total_actions < 3 and not force_push:
+        return "base"
+    
+    # Calculate ratios
+    go_deeper_ratio = go_deeper_count / total_actions if total_actions > 0 else 0.0
+    capture_ratio = capture_count / total_actions if total_actions > 0 else 0.0
+    continue_ratio = continue_count / total_actions if total_actions > 0 else 0.0
+    
+    # Determine profile
+    if force_push or go_deeper_ratio >= 0.45:
+        return "push"
+    elif capture_ratio >= 0.45:
+        return "balanced"
+    elif continue_ratio >= 0.60:
+        return "gentle"
+    else:
+        return "base"
+
+
 def apply_personal_calibration(base_budget: int, calib: Dict[str, int]) -> tuple[int, str]:
     """
     PHASE L2 v0.1: Adjust ask_budget based on user behavior.
@@ -23,35 +62,10 @@ def apply_personal_calibration(base_budget: int, calib: Dict[str, int]) -> tuple
         tuple of (adjusted_budget, calibration_profile)
         where calibration_profile is "push"|"balanced"|"gentle"|"base" for debugging
     """
-    continue_count = calib.get("continue_count", 0)
-    capture_count = calib.get("capture_count", 0)
-    go_deeper_count = calib.get("go_deeper_count", 0)
+    # PHASE L: Use compute_profile() for consistency
+    profile = compute_profile(calib)
     
-    total_actions = continue_count + capture_count + go_deeper_count
-    
-    # Force push profile if go_deeper_count >= 3 and continue_count == 0
-    force_push = go_deeper_count >= 3 and continue_count == 0
-    
-    # If total_actions < 3 and not forcing push: do nothing (keep base ask_budget)
-    if total_actions < 3 and not force_push:
-        return (base_budget, "base")
-    
-    # Calculate ratios
-    go_deeper_ratio = go_deeper_count / total_actions if total_actions > 0 else 0.0
-    capture_ratio = capture_count / total_actions if total_actions > 0 else 0.0
-    continue_ratio = continue_count / total_actions if total_actions > 0 else 0.0
-    
-    # Determine profile
-    if force_push or go_deeper_ratio >= 0.45:
-        profile = "push"
-    elif capture_ratio >= 0.45:
-        profile = "balanced"
-    elif continue_ratio >= 0.60:
-        profile = "gentle"
-    else:
-        profile = "base"
-    
-    # Apply profile multiplier
+    # Apply profile multiplier to ask_budget
     if profile == "push":
         adjusted = min(base_budget + 1, 3)
         # Additional rule: if in deep/giga mode with push profile, ensure at least 2 questions

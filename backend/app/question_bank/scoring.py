@@ -62,6 +62,9 @@ def compute_score(state_id: str, mode: str, tags: List[str], signals: Dict[str, 
     if _yn(signals, "sleep_deficit") == "yes":
         base -= 6
         notes.append("sleep_deficit")
+    if _yn(signals, "physical_fatigue") == "yes":
+        base -= 15
+        notes.append("physical_fatigue")
 
     # Tags: small nudges
     if "want_but_avoid" in tags:

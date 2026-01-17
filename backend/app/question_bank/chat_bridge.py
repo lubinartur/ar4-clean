@@ -19,6 +19,7 @@ def build_chat_preamble(qb_context: Dict[str, Any]) -> str:
     state = qb_context.get("state", {}) or {}
     constraints = qb_context.get("constraints", {}) or {}
     signals = qb_context.get("signals", {}) or {}
+    thinking_mode = qb_context.get("thinking_mode", "structured")
 
     state_id = state.get("id", "UNKNOWN")
     mode = state.get("mode", "scan")
@@ -81,5 +82,19 @@ def build_chat_preamble(qb_context: Dict[str, Any]) -> str:
         lines.append("Hard forbids (must obey):")
         for a in forbid_actions:
             lines.append(f"- {a}")
+
+    # PHASE Q4: Question style based on thinking_mode
+    question_styles = {
+        "analytical": "Ask 1 clarifying fact question that reduces uncertainty. Prefer measurable/ конкретный факт.",
+        "structured": "Ask 1 question that chooses between 2 options. Prefer A/B.",
+        "wide": "Ask 1 question that opens 2-3 possible directions. Prefer 'что из этого ближе: A/B/C'.",
+        "hard": "Ask 1 blunt question that forces commitment. Prefer 'что ты выбираешь сейчас: сделать X или признать стоп'.",
+        "exploratory": "Ask 1 hypothesis-testing question. Prefer 'если X верно, то... это про тебя сейчас?'",
+    }
+    
+    style_text = question_styles.get(thinking_mode, question_styles["structured"])
+    lines.append("")
+    lines.append("Question style (1 question max):")
+    lines.append(f"- {style_text}")
 
     return "\n".join(lines).strip()

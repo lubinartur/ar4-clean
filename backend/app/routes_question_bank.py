@@ -18,11 +18,58 @@ from .question_bank.policy import select_next_questions
 from .question_bank.signal_resolver import resolve
 from .question_bank.decay import apply_decay
 from .question_bank.state_engine import pick_state
+from .question_bank.constants import (
+    INIT_THRESHOLD,
+    INSIGHT_COOLDOWN_SEC,
+    INSIGHT_SIGNAL_COOLDOWN_SEC,
+    AUTO_INSIGHT_MIN_INTERVAL,
+    HISTORICAL_MIN_GAP_SEC,
+    HISTORICAL_COOLDOWN_SEC,
+    get_thinking_mode_policy,
+    get_initiative_threshold,
+    get_insight_signal_threshold,
+    get_insight_interval_multiplier,
+)
 
 router = APIRouter(prefix="/qb", tags=["question_bank"])
 
 _bank = load_bank()
 _signal_set = set([q.signal for q in _bank.questions])
+
+# PHASE R v0.3 Step 1.2: Compute pattern_key from signals (stable), not from snapshot.chips
+def _compute_pattern_key_from_signals(signals: Dict[str, str]) -> Optional[str]:
+    """
+    Compute pattern_key from signals dict (stable mapping).
+    Maps: energy <- baseline_energy, focus <- attention_available, overload <- overload_risk
+    Returns None if no valid signals found.
+    """
+    if not signals:
+        return None
+    
+    pattern_parts = []
+    
+    # energy <- baseline_energy (yes/no)
+    energy_val = signals.get("baseline_energy", "")
+    if energy_val in ("yes", "no"):
+        pattern_parts.append(f"energy:{energy_val}")
+    
+    # focus <- attention_available (yes/no)
+    focus_val = signals.get("attention_available", "")
+    if focus_val in ("yes", "no"):
+        pattern_parts.append(f"focus:{focus_val}")
+    
+    # overload <- overload_risk (yes/no)
+    overload_val = signals.get("overload_risk", "")
+    if overload_val in ("yes", "no"):
+        pattern_parts.append(f"overload:{overload_val}")
+    
+    if not pattern_parts:
+        return None
+    
+    # Sort to ensure consistent ordering
+    pattern_parts.sort()
+    return "|".join(pattern_parts)
+
 
 def get_cooldown_sec(depth_mode: Optional[str], calibration_profile: Optional[str] = None) -> int:
     """Get cooldown in seconds based on depth_mode and calibration profile."""
@@ -56,7 +103,8 @@ def qb_next(req: QBRequest):
         validate_signal_exists(sig, _signal_set)
         validate_answer_value(ans)
     # Stateless mode doesn't have calibration data, so pass None
-    out = run_engine(req.answers, asked_ids=[], asked_at={}, domain_last_asked_at={}, answered_at={}, calibration=None)
+    # Default to "structured" thinking_mode for stateless mode
+    out = run_engine(req.answers, asked_ids=[], asked_at={}, domain_last_asked_at={}, answered_at={}, calibration=None, thinking_mode="structured")
     return {
         "state": {"id": out.state_id, "mode": out.mode, "tags": out.tags},
         "constraints": {"ask_budget": out.ask_budget, "forbid_domains": out.forbid_domains, "forbid_actions": out.forbid_actions},
@@ -117,7 +165,7 @@ class QBActionRequest(BaseModel):
 
 
 @router.post("/answer")
-def qb_answer(req: QBAnswerRequest):
+def qb_answer(req: QBAnswerRequest, debug: Optional[int] = None):
     """
     Stateful mode: client sends one answer at a time.
     Server stores answers and asked_ids.
@@ -134,6 +182,8 @@ def qb_answer(req: QBAnswerRequest):
             raise HTTPException(status_code=400, detail=f"invalid_calibration_action: {req.answer}")
         # Increment calibration counter (do NOT increment answers_count or store as answer)
         s = store.increment_action_count(req.session_id, req.answer)
+        # PHASE L: Update profile after action counter changed
+        s = store.update_profile(req.session_id)
         # Do NOT store this signal in s.answers to avoid polluting signals
     elif is_force_insight:
         # PHASE L2: Force insight for testing - accept any answer, do not mutate signals
@@ -159,8 +209,8 @@ def qb_answer(req: QBAnswerRequest):
         # Do NOT store this signal in s.answers to avoid polluting signals
         # Increment capture_count for calibration
         store.increment_action_count(req.session_id, "capture")
-        # Re-fetch to get updated counter
-        s = store.get(req.session_id)
+        # PHASE L: Update profile after action counter changed
+        s = store.update_profile(req.session_id)
     elif is_go_deeper:
         # PHASE L2: Go deeper - force one question from same domain if possible
         if not req.answer:
@@ -171,8 +221,8 @@ def qb_answer(req: QBAnswerRequest):
             s = store.create()
         # Increment go_deeper_count for calibration
         store.increment_action_count(req.session_id, "go_deeper")
-        # Re-fetch to get updated counter
-        s = store.get(req.session_id)
+        # PHASE L: Update profile after action counter changed
+        s = store.update_profile(req.session_id)
         # Do NOT store this signal in s.answers to avoid polluting signals
     else:
         # Normal signal validation
@@ -190,15 +240,23 @@ def qb_answer(req: QBAnswerRequest):
         # PHASE L1: Increment action counter if action is provided (legacy support)
         if req.action and req.action in ["continue", "capture", "go_deeper"]:
             store.increment_action_count(req.session_id, req.action)
+        
+        # PHASE L: Update profile after counters changed
+        store.update_profile(req.session_id)
 
     depth_mode = req.depth_mode or "normal"
     thinking_mode_val = req.thinking_mode or "structured"
     
-    # PHASE L2: Re-fetch session after capture/go_deeper to get updated counters
-    if is_capture or is_go_deeper:
-        s = store.get(req.session_id)
-        if s is None:
-            raise HTTPException(status_code=404, detail="session_not_found")
+    # PHASE J: Get thinking mode policy parameters
+    thinking_policy = get_thinking_mode_policy(thinking_mode_val)
+    insight_threshold_level = thinking_policy["insight_threshold"]
+    insight_signal_threshold = get_insight_signal_threshold(insight_threshold_level)
+    insight_interval_multiplier = get_insight_interval_multiplier(insight_threshold_level)
+    
+    # PHASE K/R v0.2: Re-fetch session to ensure we have latest state (including last_insight_at)
+    s = store.get(req.session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session_not_found")
     
     calibration = {
         "continue_count": s.continue_count,
@@ -210,6 +268,11 @@ def qb_answer(req: QBAnswerRequest):
     # Insight Loop v0.1: track signal counts and generate insight (skip calibration actions, force insight, and capture)
     insight_text: Optional[str] = None
     suggest_actions: Optional[List[str]] = None
+    # PHASE K/R v0.2 Step 5: Track if signal-based insight was shown (to prevent double insight)
+    did_signal_insight = False
+    # PHASE R v0.2 Step 4: Debug explanation for insight reason
+    insight_debug: Optional[str] = None
+    is_debug = debug and debug != 0
     
     if is_calibration_action:
         # PHASE L2: Always return insight and suggest for calibration actions
@@ -231,18 +294,37 @@ def qb_answer(req: QBAnswerRequest):
         # Skip signal count tracking
         pass
     else:
-        s.signal_counts[req.signal] = s.signal_counts.get(req.signal, 0) + 1
-        s.touch()  # Update session timestamp
+        # PHASE K/R v0.2: Update signal counts through store method to ensure persistence
+        s = store.update_signal_counts(req.session_id, req.signal)
         
-        # Generate insight if: signal appears >= 2 times AND no insight shown yet in this session
-        if s.signal_counts[req.signal] >= 2 and s.last_insight_at is None:
+        # PHASE K/R v0.2: Generate insight if signal count >= threshold AND both cooldowns expired AND not first answer
+        now = time.time()
+        # Global cooldown check
+        global_cooldown_ok = (
+            s.last_insight_at is None or 
+            (now - s.last_insight_at) >= INSIGHT_COOLDOWN_SEC
+        )
+        # Per-signal cooldown check
+        last_signal_insight = s.last_insight_by_signal.get(req.signal)
+        signal_cooldown_ok = (
+            last_signal_insight is None or
+            (now - last_signal_insight) >= INSIGHT_SIGNAL_COOLDOWN_SEC
+        )
+        # PHASE K/R v0.2 Step 3: Anti-reactive - require at least 2 answers before showing signal-based insight
+        has_enough_answers = s.answers_count >= 2
+        
+        if s.signal_counts[req.signal] >= insight_signal_threshold and global_cooldown_ok and signal_cooldown_ok and has_enough_answers:
             # Generate insight text based on thinking_mode
             insight_text = generate_insight_text(req.signal, thinking_mode_val)
             suggest_actions = ["continue", "capture", "go_deeper"]
-            s.last_insight_at = time.time()
-            # PHASE L2: Store last_insight for capture
-            s.last_insight = insight_text
-            s.touch()
+            did_signal_insight = True  # PHASE K/R v0.2 Step 5: Mark that signal-based insight was shown
+            # PHASE R v0.2 Step 4: Set debug explanation
+            if is_debug:
+                insight_debug = f"signal:{req.signal}"
+            # PHASE K/R v0.2: Update both global and per-signal cooldown timestamps
+            s = store.set_last_insight_at(req.session_id, now)
+            s = store.set_last_insight_by_signal(req.session_id, req.signal, now)
+            s = store.set_last_insight(req.session_id, insight_text)
     
     # Silent mode: return empty questions immediately
     if depth_mode == "silent":
@@ -343,9 +425,18 @@ def qb_answer(req: QBAnswerRequest):
     score = compute_score(out.state_id, out.mode, out.tags, s.answers)
     preamble = build_chat_preamble(qb_ctx.to_dict())
 
-    # AUTO INSIGHT: Deterministic insight based on depth_mode and answers_count
+    # PHASE R v0.3 Step 1.1: Log pattern occurrences independent of insight cooldowns
+    # PHASE R v0.3 Step 1.2: Compute pattern_key from signals (stable), not from snapshot.chips
+    # This happens ALWAYS when we have signals, not dependent on insight_text
+    now = time.time()
+    pattern_key = _compute_pattern_key_from_signals(s.answers)
+    if pattern_key:
+        s = store.add_pattern_occurrence(req.session_id, pattern_key, now)
+
+    # AUTO INSIGHT: Deterministic insight based on depth_mode, answers_count, and insight_threshold
     # Only for normal answers (not calibration_action, force_insight, capture, go_deeper)
-    if not is_calibration_action and not is_force_insight and not is_capture and not is_go_deeper:
+    # PHASE K/R v0.2 Step 5: Skip AUTO insight if signal-based insight was already shown
+    if not is_calibration_action and not is_force_insight and not is_capture and not is_go_deeper and not did_signal_insight:
         # Define intervals by depth_mode
         intervals = {
             "silent": 999999,  # Never
@@ -353,7 +444,14 @@ def qb_answer(req: QBAnswerRequest):
             "deep": 5,
             "giga": 3,
         }
-        interval = intervals.get(depth_mode, 10)
+        base_interval = intervals.get(depth_mode, 10)
+        
+        # PHASE J: Apply insight_threshold multiplier to interval
+        interval = int(base_interval * insight_interval_multiplier)
+        if interval < 1:
+            interval = 1
+        # PHASE K/R v0.2 Step 4: Enforce minimum interval to prevent spam
+        interval = max(interval, AUTO_INSIGHT_MIN_INTERVAL)
         
         # Check if we should emit insight
         n = s.answers_count
@@ -362,8 +460,11 @@ def qb_answer(req: QBAnswerRequest):
         if interval > 0 and n > 0 and n % interval == 0 and signals_count > 0:
             # Generate short pattern insight
             if not insight_text:  # Don't override existing insight
-                insight_text = generate_short_pattern_insight(snap, s.answers)
+                insight_text = generate_short_pattern_insight(snap, s.answers, thinking_mode_val)
                 suggest_actions = ["continue", "capture", "go_deeper"]
+                # PHASE R v0.2 Step 4: Set debug explanation for AUTO insight
+                if is_debug:
+                    insight_debug = f"auto:interval={interval},answers_count={n}"
                 # Store last_insight for capture
                 s.last_insight = insight_text
                 s.touch()
@@ -377,9 +478,51 @@ def qb_answer(req: QBAnswerRequest):
             insight_text = f"Тестовый инсайт: вижу текущий паттерн (state_id={out.state_id}, signals={signals_count}, profile={out.calibration_profile}). Выбирай действие."
         else:
             insight_text = "Тестовый инсайт: вижу текущий паттерн. Выбирай действие."
+        # PHASE R v0.2 Step 4: Set debug explanation for force_insight
+        if is_debug:
+            insight_debug = "forced"
         # Store last_insight for capture
         s.last_insight = insight_text
         s.touch()
+    
+    # PHASE R v0.3 Step 1.1: Historical Pattern Trigger
+    # Check historical insight AFTER signal/auto insight is determined, but BEFORE capture logic
+    # Historical insight has priority and replaces existing insight_text (or sets it if None)
+    # Pattern occurrence was already logged above, now check if historical condition is met
+    did_historical = False
+    gap_ok = False
+    cooldown_ok = False
+    occurrences = []
+    if pattern_key:  # Check if we have a valid pattern_key (already logged above)
+        # Re-fetch session to get updated pattern_history
+        s = store.get(req.session_id)
+        if s is None:
+            raise HTTPException(status_code=404, detail="session_not_found")
+        
+        occurrences = s.pattern_history.get(pattern_key, [])
+        if len(occurrences) >= 2:
+            # PHASE R v0.3 Step 1.4: Historical gap should ignore same-cycle duplicates
+            # Find previous occurrence that is at least HISTORICAL_MIN_GAP_SEC before last_ts
+            last_ts = max(occurrences)
+            prev_ts = max((ts for ts in occurrences if ts <= last_ts - HISTORICAL_MIN_GAP_SEC), default=None)
+            gap_ok = prev_ts is not None
+        
+        # Check cooldown (last historical insight) - compute always for debug
+        cooldown_ok = (
+            s.last_historical_insight_at is None or
+            (now - s.last_historical_insight_at) >= HISTORICAL_COOLDOWN_SEC
+        )
+        
+        if len(occurrences) >= 2 and gap_ok and cooldown_ok:
+            # Historical insight has priority: replace existing insight_text (or set if None)
+            insight_text = "Этот паттерн уже возникал раньше. Похоже, это повторяющееся состояние. Дальше: продолжить / зафиксировать / копать."
+            suggest_actions = ["continue", "capture", "go_deeper"]
+            did_historical = True
+            # Update cooldown timestamp and last_insight
+            s = store.set_last_historical_insight_at(req.session_id, now)
+            s = store.set_last_insight(req.session_id, insight_text)
+            if is_debug:
+                insight_debug = f"historical:pattern={pattern_key},occurrences={len(occurrences)}"
     
     # PHASE L2: Handle capture logic after we have snapshot
     captured_item: Optional[Dict[str, Any]] = None
@@ -424,7 +567,7 @@ def qb_answer(req: QBAnswerRequest):
             "capture_count": s.capture_count,
             "go_deeper_count": s.go_deeper_count,
             "answers_count": s.answers_count,
-            "profile": out.calibration_profile,  # PHASE L2: Calibration profile for debugging
+            "profile": s.profile,  # PHASE L: Profile from session (auto-updated)
         },
     }
     
@@ -432,16 +575,28 @@ def qb_answer(req: QBAnswerRequest):
     if insight_text:
         result["insight"] = insight_text
         result["suggest"] = suggest_actions or ["continue", "capture", "go_deeper"]
+        # PHASE R v0.2 Step 4: Add debug explanation if debug mode enabled
+        if is_debug and insight_debug:
+            result["insight_debug"] = insight_debug
     
     # PHASE L2: Add captured item if this was a capture action
     if captured_item is not None:
         result["captured"] = captured_item
     
+    # Add debug fields for historical patterns (only when debug is enabled)
+    if is_debug:
+        result["pattern_key"] = pattern_key
+        result["pattern_occurrences_count"] = len(occurrences)
+        result["historical_gap_ok"] = gap_ok
+        result["historical_cooldown_ok"] = cooldown_ok
+        result["historical_eligible"] = (len(occurrences) >= 2) and gap_ok and cooldown_ok
+        result["historical_last_at"] = getattr(s, 'last_historical_insight_at', None) if pattern_key else None
+    
     return result
 
 
 @router.get("/state")
-def qb_state(session_id: str, depth_mode: Optional[str] = None, thinking_mode: Optional[str] = None, force_insight: Optional[int] = None):
+def qb_state(session_id: str, depth_mode: Optional[str] = None, thinking_mode: Optional[str] = None, force_insight: Optional[int] = None, debug: Optional[int] = None):
     s = store.get(session_id)
     if s is None:
         return {"error": "session_not_found", "session_id": session_id}
@@ -456,6 +611,21 @@ def qb_state(session_id: str, depth_mode: Optional[str] = None, thinking_mode: O
         "answers_count": s.answers_count,
     }
     
+    # PHASE J: Get thinking mode policy for initiative threshold
+    thinking_mode_val = thinking_mode or "structured"
+    thinking_policy = get_thinking_mode_policy(thinking_mode_val)
+    initiative_level = thinking_policy["initiative_level"]
+    # PHASE L: Apply profile modifier to initiative threshold
+    effective_init_threshold = get_initiative_threshold(initiative_level, INIT_THRESHOLD, s.profile)
+    
+    # PHASE O: Session-based initiative trigger (now uses thinking_mode policy)
+    # Check if initiative should trigger: depth_mode != "silent", answers_count < threshold, not already asked
+    initiative_triggered = False
+    if depth_mode != "silent" and s.answers_count < effective_init_threshold and not s.initiative_asked:
+        initiative_triggered = True
+        s.initiative_asked = True
+        s.touch()
+    
     # Silent mode: return empty questions immediately
     if depth_mode == "silent":
         out = run_engine(
@@ -466,6 +636,7 @@ def qb_state(session_id: str, depth_mode: Optional[str] = None, thinking_mode: O
             answered_at=s.answered_at,
             depth_mode=depth_mode,
             calibration=calibration,
+            thinking_mode=thinking_mode_val,
         )
         out.next_questions = []
     else:
@@ -477,17 +648,50 @@ def qb_state(session_id: str, depth_mode: Optional[str] = None, thinking_mode: O
             answered_at=s.answered_at,
             depth_mode=depth_mode,
             calibration=calibration,
+            thinking_mode=thinking_mode_val,
         )
         
-        # Cooldown check: apply depth_mode and profile-based cooldown
-        cooldown_sec = get_cooldown_sec(depth_mode, out.calibration_profile)
-        now = time.time()
-        if s.last_asked_at is not None and (now - s.last_asked_at) < cooldown_sec:
-            out.next_questions = []
+        # PHASE O: If initiative triggered, override with canonical first question
+        if initiative_triggered:
+            # Find question from bank using canonical signal, or use fallback
+            from .question_bank.constants import CANONICAL_FIRST_QUESTION_SIGNAL, CANONICAL_FIRST_QUESTION_TEXT
+            canonical_q = None
+            for q in _bank.questions:
+                if q.signal == CANONICAL_FIRST_QUESTION_SIGNAL:
+                    canonical_q = {
+                        "id": q.id,
+                        "signal": q.signal,
+                        "domain": q.domain,
+                        "question": CANONICAL_FIRST_QUESTION_TEXT,  # Override with canonical text
+                        "answers": list(q.answers)
+                    }
+                    break
+            
+            # Fallback: if question not found, create minimal question structure
+            if not canonical_q:
+                canonical_q = {
+                    "id": "Q-INIT-001",
+                    "signal": CANONICAL_FIRST_QUESTION_SIGNAL,
+                    "domain": "energy_state",
+                    "question": CANONICAL_FIRST_QUESTION_TEXT,
+                    "answers": ["yes", "no"]
+                }
+            
+            # Use canonical first question
+            out.next_questions = [canonical_q]
+            # Mark as asked
+            store.mark_asked(session_id, [canonical_q["id"]])
+            store.set_last_asked_at(session_id, time.time())
         else:
-            # Update last_asked_at when actually showing questions
-            if out.next_questions:
-                store.set_last_asked_at(session_id, now)
+            # Cooldown check: apply depth_mode and profile-based cooldown
+            cooldown_sec = get_cooldown_sec(depth_mode, out.calibration_profile)
+            now = time.time()
+            if s.last_asked_at is not None and (now - s.last_asked_at) < cooldown_sec:
+                out.next_questions = []
+            else:
+                # Update last_asked_at when actually showing questions
+                if out.next_questions:
+                    store.set_last_asked_at(session_id, now)
     
     thinking_mode_val = thinking_mode or "structured"
     qb_ctx = build_qb_context(
@@ -520,14 +724,19 @@ def qb_state(session_id: str, depth_mode: Optional[str] = None, thinking_mode: O
             "capture_count": s.capture_count,
             "go_deeper_count": s.go_deeper_count,
             "answers_count": s.answers_count,
-            "profile": out.calibration_profile,  # PHASE L2: Calibration profile for debugging
+            "profile": s.profile,  # PHASE L: Profile from session (auto-updated)
         },
     }
     
-    # PHASE L2.2: Support force_insight query param
+    # PHASE R v0.2 FIX: Support force_insight query param - use real AUTO/pattern insight
+    is_debug = debug and debug != 0
     if force_insight and force_insight != 0:
-        result["insight"] = "Тестовый инсайт: вижу текущий паттерн. Выбирай действие."
+        # Generate real pattern insight instead of test stub
+        result["insight"] = generate_short_pattern_insight(snap, s.answers, thinking_mode_val)
         result["suggest"] = ["continue", "capture", "go_deeper"]
+        # PHASE R v0.2 Step 4: Add debug explanation for force_insight
+        if is_debug:
+            result["insight_debug"] = "forced"
     
     return result
 
@@ -551,8 +760,8 @@ def qb_action(req: QBActionRequest):
     
     # Increment calibration counter
     store.increment_action_count(req.session_id, req.action)
-    # Re-fetch to get updated counters
-    s = store.get(req.session_id)
+    # PHASE L: Update profile after action counter changed
+    s = store.update_profile(req.session_id)
     
     depth_mode = "normal"  # Default, could be made configurable
     thinking_mode_val = "structured"
@@ -573,6 +782,7 @@ def qb_action(req: QBActionRequest):
         answered_at=s.answered_at,
         depth_mode=depth_mode,
         calibration=calibration,
+        thinking_mode=thinking_mode_val,
     )
     
     # PHASE L2.4: Handle go_deeper - select exactly 1 question immediately
@@ -725,6 +935,7 @@ def qb_reset(session_id: str, depth_mode: Optional[str] = None, thinking_mode: O
         answered_at=s.answered_at,
         depth_mode=depth_mode,
         calibration=calibration,
+        thinking_mode=thinking_mode_val,
     )
     
     # Cooldown check: apply depth_mode and profile-based cooldown
@@ -770,7 +981,7 @@ def qb_reset(session_id: str, depth_mode: Optional[str] = None, thinking_mode: O
             "capture_count": s.capture_count,
             "go_deeper_count": s.go_deeper_count,
             "answers_count": s.answers_count,
-            "profile": out.calibration_profile,  # PHASE L2: Calibration profile for debugging
+            "profile": s.profile,  # PHASE L: Profile from session (auto-updated)
         },
     }
 
@@ -780,6 +991,7 @@ def qb_snapshot(session_id: str, depth_mode: Optional[str] = None):
     if s is None:
         return {"error": "session_not_found", "session_id": session_id}
     # Snapshot endpoint doesn't need calibration, pass None
+    # Default to "structured" thinking_mode for snapshot
     out = run_engine(
         s.answers,
         asked_ids=s.asked_ids,
@@ -788,6 +1000,7 @@ def qb_snapshot(session_id: str, depth_mode: Optional[str] = None):
         answered_at=s.answered_at,
         depth_mode=depth_mode,
         calibration=None,
+        thinking_mode="structured",
     )
     return build_snapshot(out.mode, out.state_id, out.tags, s.answers)
 

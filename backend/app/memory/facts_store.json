@@ -148,5 +148,25 @@
     "category": "other",
     "source_session": "ui",
     "source_message_id": null
+  },
+  {
+    "id": "7d70f7b8-6690-4927-a459-7430529e11c7",
+    "subject": "Arch",
+    "predicate": "goal",
+    "object": "собрать реальный материал, а не идеи.  ---  ### PHASE P — REVISION CORE PROMPT Только после Phase O.  Возможные изменения: — усилить / ослабить инициативу — уточнить границы вопросов — добавить 1 недостающий принцип  Результат: AIR4_CORE_BEHAVIOR_PROMPT v1.1  ---  ### PHASE Q / R — THINKING MODES + INSIGHT LOOP v0.2 После живого опыта: — thinking_mode начнёт реально влиять — инсайты станут историческими — AIR4 начнёт вести мышление, а не реагировать  ---  ## 6. ФИНАЛЬНАЯ ФИКСАЦИЯ  AIR4 v2.0 сейчас — это: не чат, не терапия, не коуч.  Это локальный, инициативный, неманипулятивный движок мышления.  Лучшее действие на этом этапе — дать системе пожить и посмотреть, где она ломается",
+    "timestamp": 1768655144.861207,
+    "category": "goals",
+    "source_session": "aca700f8",
+    "source_message_id": null
+  },
+  {
+    "id": "7429eb7f-72b1-47e2-aa2e-c2f36db7b50d",
+    "subject": "Arch",
+    "predicate": "goal",
+    "object": "счас поработать хорошо",
+    "timestamp": 1768669023.320972,
+    "category": "goals",
+    "source_session": "301a7951",
+    "source_message_id": null
   }
 ]

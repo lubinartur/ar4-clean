@@ -163,6 +163,27 @@ def _append_msg(session_id: str, role: str, content: str):
     )
     with f.open("a", encoding="utf-8") as fh:
         fh.write(line + "\n")
+    
+    # --- MINIMAL auto-summary: trigger after N user messages (default: 5) ---
+    if role == "user":
+        try:
+            user_turn_count = _count_user_turns(session_id)
+            # Auto-generate summary after every N user messages (default: 5)
+            AUTO_SUMMARY_INTERVAL = 5
+            if user_turn_count > 0 and user_turn_count % AUTO_SUMMARY_INTERVAL == 0:
+                # Trigger async summary generation (fire-and-forget)
+                # Try to get current event loop (works in async context like FastAPI endpoints)
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(_generate_session_summary_chroma(session_id))
+                    logger.info(f"[session_summary] auto-triggered for session {session_id} after {user_turn_count} user messages")
+                except RuntimeError:
+                    # No event loop running - this should not happen in FastAPI async context
+                    # But we fail silently to not break message appending
+                    logger.debug(f"[session_summary] no event loop available for auto-trigger (session {session_id})")
+        except Exception as e:
+            # Fail silently - don't break message appending
+            logger.debug(f"[session_summary] auto-trigger check failed: {e}")
 
 
 def append_summary_event(session_id: str, summary_obj: Dict[str, Any]):
@@ -376,6 +397,150 @@ async def _run_summary_task(session_id: str) -> None:
         await generate_summary(session_id)
     except Exception as e:
         logger.exception(f"[summary] background task failed for session {session_id}: {e}")
+
+
+# --- Session auto-summary in ChromaDB (MINIMAL) ---
+async def _generate_session_summary_chroma(session_id: str) -> None:
+    """
+    Generate short session summary (3-5 lines) and store in ChromaDB.
+    Hotfix for UX: creates long-term memory via RAG.
+    
+    Summary format:
+    - What was discussed
+    - Current state / signal
+    - One conclusion (if any)
+    
+    Stored with:
+    - namespace: "sessions"
+    - kind: "summary"
+    - metadata: session_id, created_at
+    """
+    try:
+        enabled, memory = _get_memory()
+        if not enabled or not memory:
+            return  # Memory not enabled
+        
+        # Get recent dialogue (last 10 messages should be enough for short summary)
+        recent_dialogue = _get_recent_dialogue(session_id, n_user_turns=10)
+        if not recent_dialogue:
+            return
+        
+        # Format dialogue for prompt (skip system messages)
+        dialogue_lines = []
+        for msg in recent_dialogue:
+            role = msg.get("role", "")
+            content = msg.get("content", "").strip()
+            if content and role in ("user", "assistant"):
+                dialogue_lines.append(f"{role}: {content}")
+        dialogue_text = "\n".join(dialogue_lines[-10:])  # Last 10 messages max
+        
+        # Build prompt for SHORT summary (3-5 lines)
+        prompt = (
+            "Сделай ОЧЕНЬ краткий конспект диалога (3-5 строк).\n"
+            "Формат:\n"
+            "1. О чём говорили\n"
+            "2. Текущее состояние / сигнал\n"
+            "3. Один вывод (если есть)\n\n"
+            "Диалог:\n" + dialogue_text
+        )
+        
+        # Call LLM for summary generation
+        summary_text = ""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                async with client.stream(
+                    "POST",
+                    "http://localhost:11434/api/chat",
+                    json={
+                        "model": "mistral",
+                        "messages": [
+                            {"role": "user", "content": prompt}
+                        ],
+                    },
+                ) as res:
+                    chunks = []
+                    async for line in res.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            json_line = json.loads(line)
+                            content = json_line.get("message", {}).get("content", "")
+                            if content:
+                                chunks.append(content)
+                        except Exception:
+                            continue
+                    summary_text = "".join(chunks).strip()
+        except Exception as e:
+            logger.warning(f"[session_summary] LLM call failed: {e}")
+            # Fallback: simple extractive summary
+            summary_text = _extract_simple_summary(recent_dialogue)
+        
+        if not summary_text or len(summary_text) < 10:
+            return  # Skip if summary is too short
+        
+        # Limit summary length (should be short anyway, but enforce max 500 chars)
+        summary_text = summary_text[:500].strip()
+        
+        # Store in ChromaDB via ChromaMemoryManager
+        user_id = "dev"  # Default user ID
+        ts = int(time.time())
+        summary_id = f"session_summary_{session_id}_{ts}"
+        
+        # Use add_texts method with proper metadata
+        metadata = {
+            "session_id": session_id,
+            "user_id": user_id,
+            "source": "summary",  # This will normalize to namespace="sessions"
+            "kind": "summary",
+            "created_at": ts,
+        }
+        
+        try:
+            memory.add_texts(
+                texts=[summary_text],
+                metadatas=[metadata],
+                ids=[summary_id]
+            )
+            logger.info(f"[session_summary] stored in ChromaDB for session {session_id}")
+        except Exception as e:
+            logger.warning(f"[session_summary] failed to store in ChromaDB: {e}")
+            
+    except Exception as e:
+        logger.error(f"[session_summary] generation failed for session {session_id}: {e}", exc_info=True)
+
+
+def _extract_simple_summary(recent_dialogue: List[Dict[str, str]]) -> str:
+    """Fallback: extract simple summary from dialogue without LLM."""
+    if not recent_dialogue:
+        return ""
+    
+    # Get user messages (what they asked about)
+    user_messages = [msg.get("content", "").strip() for msg in recent_dialogue if msg.get("role") == "user"]
+    assistant_messages = [msg.get("content", "").strip() for msg in recent_dialogue if msg.get("role") == "assistant"]
+    
+    if not user_messages:
+        return ""
+    
+    # Simple extractive summary
+    lines = []
+    if user_messages:
+        # First line: what was discussed (from last 2-3 user messages)
+        last_topics = user_messages[-3:] if len(user_messages) >= 3 else user_messages
+        topics = ", ".join([msg[:50] for msg in last_topics if msg])
+        if topics:
+            lines.append(f"Обсуждали: {topics}")
+    
+    if assistant_messages:
+        # Second line: current state (from last assistant message)
+        last_assistant = assistant_messages[-1]
+        if last_assistant:
+            lines.append(f"Текущий статус: {last_assistant[:100]}")
+    
+    # Third line: simple conclusion
+    if len(user_messages) >= 2:
+        lines.append("Вывод: диалог продолжается.")
+    
+    return "\n".join(lines[:3]) if lines else ""
 
 
 async def generate_summary(session_id: str) -> None:
@@ -719,10 +884,20 @@ def _build_thinking_mode_directives(thinking_mode: Optional[str] = None) -> str:
     return f"\n\nTHINKING MODE: {mode.capitalize()}\nDirectives:\n{directives}\n"
 
 
-def _get_qb_payload(qb_session_id: str):
+def _get_qb_payload(qb_session_id: str, thinking_mode: Optional[str] = None):
+    """
+    Get QB payload for chat context.
+    
+    Args:
+        qb_session_id: QB session ID
+        thinking_mode: Thinking mode from request (defaults to "structured" if not provided)
+    """
     session = qb_store.get(qb_session_id)
     if session is None:
         return None
+
+    # PHASE Q5: Use thinking_mode from request, default to "structured" only if not provided
+    effective_thinking_mode = thinking_mode or "structured"
 
     out = run_engine(
         session.answers,
@@ -730,6 +905,7 @@ def _get_qb_payload(qb_session_id: str):
         asked_at=session.asked_at,
         domain_last_asked_at=session.domain_last_asked_at,
         answered_at=session.answered_at,
+        thinking_mode=effective_thinking_mode,
     )
 
     qb_ctx = build_qb_context(
@@ -740,7 +916,7 @@ def _get_qb_payload(qb_session_id: str):
         ask_budget=out.ask_budget,
         forbid_domains=out.forbid_domains,
         forbid_actions=out.forbid_actions,
-        thinking_mode="structured",  # Default for chat context
+        thinking_mode=effective_thinking_mode,
     )
 
     preamble = build_chat_preamble(qb_ctx.to_dict())
@@ -825,12 +1001,21 @@ async def chat(body: ChatRequest, request: Request = None):
     from backend.app.chat import ARCH_CORE_PROMPT
     system_preamble = ARCH_CORE_PROMPT
 
+    # Extract and validate session_id early to check if this is first turn
+    sess_id = body.get_session_id()
+    from backend.app.main import validate_session_id
+    sess_id = validate_session_id(sess_id) if sess_id else None
+
     # --- v0.7: QB -> /chat bridge ---
+    # Enable Question Bank only after first user message in session
     qb_payload = None
-    if body.qb_enabled and body.qb_session_id:
-        qb_payload = _get_qb_payload(body.qb_session_id)
-        if qb_payload and qb_payload.get("chat_preamble"):
-            system_preamble += "\n\n" + qb_payload["chat_preamble"] + "\n"
+    qb_allowed = False
+    if sess_id:
+        try:
+            user_turn_count = _count_user_turns(sess_id)
+            qb_allowed = (user_turn_count >= 1)  # Allow QB after first user message
+        except Exception:
+            qb_allowed = False  # Safe fallback: disable QB if check fails
     
     # --- PHASE J2: Thinking Mode directives ---
     # Extract thinking_mode: priority: body.thinking_mode, else query param, else default "structured"
@@ -841,6 +1026,12 @@ async def chat(body: ChatRequest, request: Request = None):
         thinking_mode = query_params.get("thinking_mode")
     if not thinking_mode:
         thinking_mode = "structured"  # Default
+    
+    # PHASE Q5: Pass thinking_mode to QB payload generation
+    if body.qb_enabled and body.qb_session_id and qb_allowed:
+        qb_payload = _get_qb_payload(body.qb_session_id, thinking_mode)
+        if qb_payload and qb_payload.get("chat_preamble"):
+            system_preamble += "\n\n" + qb_payload["chat_preamble"] + "\n"
     
     # Add thinking mode directives AFTER ARCH_CORE_PROMPT and AFTER QB preamble
     thinking_directives = _build_thinking_mode_directives(thinking_mode)
@@ -959,9 +1150,13 @@ async def chat(body: ChatRequest, request: Request = None):
     # extra_parts игнорируются для system prompt
 
     # Extract and validate session_id from validated body
-    sess_id = body.get_session_id()
-    from backend.app.main import validate_session_id
-    sess_id = validate_session_id(sess_id)
+    # (Already extracted earlier for QB check, but ensure it's validated)
+    if not sess_id:
+        sess_id = body.get_session_id()
+        sess_id = validate_session_id(sess_id) if sess_id else None
+    else:
+        # Re-validate to ensure consistency
+        sess_id = validate_session_id(sess_id)
 
     q_l = q.lower().strip()
 
@@ -1582,16 +1777,17 @@ async def chat_stream(body: ChatRequest):
     
     # system_preamble already initialized at the beginning of the function
     
-    # --- v0.7: QB -> /chat bridge ---
-    qb_payload = None
-    if body.qb_enabled and body.qb_session_id:
-        qb_payload = _get_qb_payload(body.qb_session_id)
-        if qb_payload and qb_payload.get("chat_preamble"):
-            system_preamble += "\n\n" + qb_payload["chat_preamble"] + "\n"
-    
     # --- PHASE J2: Thinking Mode directives ---
     # Extract thinking_mode: priority: body.thinking_mode, else default "structured"
     thinking_mode = body.thinking_mode or "structured"
+    
+    # --- v0.7: QB -> /chat bridge ---
+    # PHASE Q5: Pass thinking_mode to QB payload generation
+    qb_payload = None
+    if body.qb_enabled and body.qb_session_id:
+        qb_payload = _get_qb_payload(body.qb_session_id, thinking_mode)
+        if qb_payload and qb_payload.get("chat_preamble"):
+            system_preamble += "\n\n" + qb_payload["chat_preamble"] + "\n"
     
     # Add thinking mode directives AFTER ARCH_CORE_PROMPT and AFTER QB preamble
     thinking_directives = _build_thinking_mode_directives(thinking_mode)
@@ -2063,6 +2259,10 @@ def create_session(body: Optional[CreateSessionRequest] = None):
         "summary": None,
     }
     
+    # Add opening message for new session
+    opening_content = "Я здесь.\nЕсли хочешь — можем продолжить с того, что было,\nили начать с того, что сейчас важно."
+    _append_msg(session_id, "assistant", opening_content)
+    
     # Add to index
     idx[session_id] = session_entry
     
@@ -2268,3 +2468,27 @@ def clear_session(session_id: str):
             pass
 
     return {"ok": True, "session_id": session_id}
+
+
+@router.post("/force_summary")
+async def force_summary(session_id: str = Body(..., embed=True)):
+    """
+    Manual trigger for session summary generation.
+    Forces generation of session summary and storage in ChromaDB.
+    
+    Args:
+        session_id: Session ID to generate summary for
+    
+    Returns:
+        {"ok": True, "summary_generated": bool}
+    """
+    from backend.app.main import validate_session_id
+    session_id = validate_session_id(session_id)
+    
+    try:
+        await _generate_session_summary_chroma(session_id)
+        logger.info(f"[force_summary] manual trigger for session {session_id}")
+        return {"ok": True, "summary_generated": True, "session_id": session_id}
+    except Exception as e:
+        logger.error(f"[force_summary] failed for session {session_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Summary generation failed: {str(e)}")

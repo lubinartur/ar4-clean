@@ -106,8 +106,8 @@ export interface Air4Service {
   deleteMemoryBy(by: "id" | "tag" | "namespace", value: string, sessionId?: string): Promise<boolean>;
   uploadFile(file: File): Promise<boolean>;
   getIngestQueueStatus(): Promise<IngestItem[]>;
-  streamChat(messages: Message[], sessionId: string, coreSettings?: { temperature?: number; responseTone?: string; outputDensity?: string; interfaceLanguage?: string; activeModel?: string }): AsyncGenerator<{ chunk?: string, context?: MemoryItem[], decision?: RouterDecision }, void, unknown>;
-  chatStream(payload: { text: string; session_id: string; settings?: any; qb_session_id?: string | null; qb_enabled?: boolean }, handlers: { onToken: (delta: string) => void; onDone: () => void; onError: (message: string) => void; onMeta?: (resolvedModel: string) => void }, signal?: AbortSignal): Promise<void>;
+  streamChat(messages: Message[], sessionId: string, coreSettings?: { temperature?: number; responseTone?: string; outputDensity?: string; interfaceLanguage?: string; activeModel?: string; thinkingMode?: string }): AsyncGenerator<{ chunk?: string, context?: MemoryItem[], decision?: RouterDecision }, void, unknown>;
+  chatStream(payload: { text: string; session_id: string; settings?: any; qb_session_id?: string | null; qb_enabled?: boolean; thinking_mode?: string }, handlers: { onToken: (delta: string) => void; onDone: () => void; onError: (message: string) => void; onMeta?: (resolvedModel: string) => void }, signal?: AbortSignal): Promise<void>;
   getSessionConfig(sessionId: string): SessionConfig | undefined;
   setSessionConfig(sessionId: string, config: SessionConfig): void;
 }
@@ -873,7 +873,7 @@ class Air4ServiceImpl implements Air4Service {
 
   // --- CHAT LOGIC ---
 
-  async *streamChat(messages: Message[], sessionId: string, coreSettings?: { temperature?: number; responseTone?: string; outputDensity?: string; interfaceLanguage?: string; activeModel?: string }): AsyncGenerator<{ chunk?: string, context?: MemoryItem[], decision?: RouterDecision }, void, unknown> {
+  async *streamChat(messages: Message[], sessionId: string, coreSettings?: { temperature?: number; responseTone?: string; outputDensity?: string; interfaceLanguage?: string; activeModel?: string; thinkingMode?: string }): AsyncGenerator<{ chunk?: string, context?: MemoryItem[], decision?: RouterDecision }, void, unknown> {
     if (this.appState === AppState.PANIC) {
        yield { chunk: "SYSTEM LOCKED. ACCESS DENIED." };
        return;
@@ -963,15 +963,23 @@ class Air4ServiceImpl implements Air4Service {
 
         try {
             // G2: Direct SSE streaming from /chat/stream
+            // PHASE Q5: Add thinking_mode to payload
+            const requestPayload: any = {
+                q: lastMessage.content,
+                text: lastMessage.content,
+                session_id: sessionId,
+                settings: settingsPayload
+            };
+            
+            // Add thinking_mode if provided
+            if (coreSettings?.thinkingMode) {
+                requestPayload.thinking_mode = coreSettings.thinkingMode;
+            }
+            
             const response = await fetch(`${this.apiBaseUrl}/chat/stream`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    q: lastMessage.content,
-                    text: lastMessage.content,
-                    session_id: sessionId,
-                    settings: settingsPayload
-                })
+                body: JSON.stringify(requestPayload)
             });
 
             if (!response.ok) {
@@ -1112,7 +1120,7 @@ class Air4ServiceImpl implements Air4Service {
   }
 
   async chatStream(
-    payload: { text: string; session_id: string; settings?: any; qb_session_id?: string | null; qb_enabled?: boolean },
+    payload: { text: string; session_id: string; settings?: any; qb_session_id?: string | null; qb_enabled?: boolean; thinking_mode?: string },
     handlers: { onToken: (delta: string) => void; onDone: () => void; onError: (message: string) => void; onMeta?: (resolvedModel: string) => void },
     signal?: AbortSignal
   ): Promise<void> {
@@ -1130,6 +1138,11 @@ class Air4ServiceImpl implements Air4Service {
       }
       if (payload.qb_enabled !== undefined) {
         body.qb_enabled = payload.qb_enabled;
+      }
+      
+      // PHASE Q5: Add thinking_mode if provided
+      if (payload.thinking_mode) {
+        body.thinking_mode = payload.thinking_mode;
       }
       
       const response = await fetch(`${this.apiBaseUrl}/chat/stream`, {

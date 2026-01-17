@@ -45,6 +45,7 @@ class ChromaMemoryManager:
         Namespace derivation (stable, minimal):
         - source == "facts" -> namespace="facts"
         - source == "note" -> namespace="notes"
+        - source == "summary" -> namespace="sessions"
         - source in ["ingest","file","url"] -> namespace="ingest"
         - source in ["user","assistant"] -> namespace="chat"
         - else -> namespace="general"
@@ -59,6 +60,8 @@ class ChromaMemoryManager:
             normalized["namespace"] = "facts"
         elif source == "note":
             normalized["namespace"] = "notes"
+        elif source == "summary":
+            normalized["namespace"] = "sessions"
         elif source in ("ingest", "file", "url"):
             normalized["namespace"] = "ingest"
         elif source in ("user", "assistant"):
