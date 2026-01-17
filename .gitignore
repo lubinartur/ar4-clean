@@ -88,3 +88,4 @@ backend/app/memory/facts_store.json
 # local memory (do not commit)
 backend/app/memory/facts_store.json
 
+data/
