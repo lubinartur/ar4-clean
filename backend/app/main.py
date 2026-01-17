@@ -58,6 +58,8 @@ APP_VERSION = "1.0.0-rc1"
 # App + CORS
 # -----------------------------------------------------------------------------
 app = FastAPI(title="AIr4", version=APP_VERSION)
+from backend.app.v3 import init_v3
+init_v3(app)
 from .routes_chat import router as router_chat
 from .routes_stream import router as stream_router
 from .routes_models import router as models_router
