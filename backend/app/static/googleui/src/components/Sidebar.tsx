@@ -19,13 +19,18 @@ import {
 import { useAir4 } from '../contexts/Air4Context';
 import { ChatSession } from '../types';
 import Logo from '../assets/air4.svg';
-import { usePolling } from '../hooks/usePolling';
+// P2.1: Removed usePolling import - polling moved to Ingest.tsx only
 
 interface SidebarProps {
   activeTab: string;
   onTabChange: (tab: string) => void;
   currentSessionId: string | null;
-  onSessionChange: (sessionId: string | null) => void;
+  onSessionChange: (sessionId: string | null, forceReload?: boolean) => void;
+  onSelectConversation?: (conversationId: string) => void;
+  onHistoryLoaded?: () => void;
+  onUserSelectSession?: () => void;
+  onOpenSession?: (sid: string) => void;
+  onForceOpenSession?: (sessionId: string) => void;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({
@@ -33,15 +38,25 @@ const Sidebar: React.FC<SidebarProps> = ({
   onTabChange,
   currentSessionId,
   onSessionChange,
+  onSelectConversation,
+  onHistoryLoaded,
+  onUserSelectSession,
+  onOpenSession,
+  onForceOpenSession,
 }) => {
   const air4 = useAir4();
   const [panicActive, setPanicActive] = useState(false);
   const [history, setHistory] = useState<ChatSession[]>([]);
+  const [conversations, setConversations] = useState<any[]>([]);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
     Today: true,
     Yesterday: true,
     'Previous 7 Days': true,
   });
+  
+  // C3.1: Suggest state for reactive badge updates
+  const [suggestHandled, setSuggestHandled] = useState<Record<string, "saved" | "dismissed">>({});
+  const [suggestCache, setSuggestCache] = useState<Record<string, { suggest: boolean; proposed_tag?: string; confidence?: number; reason?: string; ts?: number }>>({});
 
   const refreshHistory = useCallback(async () => {
     try {
@@ -49,35 +64,90 @@ const Sidebar: React.FC<SidebarProps> = ({
       await air4.refreshSessions();
       const sessions = air4.getSessions();
       setHistory(Array.isArray(sessions) ? sessions : []);
+      // Signal App that history is loaded
+      if (onHistoryLoaded) {
+        onHistoryLoaded();
+      }
     } catch (err) {
       console.error('[Sidebar] refreshHistory error', err);
       setHistory([]);
+      // Signal even on error (so App doesn't wait forever)
+      if (onHistoryLoaded) {
+        onHistoryLoaded();
+      }
+    }
+  }, [air4, onHistoryLoaded]);
+
+  const refreshConversations = useCallback(async () => {
+    try {
+      const convs = await air4.getConversations(200, 0);
+      setConversations(Array.isArray(convs) ? convs : []);
+    } catch (err) {
+      console.error('[Sidebar] refreshConversations error', err);
+      setConversations([]);
     }
   }, [air4]);
 
-  // Poll for system health and ingest queue status
-  const pollSystemStatus = useCallback(async () => {
-    // Errors are propagated to usePolling for backoff handling
-    await air4.getStats();
-    await air4.getIngestQueueStatus();
-  }, [air4]);
+  // P2.1: Removed pollSystemStatus - polling moved to Ingest.tsx only
+  // Health check is now one-time on app start (see App.tsx / Dashboard)
 
-  // Initial load
+  // C3.1: Load suggest state from localStorage
+  const loadSuggestStateFromLS = useCallback(() => {
+    try {
+      const handledStr = localStorage.getItem("air4_suggest_handled_v1");
+      const cacheStr = localStorage.getItem("air4_suggest_cache_v1");
+      setSuggestHandled(handledStr ? JSON.parse(handledStr) : {});
+      setSuggestCache(cacheStr ? JSON.parse(cacheStr) : {});
+    } catch (e) {
+      console.warn('[C3.1] Failed to load suggest state from localStorage:', e);
+      setSuggestHandled({});
+      setSuggestCache({});
+    }
+  }, []);
+
+  // C3.1: Helper to check if session has unhandled suggestions
+  const hasUnhandledSuggestionsHelper = useCallback((sessionId: string, cache: Record<string, { suggest?: boolean }>, handled: Record<string, any>): boolean => {
+    const prefix = `${sessionId}:`;
+    return Object.keys(cache).some(k =>
+      k.startsWith(prefix) &&
+      cache[k]?.suggest === true &&
+      !handled[k]
+    );
+  }, []);
+
+  // C3.1: Initial load and event listeners for suggest state
+  useEffect(() => {
+    loadSuggestStateFromLS();
+    
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "air4_suggest_handled_v1" || e.key === "air4_suggest_cache_v1") {
+        loadSuggestStateFromLS();
+      }
+    };
+    
+    const onLs = () => {
+      loadSuggestStateFromLS();
+    };
+    
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("air4:ls", onLs);
+    
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("air4:ls", onLs);
+    };
+  }, [loadSuggestStateFromLS]);
+
+  // Initial load (only once on mount)
   useEffect(() => {
     refreshHistory();
-  }, [refreshHistory]);
+    refreshConversations();
+    // P2.1: One-time health check on mount (no recurring polling)
+    air4.getStats().catch(() => {});  // P2.1: Single health check, ignore errors
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Empty deps: only run once on mount
 
-  // Polling: health check + ingest queue with backoff and pause on hidden/offline
-  usePolling(pollSystemStatus, {
-    enabled: true,
-    pauseWhenHidden: true,
-    pauseWhenOffline: true,
-    intervalMs: 5000,
-    maxIntervalMs: 60000,
-    backoffFactor: 2,
-  });
-
-  // Refresh history when sessions change (no polling, only on mount and manual actions)
+  // P2.1: Removed usePolling - ingest queue polling moved to Ingest.tsx only
 
   const handlePanic = () => {
     if (window.confirm('ENGAGE DURESS PROTOCOL?')) {
@@ -88,9 +158,20 @@ const Sidebar: React.FC<SidebarProps> = ({
 
   const handleNewChat = async () => {
     try {
+      // B4 lifecycle: Create new session via POST /sessions/new (closes previous active session)
+      // Conversation will be created lazily on first message
       const newSession = await air4.createSession('New Session');
-      refreshHistory(); // Manual refresh after action
-      onSessionChange(newSession.id);
+      const newSessionId = newSession.id;
+      
+      // NOTE: Do NOT create conversation here - it will be created by backend on first message
+      // This prevents empty conversations from being created
+      
+      // Refresh history to show new session
+      refreshHistory();
+      
+      // Select the new session (Chat will handle loading session messages)
+      // NOTE: Do NOT force reload for New Chat - it's a new empty session
+      onSessionChange(newSessionId, false);
       onTabChange('chat');
     } catch (err) {
       console.error('[Sidebar] handleNewChat error', err);
@@ -110,9 +191,9 @@ const Sidebar: React.FC<SidebarProps> = ({
       if (currentSessionId === id) {
         const remaining = air4.getSessions();
         if (remaining.length > 0) {
-          onSessionChange(remaining[0].id);
+          onSessionChange(remaining[0].id, true); // Force reload after delete
         } else {
-          onSessionChange(null);
+          onSessionChange(null, false); // No reload for null
           onTabChange('dashboard');
         }
       }
@@ -132,10 +213,20 @@ const Sidebar: React.FC<SidebarProps> = ({
     );
   }
 
-  // Advanced grouping logic: Today, Yesterday, 7/30 days, then by month
+  // Helper: Convert timestamp (ms or seconds) to Date
+  const toDate = (ts: number | string | null | undefined): Date | null => {
+    if (ts == null) return null;
+    const n = typeof ts === "string" ? Number(ts) : ts;
+    if (!Number.isFinite(n)) return null;
+    // ms vs seconds: if > 1e12 (Sep 9, 2001), treat as ms, else as seconds
+    return new Date(n > 1e12 ? n : n * 1000);
+  };
+
+  // Advanced grouping logic: Today, Yesterday, 7/30 days, then by month (for sessions)
   const groupedHistory = history.reduce(
     (groups, session) => {
-      const date = new Date(session.timestamp);
+      const date = toDate(session.timestamp);
+      if (!date) return groups; // Skip invalid dates
       const now = new Date();
       const diffTime = Math.abs(now.getTime() - date.getTime());
       const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
@@ -209,7 +300,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         >
           <PlusCircle className="w-5 h-5 text-air-500 group-hover:text-white group-hover:rotate-90 transition-all" />
           <span className="hidden md:block font-medium">
-            New Session
+            New Chat
           </span>
         </button>
       </div>
@@ -316,11 +407,18 @@ const Sidebar: React.FC<SidebarProps> = ({
                       const isActive =
                         currentSessionId === session.id &&
                         activeTab === 'chat';
+                      
+                      // C3.1: Use reactive state instead of direct localStorage read
+                      const hasUnhandled = hasUnhandledSuggestionsHelper(session.id, suggestCache, suggestHandled);
+                      
                       return (
                         <div
                           key={session.id}
                           onClick={() => {
-                            onSessionChange(session.id);
+                            // Always call force open session (even if clicking on already active session)
+                            onSessionChange(session.id, true);
+                            onForceOpenSession?.(session.id);
+                            onUserSelectSession?.();
                             onTabChange('chat');
                           }}
                           className={`group relative flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-all border-l-2 ${
@@ -329,8 +427,12 @@ const Sidebar: React.FC<SidebarProps> = ({
                               : 'text-slate-400 hover:text-slate-200 hover:bg-white/5 border-l-transparent'
                           }`}
                         >
-                          <span className="truncate text-xs font-medium flex-1">
+                          <span className="truncate text-xs font-medium flex-1 flex items-center gap-2">
                             {session.title || 'Untitled Session'}
+                            {/* C3.1: Badge indicator for unhandled suggestions (reactive) */}
+                            {hasUnhandled && (
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 flex-shrink-0" title="Has suggestions" />
+                            )}
                           </span>
                           <button
                             onClick={(e) =>

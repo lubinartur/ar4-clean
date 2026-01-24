@@ -39,12 +39,32 @@ export interface ChatSession {
   sessionConfig?: SessionConfig;
 }
 
+// C2.1: Context transparency - structure for context_used from backend
+// C2.2: Enriched with namespace, tag, source metadata
+export interface ContextUsed {
+  memory?: Array<{
+    id: string;
+    kind: string;
+    preview: string;
+    score: number;
+    namespace?: string | null;  // C2.2: optional namespace
+    tag?: string | null;  // C2.2: optional tag
+    source?: string | null;  // C2.2: optional source
+  }>;
+  docs?: Array<{
+    source: string;
+    title: string;
+    preview: string;
+  }>;
+}
+
 export interface Message {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
-  contextUsed?: MemoryItem[]; // RAG context visualization
+  contextUsed?: MemoryItem[]; // Legacy format (deprecated, use context_used)
+  context_used?: ContextUsed; // C2.1: Context transparency - new format from backend
   modelUsed?: ModelName;
   domain?: Domain;
 }

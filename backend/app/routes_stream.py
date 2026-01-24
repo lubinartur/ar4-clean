@@ -309,9 +309,17 @@ def _bump_session(session_id: str, title: str | None = None) -> None:
             "title": "",
             "created_at": now,
             "updated_at": now,
+            "status": "active",      # ROADMAP 3.1.B: default status
+            "closed_at": None,       # ROADMAP 3.1.B: default closed_at
         }
     
     rec = idx[session_id]
+    
+    # ROADMAP 3.1.B: Migration - ensure status/closed_at fields exist
+    if "status" not in rec:
+        rec["status"] = "active"
+    if "closed_at" not in rec:
+        rec["closed_at"] = None
     
     # Всегда обновлять updated_at
     rec["updated_at"] = now
@@ -418,6 +426,8 @@ class ChatStreamRequest(BaseModel):
     sid: Optional[str] = Field(None, description="Session ID (alias)")
     settings: Optional[ChatStreamSettings] = Field(None, description="Chat settings")
     thinking_mode: Optional[str] = Field(default=None, description="Thinking mode: analytical, structured, wide, hard, exploratory")
+    conversation_id: Optional[str] = Field(None, description="Conversation ID for chat history")
+    rag: Optional[bool] = Field(None, description="C2.0: Enable RAG context retrieval (default: True)")
 
     def get_query_text(self) -> str:
         """Extract query text from various possible fields."""
@@ -476,11 +486,81 @@ async def chat_stream(body: ChatStreamRequest, request: Request = None):
     session_id = body.get_session_id()
     from backend.app.main import validate_session_id
     session_id = validate_session_id(session_id)
+    
+    # C2.0: Extract RAG flag (query param overrides body, default True)
+    rag_enabled = True  # default
+    if request:
+        rag_query = request.query_params.get("rag")
+        if rag_query is not None:
+            rag_enabled = rag_query in ("1", "true", "True", "yes")
+    if body.rag is not None:
+        rag_enabled = body.rag
+    
+    logger.info(f"[C2.0] rag_enabled={rag_enabled} sid={session_id}")
 
     async def stream_gen() -> AsyncGenerator[str, None]:
         # G3 fix: Use local variable to avoid UnboundLocalError with += in nested scope
         from backend.app.chat import ARCH_CORE_PROMPT
         from backend.app.routes_chat import _build_thinking_mode_directives
+        
+        # Chat History: Determine conversation_id
+        try:
+            from backend.app.storage.repos.conversations import create_conversation, get_conversation
+            from backend.app.storage.repos.messages import append_message, count_user_messages
+            from backend.app.storage.repos.session_mapping import get_conversation_id_for_session, set_mapping
+        except Exception:
+            from .storage.repos.conversations import create_conversation, get_conversation
+            from .storage.repos.messages import append_message, count_user_messages
+            from .storage.repos.session_mapping import get_conversation_id_for_session, set_mapping
+        
+        # IMPORTANT: Determine cid ONCE at the beginning - never reassign later
+        print(f"[stream] req.conversation_id={body.conversation_id!r} req.session_id={body.session_id!r}")
+        cid = None
+        
+        # Rule A: If conversation_id is provided, use it (validate first)
+        if body.conversation_id and body.conversation_id.strip():
+            req_cid = body.conversation_id.strip()
+            conv = get_conversation(req_cid)
+            if conv is None:
+                error_event = json.dumps({"type": "error", "message": "Conversation not found or deleted"}, ensure_ascii=False)
+                yield f"data: {error_event}\n\n"
+                return
+            cid = req_cid
+            print(f"[stream] using request conversation_id={cid}")
+        else:
+            # Rule B: If session_id is present but conversation_id is missing, try backend mapping
+            if body.session_id and body.session_id.strip():
+                mapped_cid = get_conversation_id_for_session(body.session_id.strip())
+                if mapped_cid:
+                    cid = mapped_cid
+                    print(f"[stream] using mapped conversation_id={cid} from session_id={body.session_id}")
+                else:
+                    # No mapping exists, create new conversation and store mapping
+                    try:
+                        new_conv = create_conversation(title=None)
+                        cid = new_conv["id"]
+                        set_mapping(body.session_id.strip(), cid)
+                        print(f"[stream] created new conversation_id={cid} and stored mapping for session_id={body.session_id}")
+                    except Exception as e:
+                        logger.error(f"[CHAT_HISTORY] Failed to create conversation/mapping: {e}")
+                        error_event = json.dumps({"type": "error", "message": f"Failed to create conversation: {str(e)}"}, ensure_ascii=False)
+                        yield f"data: {error_event}\n\n"
+                        return
+            else:
+                # No session_id either, create new conversation (fallback for compatibility)
+                try:
+                    new_conv = create_conversation(title=None)
+                    cid = new_conv["id"]
+                    print(f"[stream] created new conversation_id={cid} (no session_id)")
+                except Exception as e:
+                    logger.error(f"[CHAT_HISTORY] Failed to create conversation: {e}")
+                    error_event = json.dumps({"type": "error", "message": f"Failed to create conversation: {str(e)}"}, ensure_ascii=False)
+                    yield f"data: {error_event}\n\n"
+                    return
+        
+        # CRITICAL: Log the actual cid used for debugging
+        print(f"[stream] req.conversation_id={body.conversation_id!r} -> cid_used={cid}")
+        
         preamble = ARCH_CORE_PROMPT
         
         # --- PHASE J2: Thinking Mode directives ---
@@ -976,9 +1056,11 @@ async def chat_stream(body: ChatStreamRequest, request: Request = None):
             
             # --- Основной LLM вызов (RAG + Ollama streaming) ---
             
-            # RAG контекст
+            # C2.0: RAG контекст (only if rag_enabled)
+            # C2.1: Context transparency - collect context metadata for user visibility
             rag_ctx = ""
-            use_rag = len(q_l) > 40
+            context_used: Dict[str, Any] = {"memory": [], "docs": []}  # C2.1: structure for context transparency
+            use_rag = rag_enabled and len(q_l) > 40
             if use_rag:
                 try:
                     async with httpx.AsyncClient(timeout=10.0) as c:
@@ -987,6 +1069,24 @@ async def chat_stream(body: ChatStreamRequest, request: Request = None):
                         hits = js.get("results", [])
                         if hits and isinstance(hits[0], dict) and hits[0].get("text") and hits[0].get("score") is not None and hits[0]["score"] >= RAG_SCORE_THRESHOLD:
                             rag_ctx = hits[0]["text"][:1200]
+                            # C2.1: Collect memory items for context transparency
+                            # C2.2: Enrich with namespace, tag, source metadata
+                            for hit in hits:
+                                if isinstance(hit, dict) and hit.get("score", 0) >= RAG_SCORE_THRESHOLD:
+                                    metadata = hit.get("metadata", {}) or {}
+                                    # C2.2: Extract namespace, tag, source from metadata
+                                    namespace = metadata.get("namespace") or hit.get("namespace")
+                                    tag = metadata.get("tag")
+                                    source = metadata.get("source")
+                                    context_used["memory"].append({
+                                        "id": hit.get("id", ""),
+                                        "kind": metadata.get("kind") or metadata.get("type") or "note",
+                                        "preview": (hit.get("text") or "")[:200],  # First 200 chars
+                                        "score": hit.get("score", 0),
+                                        "namespace": namespace if namespace else None,  # C2.2: optional namespace
+                                        "tag": tag if tag else None,  # C2.2: optional tag
+                                        "source": source if source else None  # C2.2: optional source
+                                    })
                             # G3: Log memory hit
                             logger.info(
                                 "[MEMORY_HIT]",
@@ -1021,6 +1121,8 @@ async def chat_stream(body: ChatStreamRequest, request: Request = None):
                         }
                     )
                     rag_ctx = ""
+            elif not rag_enabled:
+                logger.debug(f"[C2.0] RAG disabled, skipping retrieval sid={sess_id}")
 
             user_payload = f"{q}\n\n[MEMORY]\n{rag_ctx}" if rag_ctx else q
 
@@ -1032,8 +1134,45 @@ async def chat_stream(body: ChatStreamRequest, request: Request = None):
             if memory_context:
                 preamble += "\n\n" + memory_context
 
+            # Chat History: Save user message before generation
+            # CRITICAL: cid should always be set at this point (checked above)
+            n = 0  # Initialize message count (will be set after user message save)
+            if not cid:
+                logger.error("[CHAT_HISTORY] cid is None when trying to save user message - this should not happen")
+                # Continue without saving - don't break the stream
+            else:
+                try:
+                    append_message(conversation_id=cid, role="user", content=q, token_count=None)
+                    user_count = count_user_messages(cid)
+                    print(f"[stream] saved user msg cid={cid} count_user={user_count}")
+                    
+                    # Direct SQL count to verify actual cid used
+                    try:
+                        from backend.app.storage.db import get_conn
+                    except Exception:
+                        from .storage.db import get_conn
+                    
+                    conn = get_conn()
+                    try:
+                        n = conn.execute(
+                            "SELECT COUNT(*) FROM messages WHERE conversation_id=? AND is_deleted=0",
+                            (cid,)
+                        ).fetchone()[0]
+                        print(f"[stream] after user insert cid={cid} messages_count={n}")
+                    finally:
+                        conn.close()
+                except Exception as e:
+                    logger.warning(f"[CHAT_HISTORY] Failed to save user message: {e}")
+                    n = 0  # Default if count fails
+
             # Отправляем meta событие с resolved_model ДО начала стриминга
-            meta_event = json.dumps({"type": "meta", "resolved_model": model_name}, ensure_ascii=False)
+            meta_event_data: Dict[str, Any] = {"type": "meta", "resolved_model": model_name}
+            if cid:
+                meta_event_data["conversation_id"] = cid
+                # Temporary debug fields
+                meta_event_data["request_conversation_id"] = body.conversation_id
+                meta_event_data["messages_count_after_user"] = n
+            meta_event = json.dumps(meta_event_data, ensure_ascii=False)
             yield f"data: {meta_event}\n\n"
 
             # Вызов Ollama с streaming
@@ -1177,8 +1316,41 @@ async def chat_stream(body: ChatStreamRequest, request: Request = None):
                             except Exception as e:
                                 logger.warning(f"[PROFILE-Q] Error checking completeness/adding question: {e}")
 
-                        # Завершаем стрим
-                        yield f'data: {json.dumps({"type": "done"})}\n\n'
+                        # C2.1: Завершаем стрим с context_used (если был RAG)
+                        done_event_data: Dict[str, Any] = {"type": "done"}
+                        if rag_enabled and (context_used["memory"] or context_used["docs"]):
+                            done_event_data["context_used"] = context_used
+                        done_event = json.dumps(done_event_data, ensure_ascii=False)
+                        yield f'data: {done_event}\n\n'
+                        
+                        # Chat History: Save assistant message after generation (only if we have valid answer)
+                        # CRITICAL: cid should be set at this point (determined at the beginning)
+                        if not cid:
+                            logger.error("[CHAT_HISTORY] cid is None when trying to save assistant message - this should not happen")
+                        elif not full_answer.strip():
+                            logger.warning("[CHAT_HISTORY] full_answer is empty, skipping assistant message save")
+                        else:
+                            try:
+                                append_message(conversation_id=cid, role="assistant", content=full_answer.strip(), token_count=None)
+                                print(f"[stream] saved assistant msg cid={cid} len={len(full_answer.strip())}")
+                                
+                                # Direct SQL count to verify actual cid used after assistant message
+                                try:
+                                    from backend.app.storage.db import get_conn
+                                except Exception:
+                                    from .storage.db import get_conn
+                                
+                                conn = get_conn()
+                                try:
+                                    n2 = conn.execute(
+                                        "SELECT COUNT(*) FROM messages WHERE conversation_id=? AND is_deleted=0",
+                                        (cid,)
+                                    ).fetchone()[0]
+                                    print(f"[stream] after assistant insert cid={cid} messages_count={n2}")
+                                finally:
+                                    conn.close()
+                            except Exception as e:
+                                logger.error(f"[CHAT_HISTORY] Failed to save assistant message: {e}")
                         
                         # Логируем полный ответ (только если он не пустой)
                         try:

@@ -41,6 +41,10 @@ try:
 except Exception:
     from .memory.facts import extract_facts_from_text_v3, extract_profile_facts_auto, add_fact, get_facts_for_subject  # type: ignore
 
+try:
+    from backend.app.storage.db import init_db
+except Exception:
+    from .storage.db import init_db  # type: ignore
 
 try:
     from backend.app import chat as chat_mod
@@ -63,9 +67,13 @@ init_v3(app)
 from .routes_chat import router as router_chat
 from .routes_stream import router as stream_router
 from .routes_models import router as models_router
+from .routes_conversations import router as conversations_router
+from .routes_recall import router as recall_router
 app.include_router(router_chat)
 app.include_router(stream_router)
 app.include_router(models_router)
+app.include_router(conversations_router)
+app.include_router(recall_router)
 
 # --- Question Bank (AIR4 v2.0) ---
 from .routes_question_bank import router as qb_router
@@ -393,20 +401,39 @@ async def memory_search(
     q: str = Query(..., description="query text"),
     session_id: str = Query(..., description="Session ID (required)"),
     k: int = Query(5, ge=1, le=50),
+    limit: Optional[int] = Query(None, ge=1, le=200, description="Limit for list mode"),
+    offset: Optional[int] = Query(0, ge=0, description="Offset for list mode"),
 ):
     # Validate session_id
     session_id = validate_session_id(session_id)
     if MEMORY is None:
         return {"ok": False, "error": "memory disabled"}
     try:
+        # B1.6: Detect list-mode (limit provided)
+        is_list_mode = limit is not None
+        effective_k = limit if is_list_mode else int(k)
+        effective_offset = int(offset or 0)
+        
+        # For list-mode, fetch extra item to detect has_more
+        fetch_k = effective_k + effective_offset + 1 if is_list_mode else effective_k
+        
         # Your manager's signature: search(*, user_id: str, query: str, session_id: str, k: int=5, score_threshold: float=0.0, dedup: bool=True)
-        res = MEMORY.search(user_id="dev", query=q, session_id=session_id, k=k, score_threshold=0.2, dedup=True)
+        res = MEMORY.search(user_id="dev", query=q, session_id=session_id, k=fetch_k, score_threshold=0.2, dedup=True)
 
         # Extract list of items from dict-like response
         if isinstance(res, dict):
             items = res.get("results") or res.get("hits") or res.get("items") or res.get("data") or []
         else:
             items = res or []
+
+        # B1.6: Compute has_more and apply offset/limit for list-mode
+        if is_list_mode:
+            total_fetched = len(items)
+            has_more = bool(total_fetched > (effective_offset + effective_k))
+            # Apply offset and limit
+            items = items[effective_offset:effective_offset + effective_k]
+        else:
+            has_more = None
 
         # Session filtering disabled: the current manager doesn't populate meta.session_id
         # Keeping the param for API compatibility, but ignoring it to avoid empty results.
@@ -440,7 +467,16 @@ async def memory_search(
                     "namespace": None
                 }
             )
-        return {"ok": True, "results": out}
+        # B1.6: Build response with debug marker and has_more
+        response = {
+            "ok": True,
+            "results": out,
+            "__dbg": "B1.6-live",
+            "__file": __file__
+        }
+        if is_list_mode:
+            response["has_more"] = bool(has_more)
+        return response
     except Exception as e:
         # G3: Log error
         logger.error(
@@ -625,6 +661,9 @@ def _startup() -> None:
     try:
         # Step 1: Validate startup configuration (fail fast)
         _validate_startup_config()
+        
+        # Step 1.5: Initialize SQLite database
+        init_db()
         
         # Step 2: Initialize memory (only if ENABLE_CHAT_MEMORY is True)
         if ENABLE_CHAT_MEMORY:
@@ -1069,11 +1108,12 @@ STRUCTURED PROFILE (high-level):
     return Send3Out(session_id=sess.id, reply=reply, usage={}, memory_ids=mem_ids)
 
 # Mount phase-9 memory router if it exists (kept for tools)
-try:
-    from backend.app.routes_memory import router as memory_router  # noqa: E402
-    app.include_router(memory_router)
-except Exception:
-    pass
+# B2.1.2: Removed duplicate include - router is included unconditionally at line 1551
+# try:
+#     from backend.app.routes_memory import router as memory_router  # noqa: E402
+#     app.include_router(memory_router)
+# except Exception:
+#     pass
 
 # Mount profile router (phase-11)
 try:
@@ -1540,6 +1580,9 @@ except Exception:
 #     return templates.TemplateResponse("test.html", {"request": request})
 from .routes_ingest import router as ingest_router
 app.include_router(ingest_router)
+
+from .routes_ui_chats import router as ui_chats_router
+app.include_router(ui_chats_router)
 
 
 

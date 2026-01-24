@@ -29,6 +29,22 @@ DEBUG_REHYDRATION = os.getenv("DEBUG_REHYDRATION", "0") == "1"
 from backend.app.memory.facts import Fact, add_fact
 import importlib
 
+# Chat history persistence imports
+try:
+    from backend.app.storage.repos.conversations import (
+        create_conversation,
+        get_conversation,
+        set_conversation_title_if_default,
+    )
+    from backend.app.storage.repos.messages import append_message, count_user_messages
+except Exception:
+    from .storage.repos.conversations import (
+        create_conversation,
+        get_conversation,
+        set_conversation_title_if_default,
+    )
+    from .storage.repos.messages import append_message, count_user_messages
+
 # Helper flag для логирования предупреждения о неподдерживаемых аргументах
 _memory_adapter_warning_logged = False
 
@@ -117,12 +133,78 @@ def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def _bump_session(session_id: str, title: str | None = None, role: str | None = None):
+def _load_index() -> dict:
+    """
+    B3 lifecycle: Load sessions index from data/sessions/index.json.
+    Returns empty dict if file doesn't exist or on error.
+    """
     try:
-        idx = json.loads(INDEX_PATH.read_text(encoding="utf-8")) if INDEX_PATH.exists() else {}
-    except Exception:
-        idx = {}
-    now = int(time.time())
+        if INDEX_PATH.exists():
+            return json.loads(INDEX_PATH.read_text(encoding="utf-8"))
+        return {}
+    except Exception as e:
+        logger.warning(f"Failed to load sessions index: {e}")
+        return {}
+
+
+def _save_index(idx: dict) -> None:
+    """
+    B3 lifecycle: Save sessions index to data/sessions/index.json.
+    Raises exception on write failure.
+    """
+    try:
+        INDEX_PATH.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.error(f"Failed to write sessions index: {e}")
+        raise
+
+
+def _close_active_session(idx: dict) -> str | None:
+    """
+    B3 lifecycle: Close any active session(s) in the index.
+    Ensures there is at most one active session (closes all found).
+    Backward compatibility:
+    - If session has no "status": treat as CLOSED if closed_at != None, else ACTIVE
+    - If session has status="active": close it
+    Returns: first closed_session_id or None (if none were active)
+    """
+    first_closed = None
+    now_ms = int(time.time() * 1000)  # ms, consistent with created_at/updated_at
+    
+    for sid, session_data in idx.items():
+        if not isinstance(session_data, dict):
+            continue
+        
+        status = session_data.get("status")
+        closed_at = session_data.get("closed_at")
+        
+        # Determine if session is active
+        is_active = False
+        if status == "active":
+            is_active = True
+        elif status is None:
+            # Legacy: missing status treated as active only if closed_at is None
+            is_active = (closed_at is None)
+        # else: status == "closed" or other -> not active
+        
+        if is_active:
+            # Close this session
+            session_data["status"] = "closed"
+            session_data["closed_at"] = now_ms
+            session_data["updated_at"] = now_ms
+            if first_closed is None:
+                first_closed = sid
+    
+    return first_closed
+
+
+def _bump_session(session_id: str, title: str | None = None, role: str | None = None):
+    """
+    B3 lifecycle: Update session metadata (title, turns, timestamps).
+    Ensures backward compatibility by filling missing status/closed_at fields.
+    """
+    idx = _load_index()
+    now = int(time.time() * 1000)  # ms, consistent with created_at/updated_at
     rec = idx.get(session_id) or {
         "id": session_id,
         "title": "New session",
@@ -130,6 +212,8 @@ def _bump_session(session_id: str, title: str | None = None, role: str | None = 
         "updated_at": now,
         "turns": 0,
         "summary": None,
+        "status": "active",  # B3 lifecycle: default status
+        "closed_at": None,   # B3 lifecycle: default closed_at
     }
     if title:
         # обновляем заголовок только если он ещё дефолтный
@@ -141,8 +225,55 @@ def _bump_session(session_id: str, title: str | None = None, role: str | None = 
     # Миграция: если нет поля summary, добавляем null
     if "summary" not in rec:
         rec["summary"] = None
+    # B3 lifecycle: Backward compatibility - ensure status/closed_at fields exist
+    if "status" not in rec:
+        # If closed_at exists, treat as closed; otherwise active
+        rec["status"] = "closed" if rec.get("closed_at") is not None else "active"
+    if "closed_at" not in rec:
+        rec["closed_at"] = None
     idx[session_id] = rec
-    INDEX_PATH.write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
+    _save_index(idx)
+
+
+def derive_title_from_text(text: str) -> str:
+    """
+    Derive a short title from user message text.
+    
+    Args:
+        text: User message text
+    
+    Returns:
+        Short title (max 48 chars) or "New chat" if empty
+    """
+    # Trim
+    title = text.strip()
+    
+    # Replace multiple whitespace with single space
+    import re
+    title = re.sub(r'\s+', ' ', title)
+    
+    # If empty after processing, return default
+    if not title:
+        return "New chat"
+    
+    # Take first 48 characters + "…" if truncated
+    if len(title) > 48:
+        title = title[:48] + "…"
+    
+    return title
+
+
+def _save_chat_history(conversation_id: str, user_content: str, assistant_content: str):
+    """
+    Helper to save both user and assistant messages to chat history.
+    Gracefully handles errors to avoid breaking the chat flow.
+    """
+    try:
+        append_message(conversation_id=conversation_id, role="user", content=user_content, token_count=None)
+        append_message(conversation_id=conversation_id, role="assistant", content=assistant_content, token_count=None)
+    except Exception as e:
+        logger.warning(f"[CHAT_HISTORY] Failed to save chat history: {e}")
+        pass
 
 
 def _append_msg(session_id: str, role: str, content: str):
@@ -956,6 +1087,7 @@ class ChatRequest(ChatRequestQBMixin):
     session_id: Optional[str] = Field(None, description="Session ID")
     session: Optional[str] = Field(None, description="Session ID (alias)")
     sid: Optional[str] = Field(None, description="Session ID (alias)")
+    conversation_id: Optional[str] = Field(None, description="Conversation ID for chat history")
 
     def get_query_text(self) -> Optional[str]:
         """Extract query text from various possible fields."""
@@ -1001,10 +1133,43 @@ async def chat(body: ChatRequest, request: Request = None):
     from backend.app.chat import ARCH_CORE_PROMPT
     system_preamble = ARCH_CORE_PROMPT
 
-    # Extract and validate session_id early to check if this is first turn
+    # --- Chat History: Determine conversation_id ---
+    try:
+        from backend.app.storage.repos.conversations import create_conversation, get_conversation
+        from backend.app.storage.repos.session_mapping import get_conversation_id_for_session, set_mapping
+    except Exception:
+        from .storage.repos.conversations import create_conversation, get_conversation
+        from .storage.repos.session_mapping import get_conversation_id_for_session, set_mapping
+    
+    # Extract and validate session_id early (needed for mapping lookup)
     sess_id = body.get_session_id()
     from backend.app.main import validate_session_id
     sess_id = validate_session_id(sess_id) if sess_id else None
+    
+    # Determine conversation_id: (1) from request, (2) from backend mapping, (3) create new
+    cid = None
+    if body.conversation_id and body.conversation_id.strip():
+        # Rule A: If conversation_id is provided, use it (validate first)
+        req_cid = body.conversation_id.strip()
+        conv = get_conversation(req_cid)
+        if conv is None:
+            raise HTTPException(status_code=404, detail="Conversation not found or deleted")
+        cid = req_cid
+    else:
+        # Rule B: If session_id is present but conversation_id is missing, try backend mapping
+        if sess_id:
+            mapped_cid = get_conversation_id_for_session(sess_id)
+            if mapped_cid:
+                cid = mapped_cid
+            else:
+                # No mapping exists, create new conversation and store mapping
+                new_conv = create_conversation(title=None)
+                cid = new_conv["id"]
+                set_mapping(sess_id, cid)
+        else:
+            # No session_id either, create new conversation (fallback for compatibility)
+            new_conv = create_conversation(title=None)
+            cid = new_conv["id"]
 
     # --- v0.7: QB -> /chat bridge ---
     # Enable Question Bank only after first user message in session
@@ -1194,7 +1359,10 @@ async def chat(body: ChatRequest, request: Request = None):
             _append_msg(sess_id, "assistant", reply)
         except Exception:
             pass
-        return {"reply": reply}
+        # Chat History: Save to conversation
+        if cid:
+            _save_chat_history(cid, q, reply)
+        return {"reply": reply, "conversation_id": cid}
 
     # Общий extractor профиля (локация и др. правила)
     prof_reply = extract_profile_facts(q, sess_id)
@@ -1204,7 +1372,10 @@ async def chat(body: ChatRequest, request: Request = None):
             _append_msg(sess_id, "assistant", prof_reply)
         except Exception:
             pass
-        return {"reply": prof_reply}
+        # Chat History: Save to conversation
+        if cid:
+            _save_chat_history(cid, q, prof_reply)
+        return {"reply": prof_reply, "conversation_id": cid}
 
     # Жёсткие факты из профиля (обход RAG/LLM)
     if "знак зодиака" in q_l:
@@ -1221,7 +1392,10 @@ async def chat(body: ChatRequest, request: Request = None):
             _append_msg(sess_id, "assistant", reply)
         except Exception:
             pass
-        return {"reply": reply}
+        # Chat History: Save to conversation
+        if cid:
+            _save_chat_history(cid, q, reply)
+        return {"reply": reply, "conversation_id": cid}
 
     # Вопросы про активную модель / движок — отвечаем сами, без RAG и без фантазий LLM
     if any(
@@ -1271,7 +1445,10 @@ async def chat(body: ChatRequest, request: Request = None):
             _append_msg(sess_id, "assistant", reply)
         except Exception:
             pass
-        return {"reply": reply}
+        # Chat History: Save to conversation
+        if cid:
+            _save_chat_history(cid, q, reply)
+        return {"reply": reply, "conversation_id": cid}
 
     # Вопросы вида "что ты помнишь обо мне" — отвечаем строго из профиля, без LLM
     if any(
@@ -1319,7 +1496,10 @@ async def chat(body: ChatRequest, request: Request = None):
             _append_msg(sess_id, "assistant", reply)
         except Exception:
             pass
-        return {"reply": reply}
+        # Chat History: Save to conversation
+        if cid:
+            _save_chat_history(cid, q, reply)
+        return {"reply": reply, "conversation_id": cid}
 
     # быстрые режимы (#morning_check, #evening_check, #week_check)
     if any(
@@ -1348,7 +1528,10 @@ async def chat(body: ChatRequest, request: Request = None):
             _append_msg(sess_id, "assistant", reply)
         except Exception:
             pass
-        return {"reply": reply}
+        # Chat History: Save to conversation
+        if cid:
+            _save_chat_history(cid, q, reply)
+        return {"reply": reply, "conversation_id": cid}
 
     if any(
         tok in q_l
@@ -1372,7 +1555,10 @@ async def chat(body: ChatRequest, request: Request = None):
             _append_msg(sess_id, "assistant", reply)
         except Exception:
             pass
-        return {"reply": reply}
+        # Chat History: Save to conversation
+        if cid:
+            _save_chat_history(cid, q, reply)
+        return {"reply": reply, "conversation_id": cid}
 
     if any(
         tok in q_l
@@ -1396,7 +1582,10 @@ async def chat(body: ChatRequest, request: Request = None):
             _append_msg(sess_id, "assistant", reply)
         except Exception:
             pass
-        return {"reply": reply}
+        # Chat History: Save to conversation
+        if cid:
+            _save_chat_history(cid, q, reply)
+        return {"reply": reply, "conversation_id": cid}
 
 
     # Простое приветствие / small talk — отвечаем сами, без RAG и LLM
@@ -1417,7 +1606,10 @@ async def chat(body: ChatRequest, request: Request = None):
             _append_msg(sess_id, "assistant", reply)
         except Exception:
             pass
-        return {"reply": reply}
+        # Chat History: Save to conversation
+        if cid:
+            _save_chat_history(cid, q, reply)
+        return {"reply": reply, "conversation_id": cid}
 
     # Small talk: "как дела" — тоже обрабатываем без RAG/LLM
     if any(
@@ -1436,7 +1628,10 @@ async def chat(body: ChatRequest, request: Request = None):
             _append_msg(sess_id, "assistant", reply)
         except Exception:
             pass
-        return {"reply": reply}
+        # Chat History: Save to conversation
+        if cid:
+            _save_chat_history(cid, q, reply)
+        return {"reply": reply, "conversation_id": cid}
 
     # Короткие подтверждения/реакции ("ок", "супер", "круто" и т.п.) — отвечаем сами
     if any(
@@ -1461,13 +1656,29 @@ async def chat(body: ChatRequest, request: Request = None):
             _append_msg(sess_id, "assistant", reply)
         except Exception:
             pass
-        return {"reply": reply}
+        # Chat History: Save to conversation
+        if cid:
+            _save_chat_history(cid, q, reply)
+        return {"reply": reply, "conversation_id": cid}
 
     try:
-        # логируем запрос пользователя в текущую сессию
+        # логируем запрос пользователя в текущую сессию (legacy JSONL)
         try:
             _append_msg(sess_id, "user", q)
         except Exception:
+            pass
+        
+        # Chat History: Save user message
+        try:
+            append_message(conversation_id=cid, role="user", content=q, token_count=None)
+            
+            # Auto-title: Set title from first user message if default
+            if count_user_messages(cid) == 1:
+                derived_title = derive_title_from_text(q)
+                set_conversation_title_if_default(cid, derived_title)
+        except Exception as e:
+            # Don't break the chat flow if history saving fails
+            logger.warning(f"[CHAT_HISTORY] Failed to save user message: {e}")
             pass
 
         # --- RAG auto‑context (safe mode + строгий режим) ---
@@ -1642,7 +1853,7 @@ async def chat(body: ChatRequest, request: Request = None):
         except Exception as e:
             raise
 
-        # PERSIST: сохраняем user и assistant сообщения
+        # PERSIST: сохраняем user и assistant сообщения (legacy JSONL)
         try:
             _append_msg(sess_id, "assistant", answer)
             # Логируем сохранение для отладки
@@ -1650,6 +1861,14 @@ async def chat(body: ChatRequest, request: Request = None):
             print("[PERSIST]", sess_id, "jsonl:", f, "user_len:", len(q), "assistant_len:", len(answer))
         except Exception as e:
             print("[PERSIST ERROR]", sess_id, "error:", e)
+            pass
+        
+        # Chat History: Save assistant message (only if we have a valid answer)
+        try:
+            append_message(conversation_id=cid, role="assistant", content=answer, token_count=None)
+        except Exception as e:
+            # Don't break the chat flow if history saving fails
+            logger.warning(f"[CHAT_HISTORY] Failed to save assistant message: {e}")
             pass
 
         # MEMORY: сохраняем user message и assistant reply в память
@@ -1677,6 +1896,7 @@ async def chat(body: ChatRequest, request: Request = None):
         # Build response
         response = {
             "reply": answer,
+            "conversation_id": cid,
             "rag_ctx_head": (rag_ctx or "")[:200],
             "summary_pending": summary_pending
         }
@@ -1704,7 +1924,13 @@ async def chat(body: ChatRequest, request: Request = None):
                 "exception": str(e)
             }
         )
-        return {"reply": f"echo: {q} (ollama failed: {e})"}
+        # Chat History: User message may have been saved, but assistant message should not be saved on error
+        # Return conversation_id if available
+        error_reply = f"echo: {q} (ollama failed: {e})"
+        response_dict = {"reply": error_reply}
+        if 'cid' in locals() and cid:
+            response_dict["conversation_id"] = cid
+        return response_dict
 
 
 @router.post("/chat/stream")
@@ -2228,11 +2454,75 @@ async def chat_stream(body: ChatRequest):
     )
 
 
+@router.post("/sessions/new")
+def create_new_session(body: Optional[CreateSessionRequest] = None):
+    """
+    B3 lifecycle: Create new session with authoritative lifecycle management.
+    Closes previous active session (if exists) BEFORE creating new one.
+    Returns: {ok: true, session_id}
+    """
+    # Extract optional title from request body
+    title = "New session"
+    if body and body.title and body.title.strip():
+        title = body.title.strip()
+    
+    # B3 lifecycle: Load index
+    idx = _load_index()
+    
+    # B3 lifecycle: Close any active session BEFORE creating new one
+    closed_session_id = _close_active_session(idx)
+    
+    # Generate new session ID (8 hex characters)
+    session_id = uuid.uuid4().hex[:8]
+    
+    # Create new session entry
+    now_ms = int(time.time() * 1000)  # ms, consistent with created_at/updated_at
+    session_entry = {
+        "id": session_id,
+        "title": title,
+        "created_at": now_ms,
+        "updated_at": now_ms,
+        "turns": 0,
+        "summary": None,
+        "status": "active",      # B3 lifecycle: new session is active
+        "closed_at": None,        # B3 lifecycle: not closed
+    }
+    
+    # Add to index
+    idx[session_id] = session_entry
+    
+    # B3 lifecycle: Save index
+    try:
+        _save_index(idx)
+    except Exception as e:
+        logger.error(f"Failed to save sessions index: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create session")
+    
+    # Add opening message for new session
+    opening_content = "Я здесь.\nЕсли хочешь — можем продолжить с того, что было,\nили начать с того, что сейчас важно."
+    _append_msg(session_id, "assistant", opening_content)
+    
+    # Create jsonl file if not exists (can be empty)
+    jsonl_path = SESS_DIR / f"{session_id}.jsonl"
+    if not jsonl_path.exists():
+        try:
+            jsonl_path.touch()
+        except Exception as e:
+            logger.warning(f"Failed to create jsonl file for session {session_id}: {e}")
+            # Don't fail the request if jsonl file creation fails
+    
+    return {
+        "ok": True,
+        "session_id": session_id,
+    }
+
+
 @router.post("/sessions")
 def create_session(body: Optional[CreateSessionRequest] = None):
     """
-    AIR4: создать новую сессию.
+    AIR4: создать новую сессию (legacy endpoint, kept for compatibility).
     Создаёт session id (8 hex chars), записывает в index.json и создаёт jsonl файл.
+    NOTE: This endpoint does NOT close previous active session (use /sessions/new for lifecycle management).
     """
     # Extract optional title from request body
     title = "New session"
@@ -2257,6 +2547,8 @@ def create_session(body: Optional[CreateSessionRequest] = None):
         "updated_at": now,
         "turns": 0,
         "summary": None,
+        "status": "active",      # ROADMAP 3.1.B: default status
+        "closed_at": None,       # ROADMAP 3.1.B: default closed_at
     }
     
     # Add opening message for new session

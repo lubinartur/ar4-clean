@@ -1,6 +1,9 @@
 
 import { Agent, MemoryItem, Message, SystemStats, RouterDecision, AppState, Domain, IngestItem, Send3Out, ChatSession, ModelName, ResponseStyle, Language, IngestMode, SessionConfig } from '../types';
 
+// P2.3.1: Debug flag to control console spam (set to true for verbose logging)
+const DEBUG_UI = import.meta.env.VITE_DEBUG_UI === 'true' || false;
+
 const STORAGE_KEY_CONFIG = 'air4_config';
 const STORAGE_KEY_SESSIONS = 'air4_sessions'; // Legacy, removed in G1
 const STORAGE_KEY_ACTIVE_SESSION = 'air4.activeSessionId';
@@ -98,6 +101,17 @@ export interface Air4Service {
   // API Calls
   getStats(): Promise<SystemStats>;
   getMemories(query: string, sessionId: string): Promise<MemoryItem[]>;
+  getMemoryItems(params: { query?: string; typeFilter?: string; tag?: string; limit?: number; offset?: number; sessionId: string }): Promise<{ items: MemoryItem[]; has_more: boolean }>;
+  // B2.2: Memory Bank methods
+  getMemoryBank(params: { sessionId: string; type?: string; tag?: string; limit?: number; offset?: number }): Promise<{ items: MemoryItem[]; has_more: boolean }>;
+  promoteMemoryItem(id: string, target_type: string, target_tag?: string, sessionId?: string): Promise<boolean>;
+  archiveMemoryItem(id: string, sessionId?: string): Promise<boolean>;
+  unarchiveMemoryItem(id: string, sessionId?: string): Promise<boolean>;  // C3.0: Unarchive memory item
+  deleteMemoryItem(id: string, sessionId?: string): Promise<boolean>;
+  // B2.5: Manual save to Memory Bank (with confirmation)
+  addMemoryNote(sessionId: string, text: string, tag?: string): Promise<{ ok: boolean }>;
+  // C1-FIX: Suggest saving based on user intent (user->assistant pair)
+  suggestMemoryItem(userText: string, assistantText: string, sessionId: string): Promise<{ ok: boolean; suggest: boolean; confidence: number; reason: string; proposed_tag: string }>;
   getFacts(subject?: string, limit?: number): Promise<Fact[]>;
   getFactsProfile(subject?: string): Promise<{ subject: string; profile?: string[]; }>;
   addManualMemory(content: string, source?: string): Promise<boolean>;
@@ -106,10 +120,20 @@ export interface Air4Service {
   deleteMemoryBy(by: "id" | "tag" | "namespace", value: string, sessionId?: string): Promise<boolean>;
   uploadFile(file: File): Promise<boolean>;
   getIngestQueueStatus(): Promise<IngestItem[]>;
-  streamChat(messages: Message[], sessionId: string, coreSettings?: { temperature?: number; responseTone?: string; outputDensity?: string; interfaceLanguage?: string; activeModel?: string; thinkingMode?: string }): AsyncGenerator<{ chunk?: string, context?: MemoryItem[], decision?: RouterDecision }, void, unknown>;
-  chatStream(payload: { text: string; session_id: string; settings?: any; qb_session_id?: string | null; qb_enabled?: boolean; thinking_mode?: string }, handlers: { onToken: (delta: string) => void; onDone: () => void; onError: (message: string) => void; onMeta?: (resolvedModel: string) => void }, signal?: AbortSignal): Promise<void>;
+  streamChat(messages: Message[], sessionId: string, coreSettings?: { temperature?: number; responseTone?: string; outputDensity?: string; interfaceLanguage?: string; activeModel?: string; thinkingMode?: string; rag?: boolean }): AsyncGenerator<{ chunk?: string, context?: MemoryItem[], decision?: RouterDecision }, void, unknown>;
+  chatStream(payload: { text: string; session_id: string; settings?: any; qb_session_id?: string | null; qb_enabled?: boolean; thinking_mode?: string; conversation_id?: string; rag?: boolean }, handlers: { onToken: (delta: string) => void; onDone: (context_used?: any) => void; onError: (message: string) => void; onMeta?: (resolvedModel: string) => void }, signal?: AbortSignal): Promise<void>;
   getSessionConfig(sessionId: string): SessionConfig | undefined;
   setSessionConfig(sessionId: string, config: SessionConfig): void;
+  getConversations(limit?: number, offset?: number, q?: string): Promise<any[]>;
+  getConversation(id: string, opts?: { signal?: AbortSignal }): Promise<any>;
+  createConversation(title?: string): Promise<{id: string}>;
+  // B3 recall: fetch closed sessions list
+  getRecallSessions(params: { limit: number; offset: number; q?: string }): Promise<{ ok: boolean; items: any[]; has_more: boolean }>;
+  // Session-Conversation mapping
+  getSessionConversationMap(): Record<string, string>;
+  setSessionConversationMapping(sessionId: string, conversationId: string): void;
+  getConversationIdForSession(sessionId: string): string | null;
+  normalizeSessionResponse(data: any): { meta: any; messages: any[] };
 }
 
 class Air4ServiceImpl implements Air4Service {
@@ -126,7 +150,7 @@ class Air4ServiceImpl implements Air4Service {
     // Use passed apiBaseUrl (already processed through useSettings with priorities: localStorage > .env > default)
     this.apiBaseUrl = apiBaseUrl ? apiBaseUrl.replace(/\/$/, '') : DEFAULT_API;
     
-    console.log('[air4Service] baseUrl =', this.apiBaseUrl);
+    if (DEBUG_UI) console.log('[air4Service] baseUrl =', this.apiBaseUrl);  // P2.3.1
     const savedConfig = localStorage.getItem(STORAGE_KEY_CONFIG);
     if (savedConfig) {
       const parsed = JSON.parse(savedConfig);
@@ -221,34 +245,35 @@ class Air4ServiceImpl implements Air4Service {
 
   async getSessionById(id: string, signal?: AbortSignal): Promise<ChatSession> {
       // Guard: only call backend if session ID is valid
+      // B4 lifecycle: Session IDs must be created via POST /sessions/new (not legacy /sessions)
       if (!isValidBackendSessionId(id)) {
-          throw new Error(`Invalid session ID: ${id}. Session IDs must be created via POST /sessions.`);
+          throw new Error(`Invalid session ID: ${id}. Session IDs must be created via POST /sessions/new.`);
       }
       const API_BASE_URL = this.apiBaseUrl;
       
-      console.debug('[air4Service] GET', `${this.apiBaseUrl}/sessions/${id}`);
-      
       try {
           const res = await fetch(`${API_BASE_URL}/sessions/${id}`, { signal });
+          
           if (!res.ok) {
+              const errorText = await res.text();
+              console.error('[air4Service] fetch failed', res.status, errorText);
               if (res.status === 404) {
                   throw new Error('Session not found');
               }
-              throw new Error(`Failed to fetch session: ${res.statusText}`);
+              throw new Error(`Failed to fetch session: ${res.status} ${res.statusText} - ${errorText}`);
           }
 
-          const data = await res.json();
-          if (!data.ok) {
-              throw new Error(data.error || 'Failed to fetch session');
-          }
-
-          console.debug('[getSessionById] raw first msg', data.messages?.[0]);
-
+          const rawData = await res.json();
+          
+          // Normalize session response (single source of truth)
+          const normalized = this.normalizeSessionResponse(rawData);
+          
+          // Use normalized response (backend may return { meta: null, messages: [...] })
           // Нормализация id (может быть session_id или id)
-          const sessionId = data.id || id;
+          const sessionId = (normalized.meta?.id) || rawData.id || id;
           
           // Преобразование messages из формата backend в формат Message
-          const normalizedMessages: Message[] = (data.messages || []).map((msg: any, index: number) => {
+          const normalizedMessages: Message[] = (normalized.messages || []).map((msg: any, index: number) => {
               // Нормализация role: поддерживаем разные поля
               const role = msg.role || msg.type || msg.sender || 'user';
               
@@ -265,7 +290,7 @@ class Air4ServiceImpl implements Air4Service {
               }
               
               // Нормализация timestamp
-              const timestamp = msg.ts || msg.timestamp || msg.time || data.timestamp || Date.now();
+              const timestamp = msg.ts || msg.timestamp || msg.time || rawData.timestamp || Date.now();
               
               return {
                   id: msg.id || `msg-${index}-${timestamp}`,
@@ -279,10 +304,10 @@ class Air4ServiceImpl implements Air4Service {
 
           const session: ChatSession = {
               id: sessionId,
-              title: data.title || 'New session',
+              title: (normalized.meta?.title) || rawData.title || 'New session',
               messages: normalizedMessages,
-              lastMessage: data.lastMessage || '',
-              timestamp: data.timestamp || Date.now(),
+              lastMessage: (normalized.meta?.lastMessage) || rawData.lastMessage || '',
+              timestamp: (normalized.meta?.timestamp) || rawData.timestamp || Date.now(),
           };
 
           return session;
@@ -312,18 +337,32 @@ class Air4ServiceImpl implements Air4Service {
   }
 
   async createSession(initialTitle: string = 'New Session'): Promise<ChatSession> {
-      // Call backend POST /sessions to create a session with valid session_id
+      // B4 lifecycle: Call backend POST /sessions/new for authoritative lifecycle management
+      // This endpoint ensures exactly one active session by closing previous active session
       let backendSessionId: string;
+      let closedPrevious: boolean = false;
+      let previousSessionId: string | null = null;
       try {
-          const res = await fetch(`${this.apiBaseUrl}/sessions`, {
+          const res = await fetch(`${this.apiBaseUrl}/sessions/new`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' }
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(initialTitle ? { title: initialTitle } : {})
           });
           if (!res.ok) {
               throw new Error(`Failed to create session: ${res.statusText}`);
           }
           const data = await res.json();
-          backendSessionId = data.id;
+          if (data.ok && data.session_id) {
+              backendSessionId = data.session_id;
+              closedPrevious = data.closed_previous === true;
+              previousSessionId = data.previous_session_id || null;
+              if (DEBUG_UI) console.debug(`[B4] createSession: sid=${backendSessionId}, title="${initialTitle}", closed_previous=${closedPrevious}`);  // P2.3.1
+              if (closedPrevious && previousSessionId) {
+                  if (DEBUG_UI) console.debug('[B4] createSession: closed previous session', previousSessionId);  // P2.3.1
+              }
+          } else {
+              throw new Error('Invalid response from /sessions/new');
+          }
       } catch (error) {
           console.error('[air4Service] createSession backend call failed:', error);
           throw new Error('Failed to create session on backend');
@@ -645,11 +684,341 @@ class Air4ServiceImpl implements Air4Service {
     }
   }
 
+  // B1: Unified read-only memory items API for Store UI
+  async getMemoryItems(params: { query?: string; typeFilter?: string; tag?: string; limit?: number; offset?: number; sessionId: string }): Promise<{ items: MemoryItem[]; has_more: boolean }> {
+    if (this.appState === AppState.PANIC) return { items: [], has_more: false };
+    if (this.isOfflineMode) return { items: [], has_more: false };
+    if (!params.sessionId) {
+      console.error('[getMemoryItems] sessionId is required');
+      return { items: [], has_more: false };
+    }
+
+    try {
+        // B0.2: Build query - backend requires q (use empty string for list mode, user query for search)
+        // Empty string should work as minimal query for listing all items
+        const q = params.query || "";
+        
+        // Build where_json filter based on typeFilter (namespace mapping)
+        let whereJson: string | undefined = undefined;
+        if (params.typeFilter && params.typeFilter !== 'all') {
+            const where: Record<string, string> = {};
+            // Map UI tab to metadata namespace/kind
+            if (params.typeFilter === 'docs') {
+                where['namespace'] = 'docs';
+            } else if (params.typeFilter === 'sessions') {
+                where['namespace'] = 'sessions';
+            } else if (params.typeFilter === 'facts') {
+                where['namespace'] = 'facts';
+            } else if (params.typeFilter === 'profile') {
+                where['namespace'] = 'profile';
+            } else if (params.typeFilter === 'pinned') {
+                where['tag'] = 'rag_pin';
+            }
+            // tag filter overrides typeFilter tag
+            if (params.tag) {
+                where['tag'] = params.tag;
+            }
+            if (Object.keys(where).length > 0) {
+                whereJson = JSON.stringify(where);
+            }
+        } else if (params.tag) {
+            // If only tag is provided without typeFilter
+            whereJson = JSON.stringify({ tag: params.tag });
+        }
+
+        const limit = params.limit || 50;
+        const offset = params.offset || 0;
+        
+        // Build URL with params
+        const urlParams = new URLSearchParams({
+            q,
+            session_id: params.sessionId,
+            limit: limit.toString(),
+            offset: offset.toString(),
+        });
+        if (whereJson) {
+            urlParams.set('where_json', whereJson);
+        }
+
+        const res = await fetch(`${this.apiBaseUrl}/memory/search?${urlParams.toString()}`);
+        if (!res.ok) throw new Error("Memory items fetch failed");
+        
+        const data = await res.json();
+        
+        if (data.ok && Array.isArray(data.results)) {
+            const items: MemoryItem[] = data.results.map((item: any) => ({
+                id: item.id || Math.random().toString(),
+                content: item.text || item.content || '',
+                category: (item.metadata || item.meta)?.kind || 'note',
+                namespace: this.mapMetadataToNamespace(item.metadata || item.meta),
+                timestamp: (item.metadata || item.meta)?.ts ? (item.metadata || item.meta).ts * 1000 : Date.now(),
+                relevanceScore: item.score,
+                source: (item.metadata || item.meta)?.source || 'unknown',
+                meta: item.metadata || item.meta
+            }));
+            return {
+                items,
+                has_more: data.has_more === true
+            };
+        }
+        return { items: [], has_more: false };
+    } catch (e) {
+        console.error('[getMemoryItems] Memory items fetch failed', e);
+        return { items: [], has_more: false };
+    }
+  }
+
+  // B2.2: Memory Bank API methods
+  async getMemoryBank(params: { sessionId: string; type?: string; tag?: string; limit?: number; offset?: number; includeArchived?: boolean }): Promise<{ items: MemoryItem[]; has_more: boolean }> {
+    if (this.appState === AppState.PANIC) return { items: [], has_more: false };
+    if (this.isOfflineMode) return { items: [], has_more: false };
+    if (!params.sessionId) {
+      console.error('[B2.2] getMemoryBank: sessionId is required');
+      return { items: [], has_more: false };
+    }
+
+    if (DEBUG_UI) console.log(`[B2.2] bank GET sid=${params.sessionId} type=${params.type || 'all'} offset=${params.offset || 0} limit=${params.limit || 50}`);  // P2.3.1
+
+    try {
+      const urlParams = new URLSearchParams({
+        session_id: params.sessionId,
+        limit: (params.limit || 50).toString(),
+        offset: (params.offset || 0).toString(),
+      });
+      // HOTFIX: omit type for ALL - only add type if it's defined, not empty, and not 'all'
+      if (params.type && params.type !== 'all' && params.type.trim() !== '') {
+        urlParams.set('type', params.type);
+      }
+      if (params.tag) {
+        urlParams.set('tag', params.tag);
+      }
+      // C3.0: Include archived items flag
+      if (params.includeArchived === true) {
+        urlParams.set('include_archived', '1');
+      }
+
+      const res = await fetch(`${this.apiBaseUrl}/memory/bank?${urlParams.toString()}`);
+      if (!res.ok) throw new Error("Memory bank fetch failed");
+      
+      const data = await res.json();
+      
+      if (data.ok && Array.isArray(data.items)) {
+        const items: MemoryItem[] = data.items.map((item: any) => ({
+          id: item.id || Math.random().toString(),
+          text: item.text || item.content || '',
+          content: item.text || item.content || '',
+          category: item.type || item.meta?.kind || 'note',
+          namespace: item.namespace || this.mapMetadataToNamespace(item.meta),
+          timestamp: item.created_at ? (typeof item.created_at === 'number' ? item.created_at * 1000 : Date.parse(item.created_at)) : Date.now(),
+          relevanceScore: item.score || 1.0,
+          source: item.meta?.source || 'unknown',
+          meta: {
+            ...(item.meta || {}),
+            ...(item.created_at ? { created_at: item.created_at } : {}),
+            ...(item.type ? { type: item.type } : {}),
+            ...(item.tag ? { tag: item.tag } : {}),
+            ...(item.session_id ? { session_id: item.session_id } : {}),
+            ...(item.namespace ? { namespace: item.namespace } : {})
+          }
+        }));
+        return {
+          items,
+          has_more: data.has_more === true
+        };
+      }
+      return { items: [], has_more: false };
+    } catch (e) {
+      console.error('[B2.2] getMemoryBank failed', e);
+      return { items: [], has_more: false };
+    }
+  }
+
+  async promoteMemoryItem(id: string, target_type: string, target_tag?: string, sessionId?: string): Promise<boolean> {
+    if (this.appState === AppState.PANIC) return false;
+    if (this.isOfflineMode) return false;
+    
+    // Get sessionId from active session if not provided
+    if (!sessionId) {
+      const sessions = this.getSessions();
+      if (sessions.length > 0) {
+        sessionId = sessions[0].id;
+      } else {
+        console.error('[B2.2] promoteMemoryItem: sessionId required');
+        return false;
+      }
+    }
+
+    if (DEBUG_UI) console.log(`[B2.2] promote id=${id} target_type=${target_type} target_tag=${target_tag || 'none'}`);  // P2.3.1
+
+    try {
+      const body: any = { id, target_type };
+      if (target_tag) {
+        body.target_tag = target_tag;
+      }
+      const res = await fetch(`${this.apiBaseUrl}/memory/promote?session_id=${encodeURIComponent(sessionId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) throw new Error("Promote failed");
+      const data = await res.json();
+      return data.ok === true;
+    } catch (e) {
+      console.error('[B2.2] promoteMemoryItem failed:', e);
+      return false;
+    }
+  }
+
+  async archiveMemoryItem(id: string, sessionId?: string): Promise<boolean> {
+    if (this.appState === AppState.PANIC) return false;
+    if (this.isOfflineMode) return false;
+    
+    if (!sessionId) {
+      const sessions = this.getSessions();
+      if (sessions.length > 0) {
+        sessionId = sessions[0].id;
+      } else {
+        console.error('[B2.2] archiveMemoryItem: sessionId required');
+        return false;
+      }
+    }
+
+    if (DEBUG_UI) console.log(`[B2.2] archive id=${id}`);  // P2.3.1
+
+    try {
+      const res = await fetch(`${this.apiBaseUrl}/memory/archive?session_id=${encodeURIComponent(sessionId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      });
+      if (!res.ok) throw new Error("Archive failed");
+      const data = await res.json();
+      return data.ok === true;
+    } catch (e) {
+      console.error('[B2.2] archiveMemoryItem failed:', e);
+      return false;
+    }
+  }
+
+  // C3.0: Unarchive memory item
+  async unarchiveMemoryItem(id: string, sessionId?: string): Promise<boolean> {
+    if (this.appState === AppState.PANIC) return false;
+    if (this.isOfflineMode) return false;
+    
+    if (!sessionId) {
+      const sessions = this.getSessions();
+      if (sessions.length > 0) {
+        sessionId = sessions[0].id;
+      } else {
+        console.error('[C3.0] unarchiveMemoryItem: sessionId required');
+        return false;
+      }
+    }
+
+    if (DEBUG_UI) console.log(`[C3.0] unarchive id=${id}`);  // P2.3.1
+
+    try {
+      const res = await fetch(`${this.apiBaseUrl}/memory/unarchive?session_id=${encodeURIComponent(sessionId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      });
+      if (!res.ok) throw new Error("Unarchive failed");
+      const data = await res.json();
+      return data.ok === true;
+    } catch (e) {
+      console.error('[C3.0] unarchiveMemoryItem failed:', e);
+      return false;
+    }
+  }
+
+  async deleteMemoryItem(id: string, sessionId?: string): Promise<boolean> {
+    if (this.appState === AppState.PANIC) return false;
+    if (this.isOfflineMode) return false;
+    
+    if (!sessionId) {
+      const sessions = this.getSessions();
+      if (sessions.length > 0) {
+        sessionId = sessions[0].id;
+      } else {
+        console.error('[B2.2] deleteMemoryItem: sessionId required');
+        return false;
+      }
+    }
+
+    if (DEBUG_UI) console.log(`[B2.2] delete id=${id}`);  // P2.3.1
+
+    try {
+      const res = await fetch(`${this.apiBaseUrl}/memory/bank/${encodeURIComponent(id)}?session_id=${encodeURIComponent(sessionId)}`, {
+        method: 'DELETE'
+      });
+      if (!res.ok) throw new Error("Delete failed");
+      const data = await res.json();
+      return data.ok === true;
+    } catch (e) {
+      console.error('[B2.2] deleteMemoryItem failed:', e);
+      return false;
+    }
+  }
+
+  // B2.5: Manual save to Memory Bank (with confirmation)
+  async addMemoryNote(sessionId: string, text: string, tag?: string): Promise<{ ok: boolean }> {
+    if (this.appState === AppState.PANIC) return { ok: false };
+    if (this.isOfflineMode) return { ok: false };
+    
+    try {
+      const res = await fetch(`${this.apiBaseUrl}/memory/add?session_id=${encodeURIComponent(sessionId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, tag: tag || "manual" })
+      });
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(errorText || "Add failed");
+      }
+      const data = await res.json();
+      return { ok: data.ok === true };
+    } catch (e) {
+      console.error('[addMemoryNote] Failed:', e);
+      throw e;
+    }
+  }
+
+  // C1: Suggest saving based on user intent (user->assistant pair)
+  async suggestMemoryItem(userText: string, assistantText: string, sessionId: string): Promise<{ ok: boolean; suggest: boolean; confidence: number; reason: string; proposed_tag: string }> {
+    if (this.appState === AppState.PANIC) return { ok: false, suggest: false, confidence: 0, reason: "", proposed_tag: "manual" };
+    if (this.isOfflineMode) return { ok: false, suggest: false, confidence: 0, reason: "", proposed_tag: "manual" };
+    
+    if (DEBUG_UI) console.log('[C1] suggest request sid=', sessionId);  // P2.3.1
+    try {
+      const res = await fetch(`${this.apiBaseUrl}/memory/suggest?session_id=${encodeURIComponent(sessionId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_text: userText, assistant_text: assistantText })
+      });
+      if (!res.ok) {
+        throw new Error("Suggest failed");
+      }
+      const data = await res.json();
+      if (DEBUG_UI) console.log('[C1] suggest response suggest=', data.suggest, 'tag=', data.proposed_tag, 'reason=', data.reason);  // P2.3.1
+      return {
+        ok: data.ok === true,
+        suggest: data.suggest === true,
+        confidence: data.confidence || 0,
+        reason: data.reason || "",
+        proposed_tag: data.proposed_tag || "manual"
+      };
+    } catch (e) {
+      console.error('[C1] suggestMemoryItem failed:', e);
+      return { ok: false, suggest: false, confidence: 0, reason: "error", proposed_tag: "manual" };
+    }
+  }
+
   async getFacts(subject: string = "Arch", limit: number = 64): Promise<Fact[]> {
       if (this.appState === AppState.PANIC) return [];
       if (this.isOfflineMode) return [];
       try {
-          const res = await fetch(`${this.apiBaseUrl}/facts?subject=${encodeURIComponent(subject)}&limit=${limit}`);
+          const res = await fetch(`${this.apiBaseUrl}/facts/?subject=${encodeURIComponent(subject)}&limit=${limit}`);
           if (!res.ok) throw new Error("Facts fetch failed");
           const data = await res.json();
           if (Array.isArray(data)) {
@@ -689,14 +1058,14 @@ class Air4ServiceImpl implements Air4Service {
       }
 
       try {
-          const url = `${this.apiBaseUrl}/facts/profile?subject=${encodeURIComponent(subject)}`;
-          console.log('[Store/Profile] request url:', url);
+          const url = `${this.apiBaseUrl}/facts/profile/?subject=${encodeURIComponent(subject)}`;
+          if (DEBUG_UI) console.log('[Store/Profile] request url:', url);  // P2.3.1
           const res = await fetch(url);
           if (!res.ok) {
               throw new Error("Facts profile fetch failed");
           }
           const data = await res.json();
-          console.log('[Store/Profile] response:', data);
+          if (DEBUG_UI) console.log('[Store/Profile] response:', data);  // P2.3.1
 
           // Backend returns {subject, profile: [...]}
           return {
@@ -873,7 +1242,7 @@ class Air4ServiceImpl implements Air4Service {
 
   // --- CHAT LOGIC ---
 
-  async *streamChat(messages: Message[], sessionId: string, coreSettings?: { temperature?: number; responseTone?: string; outputDensity?: string; interfaceLanguage?: string; activeModel?: string; thinkingMode?: string }): AsyncGenerator<{ chunk?: string, context?: MemoryItem[], decision?: RouterDecision }, void, unknown> {
+  async *streamChat(messages: Message[], sessionId: string, coreSettings?: { temperature?: number; responseTone?: string; outputDensity?: string; interfaceLanguage?: string; activeModel?: string; thinkingMode?: string; rag?: boolean }, conversationId?: string): AsyncGenerator<{ chunk?: string, context?: MemoryItem[], decision?: RouterDecision, conversationId?: string }, void, unknown> {
     if (this.appState === AppState.PANIC) {
        yield { chunk: "SYSTEM LOCKED. ACCESS DENIED." };
        return;
@@ -964,6 +1333,7 @@ class Air4ServiceImpl implements Air4Service {
         try {
             // G2: Direct SSE streaming from /chat/stream
             // PHASE Q5: Add thinking_mode to payload
+            // C2.0: Add rag flag as query parameter
             const requestPayload: any = {
                 q: lastMessage.content,
                 text: lastMessage.content,
@@ -976,7 +1346,17 @@ class Air4ServiceImpl implements Air4Service {
                 requestPayload.thinking_mode = coreSettings.thinkingMode;
             }
             
-            const response = await fetch(`${this.apiBaseUrl}/chat/stream`, {
+            // Add conversation_id if provided
+            if (conversationId) {
+                requestPayload.conversation_id = conversationId;
+            }
+            
+            // C2.0: Build URL with rag query param (default to 1 if not specified)
+            const ragValue = coreSettings?.rag !== undefined ? (coreSettings.rag ? "1" : "0") : "1";
+            const url = `${this.apiBaseUrl}/chat/stream?rag=${ragValue}`;
+            if (DEBUG_UI) console.log(`[C2.0] chat request sid=${sessionId} rag=${ragValue}`);  // P2.3.1
+            
+            const response = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(requestPayload)
@@ -1023,6 +1403,9 @@ class Air4ServiceImpl implements Air4Service {
                             try {
                                 const event = JSON.parse(jsonStr);
                                 
+                                // Extract conversation_id if present (from conversation_id or conversationId field)
+                                const cid = event.conversation_id ?? event.conversationId;
+                                
                                 if (currentEventType === 'error' || event.type === 'error') {
                                     throw new Error(event.message || 'Unknown error');
                                 }
@@ -1030,16 +1413,33 @@ class Air4ServiceImpl implements Air4Service {
                                 if (event.type === 'meta') {
                                     if (event.model) {
                                         resolvedModel = event.model;
-                                        yield { decision: { domain: simulatedDomain, model: event.model, confidence: 0.85, reason: 'Streaming from backend' } };
+                                        yield { 
+                                            decision: { domain: simulatedDomain, model: event.model, confidence: 0.85, reason: 'Streaming from backend' },
+                                            ...(cid ? { conversationId: cid } : {})
+                                        };
+                                    } else if (cid) {
+                                        // conversation_id might come in meta event without model
+                                        yield { conversationId: cid };
                                     }
                                 } else if (event.type === 'token' && event.delta) {
                                     fullReply += event.delta;
-                                    yield { chunk: event.delta };
+                                    yield { 
+                                        chunk: event.delta,
+                                        ...(cid ? { conversationId: cid } : {})
+                                    };
                                 } else if (event.type === 'done') {
                                     streamSuccess = true;
+                                    if (cid) {
+                                        yield { conversationId: cid };
+                                    }
                                     break;
+                                } else if (cid) {
+                                    // conversation_id might come in other event types
+                                    yield { conversationId: cid };
                                 }
                             } catch (e) {
+                                // If parsing fails, check if it's plain text with conversation_id pattern
+                                // Otherwise, just warn and continue
                                 console.warn('[streamChat] Failed to parse SSE event:', jsonStr, e);
                             }
                             
@@ -1059,16 +1459,23 @@ class Air4ServiceImpl implements Air4Service {
             // Fallback to /chat if streaming fails
             console.warn('[streamChat] Streaming failed, falling back to /chat:', streamError);
             
+            const fallbackPayload: any = {
+                q: lastMessage.content,
+                session_id: sessionId,
+                style: currentStyle,
+                model_override: selectedModel,
+                settings: settingsPayload
+            };
+            
+            // Add conversation_id if provided
+            if (conversationId) {
+                fallbackPayload.conversation_id = conversationId;
+            }
+            
             const res = await fetch(`${this.apiBaseUrl}/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    q: lastMessage.content,
-                    session_id: sessionId,
-                    style: currentStyle,
-                    model_override: selectedModel,
-                    settings: settingsPayload
-                })
+                body: JSON.stringify(fallbackPayload)
             });
 
             if (!res.ok) {
@@ -1078,11 +1485,17 @@ class Air4ServiceImpl implements Air4Service {
             const data: any = await res.json();
             fullReply = data.reply || "[No response payload]";
             
+            // Extract conversation_id from response if present
+            const responseCid = data.conversation_id ?? data.conversationId;
+            
             // Simulate streaming for fallback
             const chunkSize = 5;
             for (let i = 0; i < fullReply.length; i += chunkSize) {
                 const chunk = fullReply.slice(i, i + chunkSize);
-                yield { chunk };
+                yield { 
+                    chunk,
+                    ...(responseCid ? { conversationId: responseCid } : {})
+                };
                 await new Promise(r => setTimeout(r, 10));
             }
         }
@@ -1120,7 +1533,7 @@ class Air4ServiceImpl implements Air4Service {
   }
 
   async chatStream(
-    payload: { text: string; session_id: string; settings?: any; qb_session_id?: string | null; qb_enabled?: boolean; thinking_mode?: string },
+    payload: { text: string; session_id: string; settings?: any; qb_session_id?: string | null; qb_enabled?: boolean; thinking_mode?: string; conversation_id?: string; rag?: boolean },
     handlers: { onToken: (delta: string) => void; onDone: () => void; onError: (message: string) => void; onMeta?: (resolvedModel: string) => void },
     signal?: AbortSignal
   ): Promise<void> {
@@ -1145,7 +1558,17 @@ class Air4ServiceImpl implements Air4Service {
         body.thinking_mode = payload.thinking_mode;
       }
       
-      const response = await fetch(`${this.apiBaseUrl}/chat/stream`, {
+      // CRITICAL: Add conversation_id if provided
+      if (payload.conversation_id) {
+        body.conversation_id = payload.conversation_id;
+      }
+      
+      // C2.0: Add rag flag as query parameter (default to 1 if not specified)
+      const ragValue = payload.rag !== undefined ? (payload.rag ? "1" : "0") : "1";
+      const url = `${this.apiBaseUrl}/chat/stream?rag=${ragValue}`;
+      if (DEBUG_UI) console.log(`[C2.0] chatStream request sid=${payload.session_id} rag=${ragValue}`);  // P2.3.1
+      
+      const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -1210,7 +1633,8 @@ class Air4ServiceImpl implements Air4Service {
                 } else if (event.type === 'token' && event.delta) {
                   handlers.onToken(event.delta);
                 } else if (event.type === 'done') {
-                  handlers.onDone();
+                  // C2.1: Pass context_used from DONE event to handler
+                  handlers.onDone(event.context_used);
                   return;
                 }
               } catch (e) {
@@ -1279,12 +1703,181 @@ class Air4ServiceImpl implements Air4Service {
     }
   }
 
+  async getConversations(limit: number = 50, offset: number = 0, q?: string): Promise<any[]> {
+    try {
+      const params = new URLSearchParams({
+        limit: limit.toString(),
+        offset: offset.toString(),
+      });
+      if (q) {
+        params.append('q', q);
+      }
+      
+      const response = await fetch(`${this.apiBaseUrl}/conversations?${params.toString()}`);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[getConversations] HTTP ${response.status}: ${errorText}`);
+        throw new Error(`Failed to fetch conversations: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      return data.items || [];
+    } catch (error: any) {
+      console.error('[getConversations] Error:', error);
+      throw error;
+    }
+  }
+
+  async getConversation(id: string, opts?: { signal?: AbortSignal }): Promise<any> {
+    try {
+      const response = await fetch(`${this.apiBaseUrl}/conversations/${id}`, {
+        signal: opts?.signal
+      });
+      
+      if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error('Conversation not found');
+        }
+        const errorText = await response.text();
+        console.error(`[getConversation] HTTP ${response.status}: ${errorText}`);
+        throw new Error(`Failed to fetch conversation: ${response.status}`);
+      }
+      
+      return await response.json();
+    } catch (error: any) {
+      // Don't log AbortError (expected when request is cancelled)
+      if (error.name !== 'AbortError') {
+        console.error('[getConversation] Error:', error);
+      }
+      throw error;
+    }
+  }
+
+  // B3 recall: fetch closed sessions list
+  async getRecallSessions(params: { limit: number; offset: number; q?: string }): Promise<{ ok: boolean; items: any[]; has_more: boolean }> {
+    if (this.appState === AppState.PANIC) {
+      return { ok: false, items: [], has_more: false };
+    }
+    if (this.isOfflineMode) {
+      return { ok: false, items: [], has_more: false };
+    }
+    
+    try {
+      const urlParams = new URLSearchParams({
+        limit: params.limit.toString(),
+        offset: params.offset.toString(),
+      });
+      if (params.q) {
+        urlParams.append('q', params.q);
+      }
+      
+      const response = await fetch(`${this.apiBaseUrl}/recall/sessions?${urlParams.toString()}`);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[getRecallSessions] HTTP ${response.status}: ${errorText}`);
+        throw new Error(`Failed to fetch recall sessions: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      // Backend returns { ok: true, items: [...], has_more: boolean }
+      return {
+        ok: data.ok !== false,
+        items: Array.isArray(data.items) ? data.items : [],
+        has_more: data.has_more === true
+      };
+    } catch (error: any) {
+      // Don't log AbortError (expected when request is cancelled)
+      if (error.name !== 'AbortError') {
+        console.error('[getRecallSessions] Error:', error);
+      }
+      throw error;
+    }
+  }
+
+  async createConversation(title?: string): Promise<{id: string}> {
+    try {
+      const body: any = {};
+      if (title) {
+        body.title = title;
+      }
+      
+      const response = await fetch(`${this.apiBaseUrl}/conversations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[createConversation] HTTP ${response.status}: ${errorText}`);
+        throw new Error(`Failed to create conversation: ${response.status}`);
+      }
+      
+      return await response.json();
+    } catch (error: any) {
+      console.error('[createConversation] Error:', error);
+      throw error;
+    }
+  }
+
+  // Session-Conversation mapping helpers
+  getSessionConversationMap(): Record<string, string> {
+    try {
+      const stored = localStorage.getItem('air4_session_conversation_map');
+      if (!stored) return {};
+      return JSON.parse(stored);
+    } catch (e) {
+      console.error('[getSessionConversationMap] Error:', e);
+      return {};
+    }
+  }
+
+  setSessionConversationMapping(sessionId: string, conversationId: string): void {
+    try {
+      const map = this.getSessionConversationMap();
+      map[sessionId] = conversationId;
+      localStorage.setItem('air4_session_conversation_map', JSON.stringify(map));
+      if (DEBUG_UI) console.debug('[setSessionConversationMapping]', { sessionId, conversationId });  // P2.3.1
+    } catch (e) {
+      console.error('[setSessionConversationMapping] Error:', e);
+    }
+  }
+
+  getConversationIdForSession(sessionId: string): string | null {
+    const map = this.getSessionConversationMap();
+    const cid = map[sessionId] || null;
+    return cid;
+  }
+
   private guessDomain(text: string): Domain {
       const lower = text.toLowerCase();
       if (lower.includes('code') || lower.includes('python') || lower.includes('function')) return 'code';
       if (lower.includes('finance') || lower.includes('cost') || lower.includes('price')) return 'finance';
       if (lower.includes('health') || lower.includes('gym') || lower.includes('run')) return 'fitness';
       return 'general';
+  }
+
+  // Normalize session response: handle meta=null case and different response formats
+  // Single source of truth for /sessions/{id} response shape
+  normalizeSessionResponse(data: any): { meta: any; messages: any[] } {
+      if (!data) return { meta: null, messages: [] };
+
+      // messages: try data.messages first, then data.turns
+      const messages = Array.isArray(data.messages)
+          ? data.messages
+          : Array.isArray(data.turns)
+              ? data.turns
+              : [];
+
+      // meta/session info: try data.meta, then data.session, then build from top-level fields
+      const meta =
+          data.meta && typeof data.meta === "object" ? data.meta :
+          data.session && typeof data.session === "object" ? data.session :
+          (data.id ? { id: data.id, title: data.title, created_at: data.created_at, updated_at: data.updated_at, turns: data.turns, summary: data.summary } : null);
+
+      return { meta, messages };
   }
 }
 

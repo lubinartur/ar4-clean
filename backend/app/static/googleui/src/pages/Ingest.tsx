@@ -1,8 +1,9 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useAir4 } from '../contexts/Air4Context';
 import { IngestItem } from '../types';
 import { UploadCloud, FileText, CheckCircle2, RefreshCw, File, AlertCircle, XCircle, CheckCircle, Loader2 } from 'lucide-react';
+import { usePolling } from '../hooks/usePolling';  // P2.1: Polling only on Ingest page
 
 const Ingest: React.FC = () => {
   const air4 = useAir4();
@@ -12,15 +13,21 @@ const Ingest: React.FC = () => {
   const [notification, setNotification] = useState<{type: 'success' | 'error', message: string} | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const refreshQueue = async () => {
+  // P2.1: Stable callback for polling (prevents duplicate intervals in StrictMode)
+  const refreshQueue = useCallback(async () => {
       const q = await air4.getIngestQueueStatus();
       setQueue(q);
-  };
+  }, [air4]);
 
-  // Load queue on mount only (polling is handled in Sidebar)
-  useEffect(() => {
-    refreshQueue();
-  }, []);
+  // P2.1: Polling ONLY on Ingest page (8s interval, pause when tab hidden)
+  usePolling(refreshQueue, {
+    enabled: true,
+    intervalMs: 8000,         // P2.1: 8 seconds
+    pauseWhenHidden: true,    // P2.1: Pause when tab is hidden
+    pauseWhenOffline: true,
+    maxIntervalMs: 30000,     // P2.1: Backoff up to 30s on errors
+    backoffFactor: 1.5,
+  });
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();

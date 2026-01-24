@@ -567,7 +567,7 @@ class Air4Service {
       if (this.appState === AppState.PANIC) return [];
       if (this.isOfflineMode) return [];
       try {
-          const res = await fetch(`${API_BASE_URL}/facts?subject=${encodeURIComponent(subject)}&limit=${limit}`);
+          const res = await fetch(`${API_BASE_URL}/facts/?subject=${encodeURIComponent(subject)}&limit=${limit}`);
           if (!res.ok) throw new Error("Facts fetch failed");
           const data = await res.json();
           if (Array.isArray(data)) {
@@ -621,7 +621,7 @@ class Air4Service {
       }
 
       try {
-          const res = await fetch(`${API_BASE_URL}/facts/profile?subject=${encodeURIComponent(subject)}`);
+          const res = await fetch(`${API_BASE_URL}/facts/profile/?subject=${encodeURIComponent(subject)}`);
           if (!res.ok) {
               throw new Error("Facts profile fetch failed");
           }
@@ -692,6 +692,85 @@ class Air4Service {
           return data.ok === true;
       } catch (e) {
           console.error("Failed to add memory", e);
+
+          // Mark offline so UI can reflect backend connectivity problems,
+          // but do NOT prevent future attempts — the next call can succeed.
+          this.isOfflineMode = true;
+          this.lastHealthCheck = Date.now();
+
+          return false;
+      }
+  }
+
+  // Recall v0.1: Get sessions with preview + counts
+  async getRecallSessions(params: { limit?: number; offset?: number; q?: string }): Promise<{ items: Array<{ session_id: string; title: string; updated_at: number; preview: string; counts: { chat: number; note: number } }>; has_more: boolean }> {
+      if (this.appState === AppState.PANIC) {
+          return { items: [], has_more: false };
+      }
+
+      try {
+          const urlParams = new URLSearchParams();
+          if (params.limit !== undefined) urlParams.append('limit', params.limit.toString());
+          if (params.offset !== undefined) urlParams.append('offset', params.offset.toString());
+          if (params.q) urlParams.append('q', params.q);
+
+          const res = await fetch(`${API_BASE_URL}/recall/sessions?${urlParams.toString()}`);
+          if (!res.ok) {
+              console.warn('[getRecallSessions] non-OK response', res.status);
+              return { items: [], has_more: false };
+          }
+
+          const data = await res.json();
+          if (data.ok && Array.isArray(data.items)) {
+              // Clear offline mode on success
+              this.isOfflineMode = false;
+              this.lastHealthCheck = Date.now();
+              return {
+                  items: data.items,
+                  has_more: data.has_more === true
+              };
+          }
+          return { items: [], has_more: false };
+      } catch (e) {
+          console.error('[getRecallSessions] failed:', e);
+          this.isOfflineMode = true;
+          this.lastHealthCheck = Date.now();
+          return { items: [], has_more: false };
+      }
+  }
+
+  // B2.5: Inline capture - add memory note via POST /memory/add?session_id=...
+  async addMemoryNote(sessionId: string, text: string, tag: string = "manual"): Promise<boolean> {
+      if (this.appState === AppState.PANIC) return false;
+
+      try {
+          const payload = {
+              text: text,
+              tag: tag
+          };
+          console.debug('[air4Service] addMemoryNote: POST /memory/add', { sessionId, tag, text: text.slice(0, 50) });
+
+          const res = await fetch(`${API_BASE_URL}/memory/add?session_id=${encodeURIComponent(sessionId)}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+          });
+
+          if (!res.ok) {
+              console.warn('[addMemoryNote] non-OK response', res.status);
+              return false;
+          }
+
+          const data = await res.json();
+          console.debug('[air4Service] addMemoryNote: response', { ok: data.ok, status: res.status });
+
+          // If we successfully reached backend, clear offline mode.
+          this.isOfflineMode = false;
+          this.lastHealthCheck = Date.now();
+
+          return data.ok === true;
+      } catch (e) {
+          console.error("Failed to add memory note", e);
 
           // Mark offline so UI can reflect backend connectivity problems,
           // but do NOT prevent future attempts — the next call can succeed.

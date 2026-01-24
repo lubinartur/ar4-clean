@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useSettings } from "../hooks/useSettings";
 import { useAir4 } from '../contexts/Air4Context';
-import { Message, MemoryItem, RouterDecision, SystemStats, ResponseStyle, ModelName, ModelMode } from '../types';
+import { Message, MemoryItem, RouterDecision, SystemStats, ResponseStyle, ModelName, ModelMode, ContextUsed } from '../types';
 import { Send, Mic, Paperclip, BrainCircuit, Cpu, Sparkles, Activity, Database, Circle, ChevronDown, Check, Star, Copy, ClipboardCheck, Square, Pin, PinOff, Eye, EyeOff, RotateCw } from 'lucide-react';
 import { QBPanel } from '../components/qb/QBPanel';
 
@@ -11,6 +11,13 @@ interface ChatProps {
     initialQuery?: string;
     clearInitialQuery?: () => void;
     onSessionChange?: (id: string) => void;
+    selectedConversationId?: string | null;
+    onSelectConversation?: (conversationId: string) => void;
+    forceReloadTick?: number;
+    userSelectTick?: number;
+    onOpenSessionReady?: (openSession: (sid: string) => Promise<void>) => void;
+    historyLoaded?: boolean;
+    sessionOpenTick?: number;
 }
 
 // Helper: удаляет поля со значением undefined/null из объекта
@@ -34,7 +41,7 @@ const hash = (s: string): string => {
 };
 
 
-const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery, onSessionChange }) => {
+const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery, onSessionChange, selectedConversationId, onSelectConversation, forceReloadTick = 0, userSelectTick = 0, onOpenSessionReady, historyLoaded = false, sessionOpenTick = 0 }) => {
   console.debug('[CHAT MOUNT]', window.location.href);
   const { settings, setSettings } = useSettings();
   const air4 = useAir4();
@@ -42,6 +49,7 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isThinking, setIsThinking] = useState(false);
+  const [conversationId, setConversationId] = useState<string | null>(null);
   const [routerState, setRouterState] = useState<RouterDecision | null>(null);
   const [stats, setStats] = useState<SystemStats | null>(null);
   const [lastStatsTime, setLastStatsTime] = useState<number>(Date.now());
@@ -51,6 +59,8 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
   const [modelMode, setModelMode] = useState<ModelMode>(settings.modelMode || 'auto');
   const [showModelModeMenu, setShowModelModeMenu] = useState(false);
   const modelModeMenuRef = useRef<HTMLDivElement>(null);
+  // C2.0: RAG toggle state (persisted per session)
+  const [ragEnabled, setRagEnabled] = useState<boolean>(true);
   const [inputError, setInputError] = useState(false);
   const [savedMessageIds, setSavedMessageIds] = useState<Set<string>>(new Set());
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -61,9 +71,52 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
   const [sourcesOpen, setSourcesOpen] = useState<Record<string, boolean>>({});
   const [retryAvailable, setRetryAvailable] = useState(false);
   const [userJustSentMessage, setUserJustSentMessage] = useState(false);
+  // C2.2: Context transparency - per-message expanded state (not global)
+  const [contextExpandedByMsg, setContextExpandedByMsg] = useState<Record<string, boolean>>({});
+  // C2.2: Copy status per item (key: `${msgId}:${itemId}`)
+  const [copiedByItem, setCopiedByItem] = useState<Record<string, boolean>>({});
   const [qbSessionId, setQbSessionId] = useState<string | null>(null);
   const [qbEnabled, setQbEnabled] = useState(true);
   const [qbRefreshTrigger, setQbRefreshTrigger] = useState(0);
+  // B2.5: Save confirmation modal state
+  const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
+  const [saveText, setSaveText] = useState('');
+  const [saveTag, setSaveTag] = useState('manual');
+  const [saveMessageId, setSaveMessageId] = useState<string | null>(null);
+  const [saveToast, setSaveToast] = useState<string | null>(null);
+  // C2: Memory suggest persistence state (localStorage-backed)
+  const [handledSuggestions, setHandledSuggestions] = useState<Record<string, "saved" | "dismissed">>(() => {
+    try {
+      const stored = localStorage.getItem("air4_suggest_handled_v1");
+      return stored ? JSON.parse(stored) : {};
+    } catch {
+      return {};
+    }
+  });
+  // C3: suggestedCache includes timestamp for TTL
+  const [suggestedCache, setSuggestedCache] = useState<Record<string, { suggest: boolean; proposed_tag: string; confidence: number; reason: string; ts: number }>>(() => {
+    try {
+      const stored = localStorage.getItem("air4_suggest_cache_v1");
+      if (!stored) return {};
+      const parsed = JSON.parse(stored);
+      // C3: Filter out entries older than 14 days
+      const now = Date.now();
+      const ttlMs = 14 * 24 * 60 * 60 * 1000; // 14 days
+      const filtered: Record<string, any> = {};
+      for (const [key, value] of Object.entries(parsed)) {
+        const entry = value as any;
+        // If entry has ts and is within TTL, or if entry doesn't have ts (backward compatibility), keep it
+        if (entry.ts && (now - entry.ts) > ttlMs) {
+          continue; // Skip expired entries
+        }
+        // Ensure ts is present (for old entries without ts)
+        filtered[key] = { ...entry, ts: entry.ts || now };
+      }
+      return filtered;
+    } catch {
+      return {};
+    }
+  });
   const styleMenuRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -72,6 +125,17 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
   const abortControllerRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef(0);
   const sessionFetchAbortControllerRef = useRef<AbortController | null>(null);
+  const restoredForSessionRef = useRef<string | null>(null);
+  const forceReloadRef = useRef<number>(0);
+  const inflightKeyRef = useRef<string | null>(null);
+  const userSelectTickRef = useRef<number>(0);
+  const lastLoadedSessionRef = useRef<string | null>(null);
+  const selectTickRef = useRef<number>(0);
+  const bootRestoredRef = useRef<string | null>(null);
+  const bootDoneRef = useRef<boolean>(false);
+  const loadingSessionIdRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const suggestAbortControllerRef = useRef<AbortController | null>(null);
   const lastRequestRef = useRef<{ text: string; session_id: string; settings: any; botMsgId: string } | null>(null);
   const persistThrottleRef = useRef<NodeJS.Timeout | null>(null);
   const scrollThrottleRef = useRef<NodeJS.Timeout | null>(null);
@@ -95,15 +159,170 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
   // QB session is now created only after first user message or first AIR4 message
   // This prevents QB from being the first message in a new session
 
-  // Load session messages when ID changes
+  // Load conversation messages
+  const loadConversation = useCallback(async (conversationId: string) => {
+    try {
+      const data = await air4.getConversation(conversationId);
+      
+      // Transform API messages to UI Message format
+      const mappedMessages: Message[] = (data.messages || []).map((msg: any, idx: number) => ({
+        id: msg.id || `msg-${idx}-${Date.now()}`,
+        role: msg.role === 'system' ? 'assistant' : (msg.role as 'user' | 'assistant'),
+        content: msg.content || '',
+        timestamp: msg.created_at ? new Date(msg.created_at).getTime() : Date.now() - (data.messages.length - idx) * 1000,
+      }));
+      
+      setMessages(mappedMessages);
+      setConversationId(conversationId);
+      setSavedMessageIds(new Set());
+      setUsedMemory({});
+      setUsedMemoryQueries({});
+      setPinnedMemoryIds(new Set());
+      setSourcesOpen({});
+      
+      // Clear sessionId when loading conversation (to avoid conflicts)
+      if (onSessionChange) {
+        onSessionChange(null);
+      }
+      
+      // Clear lastLoadedSessionRef when loading conversation (conversation mode)
+      lastLoadedSessionRef.current = null;
+      
+      console.debug('[CHAT] Loaded conversation:', { conversationId, messageCount: mappedMessages.length });
+    } catch (error: any) {
+      console.error('[CHAT] Failed to load conversation:', error);
+      // Show error but don't break UI - only clear if not loading a session
+      if (!lastLoadedSessionRef.current) {
+        setMessages([]);
+      }
+      setConversationId(null);
+    }
+  }, [air4, onSessionChange]);
+
+  // Handle conversation selection from Sidebar
   useEffect(() => {
+    // Guard: Don't load conversation if we just loaded a session (avoid clobbering)
+    if (selectedConversationId && !lastLoadedSessionRef.current) {
+      loadConversation(selectedConversationId);
+    }
+  }, [selectedConversationId, loadConversation]);
+
+  // Map session messages array to UI Message format
+  const mapSessionMessagesToUi = useCallback((messages: any[]): Message[] => {
+      if (!Array.isArray(messages)) return [];
+      return messages.map((msg: any, idx: number) => ({
+          id: msg.id || `msg-${idx}-${Date.now()}`,
+          role: (msg.role === 'system' ? 'assistant' : (msg.role || 'user')) as 'user' | 'assistant',
+          content: msg.content || msg.text || msg.message || '',
+          timestamp: msg.timestamp || msg.ts || msg.created_at ? 
+              (typeof (msg.timestamp || msg.ts || msg.created_at) === 'number' ? 
+                  (msg.timestamp || msg.ts || msg.created_at) : 
+                  new Date(msg.created_at || msg.timestamp || msg.ts).getTime()) : 
+              Date.now(),
+      }));
+  }, []);
+
+  // Explicit openSession function - NO guards, always executes fetch
+  // Abort ONLY when switching to a DIFFERENT sessionId
+  const openSession = useCallback(async (sessionId: string) => {
+      console.log('[openSession] START', sessionId);
+      
+      // ❗ Abort ТОЛЬКО если грузился ДРУГОЙ sessionId
+      if (abortRef.current && loadingSessionIdRef.current !== null && loadingSessionIdRef.current !== sessionId) {
+          abortRef.current.abort();
+      }
+      
+      const ac = new AbortController();
+      abortRef.current = ac;
+      sessionFetchAbortControllerRef.current = ac; // Keep for compatibility
+      loadingSessionIdRef.current = sessionId;
+      
+      try {
+          // Direct fetch to backend
+          const apiBaseUrl = air4.apiBaseUrl || (typeof window !== 'undefined' ? window.location.origin : '');
+          const res = await fetch(`${apiBaseUrl}/sessions/${sessionId}`, { signal: ac.signal });
+          
+          if (!res.ok) {
+              const text = await res.text();
+              throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+          }
+          
+          const raw = JSON.parse(await res.text());
+          
+          // Normalize session response (single source of truth for /sessions shape)
+          const normalized = air4.normalizeSessionResponse(raw);
+          const arr = normalized.messages;
+          
+          // Map messages to UI format (takes ONLY messages array)
+          const uiMsgs = mapSessionMessagesToUi(arr);
+          
+          // Always set messages (force reload)
+          if (uiMsgs.length === 0) {
+              // Add opening message for empty sessions
+              const openingMessage: Message = {
+                  id: `opening-${Date.now()}`,
+                  role: 'assistant',
+                  content: 'Я здесь.\nЕсли хочешь — можем продолжить с того, что было,\nили начать с того, что сейчас важно.',
+                  timestamp: Date.now()
+              };
+              setMessages([openingMessage]);
+              console.log('[openSession] DONE', sessionId, 'len=1 (opening)');
+          } else {
+              setMessages(uiMsgs);
+              console.log('[openSession] DONE', sessionId, 'len=', uiMsgs.length);
+          }
+          
+          setSavedMessageIds(new Set());
+          setUsedMemory({});
+          setUsedMemoryQueries({});
+          setPinnedMemoryIds(new Set());
+          setSourcesOpen({});
+          setConversationId(null);
+          // C1: Cancel pending suggest requests when switching sessions
+          if (suggestAbortControllerRef.current) {
+            suggestAbortControllerRef.current.abort();
+            suggestAbortControllerRef.current = null;
+          }
+          
+          // Update refs
+          lastLoadedSessionRef.current = sessionId;
+          restoredForSessionRef.current = sessionId;
+          
+      } catch (e: any) {
+          if (e?.name === 'AbortError' || ac.signal.aborted) {
+              return; // Silent abort on switch
+          }
+          console.error('[openSession] ERROR', sessionId, e);
+          // Don't set empty messages - let previous messages stay visible
+      } finally {
+          // Clear loading ref only if this is still the current loading session
+          if (loadingSessionIdRef.current === sessionId) {
+              loadingSessionIdRef.current = null;
+          }
+      }
+  }, [air4, mapSessionMessagesToUi]);
+
+  // Expose openSession to parent component
+  useEffect(() => {
+      if (onOpenSessionReady) {
+          onOpenSessionReady(openSession);
+      }
+  }, [onOpenSessionReady, openSession]);
+
+  // Load session messages (session-only, without conversation mapping)
+  const loadSessionMessages = useCallback(async (sessionIdToLoad: string) => {
       // Cancel any in-flight session fetch
       if (sessionFetchAbortControllerRef.current) {
           sessionFetchAbortControllerRef.current.abort();
       }
 
-      if (!sessionId) {
-          setMessages([]);
+      // B4 lifecycle: Guard - only call getSessionById if session ID is valid (from backend POST /sessions/new)
+      if (!air4.isValidSessionId(sessionIdToLoad)) {
+          console.warn('[CHAT] Invalid session ID, skipping getSessionById:', sessionIdToLoad);
+          // Only clear if this is not the already loaded session
+          if (lastLoadedSessionRef.current !== sessionIdToLoad) {
+              setMessages([]);
+          }
           setSavedMessageIds(new Set());
           setUsedMemory({});
           setUsedMemoryQueries({});
@@ -112,65 +331,60 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
           return;
       }
 
-      // Guard: only call getSessionById if session ID is valid (from backend POST /sessions)
-      if (!air4.isValidSessionId(sessionId)) {
-          console.warn('[CHAT] Invalid session ID, skipping getSessionById:', sessionId);
-          setMessages([]);
-          setSavedMessageIds(new Set());
-          setUsedMemory({});
-          setUsedMemoryQueries({});
-          setPinnedMemoryIds(new Set());
-          setSourcesOpen({});
-          return;
-      }
-
-      console.debug('[CHAT] sessionId', sessionId);
+      console.debug('[CHAT] loadSessionMessages: sessionId', sessionIdToLoad);
 
       // Create new AbortController for this fetch
       const abortController = new AbortController();
       sessionFetchAbortControllerRef.current = abortController;
-      const currentSessionId = sessionId; // Capture for race check
+      const currentSessionId = sessionIdToLoad; // Capture for race check
 
-      (async () => {
-          try {
-              console.debug('[CHAT] fetching session from API', currentSessionId);
-              const s = await air4.getSessionById(currentSessionId, abortController.signal);
-              
-              // Race check: only update if sessionId hasn't changed
-              if (abortController.signal.aborted || currentSessionId !== sessionId) {
-                  console.debug('[CHAT] session fetch aborted or session changed, ignoring response');
-                  return;
-              }
-              
-              console.debug('[CHAT] fetched', { id: s.id, messages: s.messages?.length });
-              const loadedMessages = s.messages || [];
-              
-              // Add opening message for new empty sessions
-              if (loadedMessages.length === 0) {
-                const openingMessage: Message = {
-                  id: `opening-${Date.now()}`,
-                  role: 'assistant',
-                  content: 'Я здесь.\nЕсли хочешь — можем продолжить с того, что было,\nили начать с того, что сейчас важно.',
-                  timestamp: Date.now()
-                };
-                const messagesWithOpening = [openingMessage];
-                setMessages(messagesWithOpening);
-                // Persist opening message to session (local)
-                air4.upsertSession({
-                  ...s,
-                  messages: messagesWithOpening
-                });
-              } else {
-                setMessages(loadedMessages);
-                air4.upsertSession(s);
-              }
-              
-              // Create QB session if session has messages (not a new session)
-              // This allows QB to work in existing sessions, but prevents auto-start on new sessions
-              if (qbEnabled && !qbSessionId && loadedMessages.length > 0) {
-                ensureQbSession().then(setQbSessionId).catch(console.error);
-              }
-          } catch (e: any) {
+      try {
+          console.debug('[CHAT] fetching session from API', currentSessionId);
+          const s = await air4.getSessionById(currentSessionId, abortController.signal);
+          
+          // Race check: only update if sessionId hasn't changed
+          if (abortController.signal.aborted || currentSessionId !== sessionIdToLoad) {
+              console.debug('[CHAT] session fetch aborted or session changed, ignoring response');
+              return;
+          }
+          
+          console.debug('[CHAT] fetched', { id: s.id, messages: s.messages?.length });
+          const loadedMessages = s.messages || [];
+          
+          // Add opening message for new empty sessions
+          if (loadedMessages.length === 0) {
+            const openingMessage: Message = {
+              id: `opening-${Date.now()}`,
+              role: 'assistant',
+              content: 'Я здесь.\nЕсли хочешь — можем продолжить с того, что было,\nили начать с того, что сейчас важно.',
+              timestamp: Date.now()
+            };
+            const messagesWithOpening = [openingMessage];
+            setMessages(messagesWithOpening);
+            console.log('[load] setMessages(len=', messagesWithOpening.length, ') sessionId=', sessionIdToLoad);
+            // Persist opening message to session (local)
+            air4.upsertSession({
+              ...s,
+              messages: messagesWithOpening
+            });
+          } else {
+            setMessages(loadedMessages);
+            console.log('[load] setMessages(len=', loadedMessages.length, ') sessionId=', sessionIdToLoad);
+            air4.upsertSession(s);
+          }
+          
+          // Set guard and lock after successful load
+          lastLoadedSessionRef.current = sessionIdToLoad;
+          if (loadedMessages.length > 0) {
+              restoredForSessionRef.current = sessionIdToLoad;
+          }
+          
+          // Create QB session if session has messages (not a new session)
+          // This allows QB to work in existing sessions, but prevents auto-start on new sessions
+          if (qbEnabled && !qbSessionId && loadedMessages.length > 0) {
+            ensureQbSession().then(setQbSessionId).catch(console.error);
+          }
+      } catch (e: any) {
               // Ignore AbortError (expected when session changes)
               if (e.name === 'AbortError' || e.message?.includes('aborted')) {
                   console.debug('[CHAT] session fetch aborted');
@@ -178,8 +392,9 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
               }
               
               // Handle 404 "Session not found" - create new session and update URL/localStorage
+              // B4 lifecycle: Create new session via POST /sessions/new when session not found
               const is404 = e.message === 'Session not found' || (e.message?.includes && e.message.includes('Session not found'));
-              if (is404 && currentSessionId === sessionId) {
+              if (is404 && currentSessionId === sessionIdToLoad) {
                   console.warn('[session] invalid sessionId -> created new', currentSessionId);
                   try {
                       const newSession = await air4.createSession('');
@@ -219,13 +434,9 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
               }
               
               console.debug('[CHAT] fetch failed', e);
-              // Only set empty messages if this is still the current session
-              if (currentSessionId === sessionId) {
+              // Only set empty messages if this is still the current session AND not already loaded
+              if (currentSessionId === sessionIdToLoad && lastLoadedSessionRef.current !== sessionIdToLoad) {
                   setMessages([]);
-              }
-          } finally {
-              // Only clear state if this is still the current session
-              if (currentSessionId === sessionId) {
                   setSavedMessageIds(new Set());
                   setUsedMemory({});
                   setUsedMemoryQueries({});
@@ -233,15 +444,39 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
                   setSourcesOpen({});
               }
           }
-      })();
+  }, [air4, qbEnabled, qbSessionId, ensureQbSession, setQbSessionId, onSessionChange]);
 
+  // ЕДИНЫЙ эффект загрузки: зависит от sessionId и sessionOpenTick
+  // Это решает "повторный клик не грузит", потому что tick меняется всегда
+  useEffect(() => {
+      if (!sessionId) {
+          restoredForSessionRef.current = null;
+          inflightKeyRef.current = null;
+          lastLoadedSessionRef.current = null;
+          bootRestoredRef.current = null;
+          loadingSessionIdRef.current = null;
+          // OK to clear messages when switching to no session (explicit clear)
+          setMessages([]);
+          setSavedMessageIds(new Set());
+          setUsedMemory({});
+          setUsedMemoryQueries({});
+          setPinnedMemoryIds(new Set());
+          setSourcesOpen({});
+          // Clear conversationId when switching to no session
+          setConversationId(null);
+          return;
+      }
+      
+      // Always call openSession when sessionId or sessionOpenTick changes
+      openSession(sessionId);
+      
+      // Cleanup: abort on unmount or sessionId change
       return () => {
-          // Cleanup: abort fetch if component unmounts or sessionId changes
           if (sessionFetchAbortControllerRef.current) {
               sessionFetchAbortControllerRef.current.abort();
           }
       };
-  }, [sessionId, air4]);
+  }, [sessionId, sessionOpenTick, openSession]); // sessionOpenTick forces reload on same sessionId
 
   // Handle outside click for style menu and model mode menu
   useEffect(() => {
@@ -263,6 +498,30 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
       setModelMode(settings.modelMode);
     }
   }, [settings.modelMode]);
+
+  // C2.0: Load RAG setting from localStorage when session changes
+  useEffect(() => {
+    if (sessionId) {
+      const key = `air4_rag_enabled_v1:${sessionId}`;
+      const stored = localStorage.getItem(key);
+      const enabled = stored !== null ? stored === "1" : true; // default true
+      setRagEnabled(enabled);
+      console.debug(`[C2.0] Loaded RAG setting for session ${sessionId}: ${enabled}`);
+    } else {
+      setRagEnabled(true); // default when no session
+    }
+  }, [sessionId]);
+
+  // C2.0: Save RAG setting to localStorage when toggled
+  const handleRagToggle = useCallback(() => {
+    const newValue = !ragEnabled;
+    setRagEnabled(newValue);
+    if (sessionId) {
+      const key = `air4_rag_enabled_v1:${sessionId}`;
+      localStorage.setItem(key, newValue ? "1" : "0");
+      console.debug(`[C2.0] Saved RAG setting for session ${sessionId}: ${newValue}`);
+    }
+  }, [ragEnabled, sessionId]);
 
   // Load stats on mount only (polling is handled in Sidebar)
   useEffect(() => {
@@ -410,11 +669,134 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
       setShowModelModeMenu(false);
   };
 
-  const handleSaveMemory = async (msg: Message) => {
-      if (savedMessageIds.has(msg.id)) return;
-      const success = await air4.addManualMemory(msg.content, 'chat-selection');
-      if (success) {
-          setSavedMessageIds(prev => new Set(prev).add(msg.id));
+  // C3.1: Emit localStorage change event for Sidebar sync
+  const emitLocalStorageChange = useCallback(() => {
+    window.dispatchEvent(new Event("air4:ls"));
+  }, []);
+
+  // C2: Persist handledSuggestions to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem("air4_suggest_handled_v1", JSON.stringify(handledSuggestions));
+    } catch (e) {
+      console.warn('[C2] Failed to save handledSuggestions to localStorage:', e);
+    }
+  }, [handledSuggestions]);
+
+  // C2: Persist suggestedCache to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem("air4_suggest_cache_v1", JSON.stringify(suggestedCache));
+    } catch (e) {
+      console.warn('[C2] Failed to save suggestedCache to localStorage:', e);
+    }
+  }, [suggestedCache]);
+
+  // B2.5: Open save confirmation modal instead of direct save
+  const handleSaveMemory = (msg: Message) => {
+      const trimmedContent = (msg.content || '').trim();
+      if (trimmedContent.length < 5) {
+          alert('Message must be at least 5 characters to save');
+          return;
+      }
+      setSaveText(trimmedContent);
+      setSaveTag('manual');
+      setSaveMessageId(msg.id);
+      setIsSaveModalOpen(true);
+  };
+
+  // C2: Handle suggestion Save (prefills modal with suggested tag, marks as handled)
+  const handleSuggestionSave = (msg: Message, proposedTag: string) => {
+      const trimmedContent = (msg.content || '').trim();
+      if (trimmedContent.length < 5) {
+          alert('Message must be at least 5 characters to save');
+          return;
+      }
+      if (!sessionId) return;
+      
+      const suggestKey = `${sessionId}:${msg.id}`;
+      setSaveText(trimmedContent);
+      setSaveTag(proposedTag || 'manual');
+      setSaveMessageId(msg.id);
+      setIsSaveModalOpen(true);
+      // C2: Mark as handled when opening save modal (will be confirmed as "saved" after successful save)
+      setHandledSuggestions(prev => ({ ...prev, [suggestKey]: "saved" }));
+  };
+
+  // C2: Dismiss suggestion (mark as handled)
+  const handleDismissSuggestion = (msgId: string) => {
+      if (!sessionId) return;
+      const suggestKey = `${sessionId}:${msgId}`;
+      setHandledSuggestions(prev => ({ ...prev, [suggestKey]: "dismissed" }));
+      // C3.1: Notify Sidebar about change
+      emitLocalStorageChange();
+  };
+
+  // C3: Clear all suggestions for current session
+  const handleClearSuggestionsForSession = () => {
+      if (!sessionId) return;
+      const prefix = `${sessionId}:`;
+      
+      // Remove from handledSuggestions
+      setHandledSuggestions(prev => {
+          const updated = { ...prev };
+          for (const key in updated) {
+              if (key.startsWith(prefix)) {
+                  delete updated[key];
+              }
+          }
+          return updated;
+      });
+      
+      // Remove from suggestedCache
+      setSuggestedCache(prev => {
+          const updated = { ...prev };
+          for (const key in updated) {
+              if (key.startsWith(prefix)) {
+                  delete updated[key];
+              }
+          }
+          return updated;
+      });
+      
+      // C3.1: Notify Sidebar about change (after both state updates)
+      emitLocalStorageChange();
+  };
+
+  // B2.5: Confirm and save to Memory Bank
+  const handleConfirmSave = async () => {
+      if (!sessionId) {
+          alert('No active session');
+          setIsSaveModalOpen(false);
+          return;
+      }
+      if (!saveText || saveText.trim().length < 5) {
+          alert('Note must be at least 5 characters');
+          return;
+      }
+      
+      try {
+          const result = await air4.addMemoryNote(sessionId, saveText.trim(), saveTag || 'manual');
+          if (result.ok) {
+              if (saveMessageId) {
+                  setSavedMessageIds(prev => new Set(prev).add(saveMessageId));
+                  // C2: Mark suggestion as "saved" after successful save
+                  const suggestKey = `${sessionId}:${saveMessageId}`;
+                  setHandledSuggestions(prev => ({ ...prev, [suggestKey]: "saved" }));
+                  // C3.1: Notify Sidebar about change
+                  emitLocalStorageChange();
+              }
+              setIsSaveModalOpen(false);
+              setSaveToast('Saved');
+              setTimeout(() => setSaveToast(null), 2000);
+              // B2.6: Dispatch event to notify Memory.tsx to refresh
+              window.dispatchEvent(new CustomEvent("air4:memory-saved", { detail: { sessionId } }));
+          } else {
+              alert('Failed to save');
+          }
+      } catch (error: any) {
+          console.error('[Save] Failed:', error);
+          alert(error?.message || 'Failed to save');
       }
   };
 
@@ -510,6 +892,19 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
 
     const currentSessionId = retryRequest?.session_id || sessionId;
     if (!currentSessionId) return;
+    
+    // CRITICAL: Determine conversation_id for persistence
+    // Source of truth: (1) conversationId state, (2) mapping by sessionId
+    let cid: string | null = conversationId ?? null;
+    if (!cid && currentSessionId) {
+        const mapped = air4.getConversationIdForSession(currentSessionId);
+        if (mapped) {
+            cid = mapped;
+            // Synchronize state for stability
+            setConversationId(mapped);
+            console.debug('[handleSubmit] resolved conversation_id from mapping:', { sessionId: currentSessionId, conversationId: mapped });
+        }
+    }
     
     // CRITICAL: Compute all needed values EARLY, before any state updates or network calls
     // This ensures lastRequestRef.current is set even if network fails immediately
@@ -637,10 +1032,15 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
         modelUsed: effectiveModel as ModelName
       }], currentSessionId);
 
-      // Параллельный запрос к памяти для RAG источников
+      // C2.0: Параллельный запрос к памяти для RAG источников (только если RAG включен)
       const memorySearchPromise = (async () => {
         if (rid !== requestIdRef.current) return; // Защита от гонок
         if (!currentSessionId) return; // No session, skip memory search
+        // C2.0: Skip memory search if RAG is disabled
+        if (!ragEnabled) {
+          console.debug(`[C2.0] rag disabled: skipping memory search for session ${currentSessionId}`);
+          return;
+        }
         try {
           const memoryResults = await air4.getMemories(requestText, currentSessionId);
           // Берем top-5 результатов
@@ -660,6 +1060,7 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
       if (streamingEnabled) {
         // Используем новый SSE стриминг
         // PHASE Q5: Pass thinking_mode from localStorage
+        // C2.0: Pass rag flag to chatStream
         await air4.chatStream(
           {
             text: requestText,
@@ -667,7 +1068,9 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
             settings: cleanedSettings,
             qb_enabled: qbEnabledForRequest,
             qb_session_id: qbSessionId,
-            thinking_mode: thinkingMode
+            thinking_mode: thinkingMode,
+            conversation_id: cid ?? undefined,
+            rag: ragEnabled // C2.0: RAG toggle
           },
           {
             onToken: (delta: string) => {
@@ -685,15 +1088,15 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
                 return updatedMessages;
               });
             },
-            onDone: () => {
+            onDone: (context_used?: any) => {
               // Защита от гонок: проверяем, что это еще актуальный запрос
               if (rid !== requestIdRef.current) return;
               
-              // Final persist on completion
+              // C2.1: Final persist on completion with context_used
               setMessages(prev => {
                 const finalMessages = prev.map(m => 
                   m.id === botMsgId 
-                    ? { ...m, content: fullContent } 
+                    ? { ...m, content: fullContent, context_used: context_used || undefined } 
                     : m
                 );
                 
@@ -724,6 +1127,72 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
                 }
                 
                 return finalMessages;
+              });
+              
+              // C2: Suggest saving based on user intent (user->assistant pair) with persistence
+              // Only call once per completed assistant message, check cache and handled state first
+              if (!currentSessionId || !fullContent || fullContent.trim().length < 5) {
+                return;
+              }
+              
+              const suggestKey = `${currentSessionId}:${botMsgId}`;
+              
+              // C2: Skip if already handled
+              if (handledSuggestions[suggestKey]) {
+                return;
+              }
+              
+              // C2: Skip if already in cache (positive or negative result)
+              if (suggestedCache[suggestKey]) {
+                return;
+              }
+              
+              // C2.0: Skip memory suggest if RAG is disabled
+              if (!ragEnabled) {
+                console.debug(`[C2.0] rag disabled: skipping memory suggest for session ${currentSessionId}`);
+                return;
+              }
+              
+              // Cancel any pending suggest request
+              if (suggestAbortControllerRef.current) {
+                suggestAbortControllerRef.current.abort();
+              }
+              
+              // Create new AbortController for this suggest request
+              const suggestAbortController = new AbortController();
+              suggestAbortControllerRef.current = suggestAbortController;
+              
+              // Use requestText (the user message that triggered this assistant response)
+              const userText = requestText || "";
+              
+              // C2: Call suggest with user_text + assistant_text (only if not in cache/handled)
+              air4.suggestMemoryItem(userText, fullContent, currentSessionId).then(result => {
+                // Check if request was aborted
+                if (suggestAbortController.signal.aborted) {
+                  return;
+                }
+                
+                // C3: Save result to cache (both positive and negative) with timestamp
+                if (result.ok) {
+                  setSuggestedCache(prev => ({
+                    ...prev,
+                    [suggestKey]: {
+                      suggest: result.suggest,
+                      proposed_tag: result.proposed_tag,
+                      confidence: result.confidence,
+                      reason: result.reason,
+                      ts: Date.now()
+                    }
+                  }));
+                  // C3.1: Notify Sidebar about change
+                  emitLocalStorageChange();
+                }
+              }).catch(err => {
+                // Ignore AbortError (expected when switching sessions)
+                if (err?.name === 'AbortError') {
+                  return;
+                }
+                console.warn('[C2] Suggest failed for message', botMsgId, err);
               });
               
               setIsThinking(false);
@@ -797,17 +1266,20 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
         // Fallback на старый метод streamChat
         // Преобразуем в формат для streamChat (camelCase)
         // PHASE Q5: Add thinkingMode from localStorage
+        // C2.0: Include rag flag in settings
         const streamChatSettings = {
           temperature: backendSettings.temperature,
           responseTone: backendSettings.response_tone,
           outputDensity: backendSettings.output_density,
           interfaceLanguage: backendSettings.interface_language,
           activeModel: backendSettings.model || backendSettings.active_model,
-          thinkingMode: thinkingMode
+          thinkingMode: thinkingMode,
+          rag: ragEnabled // C2.0: RAG toggle
         };
         const cleanedStreamChatSettings = clean(streamChatSettings);
         console.log("[CHAT SEND settings]", cleanedStreamChatSettings);
-        const stream = air4.streamChat(newMessages, sessionId, cleanedStreamChatSettings);
+        // CRITICAL: Pass cid (resolved from state or mapping) to streamChat
+        const stream = air4.streamChat(newMessages, sessionId, cleanedStreamChatSettings, cid ?? undefined);
         
         let context: MemoryItem[] | undefined = undefined;
         let decision: RouterDecision | undefined = undefined;
@@ -815,6 +1287,24 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
         for await (const part of stream) {
           // Защита от гонок: проверяем, что это еще актуальный запрос
           if (rid !== requestIdRef.current) break;
+          
+          // Extract conversation_id from stream if present
+          if (part.conversationId && !conversationId) {
+            const newConversationId = part.conversationId;
+            setConversationId(newConversationId);
+            console.debug('[CHAT] Received conversation_id from stream:', newConversationId);
+            
+            // Save mapping: sessionId -> conversationId (only if mapping doesn't exist or is different)
+            if (currentSessionId) {
+              const existingCid = air4.getConversationIdForSession(currentSessionId);
+              if (existingCid !== newConversationId) {
+                air4.setSessionConversationMapping(currentSessionId, newConversationId);
+                console.log('[map] set', currentSessionId, '->', newConversationId);
+              } else {
+                console.debug('[CHAT] Mapping already exists:', { sessionId: currentSessionId, conversationId: newConversationId });
+              }
+            }
+          }
           
           if (part.decision) {
             decision = part.decision;
@@ -1120,6 +1610,22 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
             )}
           </div>
 
+          {/* C2.0: RAG Toggle */}
+          <div className="px-2 md:px-4">
+            <button
+              onClick={handleRagToggle}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors ${
+                ragEnabled
+                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                  : 'bg-slate-800/50 text-slate-500 border border-slate-700/50'
+              }`}
+              title={ragEnabled ? 'RAG: ON (click to disable)' : 'RAG: OFF (click to enable)'}
+            >
+              <BrainCircuit className={`w-3 h-3 ${ragEnabled ? 'text-emerald-400' : 'text-slate-500'}`} />
+              <span>{ragEnabled ? 'ON' : 'OFF'}</span>
+            </button>
+          </div>
+
           {/* 3. Core Status */}
           <div className="hidden md:flex items-center gap-2 px-3">
             <div
@@ -1150,6 +1656,26 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
               </span>
             )}
           </div>
+
+          {/* C3: Clear suggestions button (only if sessionId exists) */}
+          {sessionId && (() => {
+            const prefix = `${sessionId}:`;
+            const hasUnhandledSuggestions = Object.keys(suggestedCache).some(key => 
+              key.startsWith(prefix) && 
+              suggestedCache[key].suggest === true && 
+              !handledSuggestions[key]
+            );
+            if (!hasUnhandledSuggestions) return null;
+            return (
+              <button
+                onClick={handleClearSuggestionsForSession}
+                className="px-2 py-1 text-[10px] font-medium text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 rounded transition-colors"
+                title="Clear suggestions for this session"
+              >
+                Clear suggestions
+              </button>
+            );
+          })()}
 
           {/* 5. Memory Status */}
           <div className="hidden md:flex items-center gap-2 px-3">
@@ -1204,6 +1730,10 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
       />
 
       <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6 custom-scrollbar scroll-smooth">
+        {/* DEBUG: messages count */}
+        {process.env.NODE_ENV === 'development' && (
+          <div className="text-xs text-slate-500 mb-2">DEBUG: messages:{messages.length}</div>
+        )}
         {messages.map((msg, index) => {
           const isAssistant = msg.role === 'assistant';
 
@@ -1279,19 +1809,160 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
                   ) : null;
                 })()}
 
-                {/* RAG Context */}
-                {msg.role === 'assistant' && msg.contextUsed && msg.contextUsed.length > 0 && (
-                    <div className="mb-3 flex flex-col gap-1 pb-3 border-b border-white/5">
-                        <div className="flex items-center gap-1 text-[10px] font-bold text-air-400 uppercase tracking-wider">
-                            <BrainCircuit className="w-3 h-3" /> Memory Retrieval
-                        </div>
-                        {msg.contextUsed.map((m, idx) => (
-                            <div key={idx} className="text-[10px] text-slate-400 truncate bg-white/5 px-2 py-1.5 rounded flex items-center gap-2 border border-white/5">
-                                <span className="w-1 h-1 bg-air-500 rounded-full"></span>
-                                {m.content}
+                {/* C2.2: Context transparency - show context used by model with per-message expand/collapse */}
+                {msg.role === 'assistant' && ragEnabled && msg.context_used && (
+                    (() => {
+                        const hasMemory = msg.context_used.memory && msg.context_used.memory.length > 0;
+                        const hasDocs = msg.context_used.docs && msg.context_used.docs.length > 0;
+                        const hasContext = hasMemory || hasDocs;
+                        // C2.2: Per-message expanded state (use message id, fallback to stable key)
+                        const msgKey = msg.id || `${msg.role}-${index}-${msg.timestamp || Date.now()}`;
+                        const isExpanded = contextExpandedByMsg[msgKey] || false;
+                        
+                        // C2.2: Copy ID handler
+                        const handleCopyId = async (itemId: string) => {
+                            const copyKey = `${msgKey}:${itemId}`;
+                            try {
+                                await navigator.clipboard.writeText(itemId);
+                                setCopiedByItem(prev => ({ ...prev, [copyKey]: true }));
+                                setTimeout(() => {
+                                    setCopiedByItem(prev => {
+                                        const next = { ...prev };
+                                        delete next[copyKey];
+                                        return next;
+                                    });
+                                }, 1000);
+                            } catch (e) {
+                                console.debug('[C2.2] Failed to copy ID:', e);
+                            }
+                        };
+                        
+                        // C2.3: Open in Store handler
+                        const handleOpenInStore = (item: { id: string; kind?: string | null }, currentSessionId: string | null) => {
+                            try {
+                                if (!currentSessionId) {
+                                    console.debug('[C2.3] No active session, cannot open in store');
+                                    return;
+                                }
+                                // C2.3: Determine tab based on item kind
+                                const effectiveKind = item.kind || 'note';
+                                const targetTab = effectiveKind === 'note' ? 'notes' : 'all';
+                                
+                                // C2.3: Store params in localStorage for Memory page to read
+                                const navParams = {
+                                    session_id: currentSessionId,
+                                    tab: targetTab,
+                                    q: item.id
+                                };
+                                localStorage.setItem('air4_memory_nav_params', JSON.stringify(navParams));
+                                
+                                // C2.3: Dispatch custom event to trigger navigation
+                                window.dispatchEvent(new CustomEvent('air4:navigate-to-memory', { detail: navParams }));
+                            } catch (e) {
+                                console.debug('[C2.3] Failed to open in store:', e);
+                            }
+                        };
+                        
+                        if (!hasContext) {
+                            return (
+                                <div className="mb-3 text-[10px] text-slate-500 italic pb-3 border-b border-white/5">
+                                    No external context used
+                                </div>
+                            );
+                        }
+                        
+                        return (
+                            <div className="mb-3 pb-3 border-b border-white/5">
+                                <button
+                                    onClick={() => setContextExpandedByMsg(prev => ({ ...prev, [msgKey]: !isExpanded }))}
+                                    className="flex items-center gap-1.5 text-[10px] font-medium text-slate-400 hover:text-air-400 transition-colors mb-2"
+                                >
+                                    <BrainCircuit className="w-3 h-3" />
+                                    <span>Context</span>
+                                    <ChevronDown className={`w-3 h-3 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                                </button>
+                                
+                                {isExpanded && (
+                                    <div className="flex flex-col gap-2">
+                                        {/* Memory items */}
+                                        {hasMemory && (
+                                            <div>
+                                                <div className="text-[10px] font-semibold text-slate-400 mb-1">Memory</div>
+                                                {msg.context_used.memory!.map((item, idx) => {
+                                                    const copyKey = `${msgKey}:${item.id}`;
+                                                    const isCopied = copiedByItem[copyKey] || false;
+                                                    // C2.2: Build meta line (namespace • tag • source)
+                                                    const metaParts: string[] = [];
+                                                    if (item.namespace) metaParts.push(item.namespace);
+                                                    if (item.tag) metaParts.push(item.tag);
+                                                    if (item.source) metaParts.push(item.source);
+                                                    const metaLine = metaParts.length > 0 ? metaParts.join(' • ') : null;
+                                                    
+                                                    return (
+                                                        <div key={idx} className="text-[10px] text-slate-400 bg-white/5 px-2 py-1.5 rounded mb-1 border border-white/5">
+                                                            <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                                                <span className={`px-1.5 py-0.5 rounded text-[9px] font-medium ${
+                                                                    item.kind === 'chat' ? 'bg-blue-500/20 text-blue-400' :
+                                                                    item.kind === 'note' ? 'bg-purple-500/20 text-purple-400' :
+                                                                    item.kind === 'fact' ? 'bg-emerald-500/20 text-emerald-400' :
+                                                                    'bg-slate-500/20 text-slate-400'
+                                                                }`}>
+                                                                    {item.kind}
+                                                                </span>
+                                                                {item.score > 0 && (
+                                                                    <span className="text-[9px] text-slate-500">score: {item.score.toFixed(2)}</span>
+                                                                )}
+                                                                {/* C2.2: Copy ID button */}
+                                                                <button
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        handleCopyId(item.id);
+                                                                    }}
+                                                                    className="text-[9px] text-slate-500 hover:text-air-400 transition-colors px-1.5 py-0.5 rounded hover:bg-white/5"
+                                                                    title="Copy ID"
+                                                                >
+                                                                    {isCopied ? 'Copied' : 'Copy ID'}
+                                                                </button>
+                                                                {/* C2.3: Open in Store button */}
+                                                                <button
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        handleOpenInStore(item, sessionId);
+                                                                    }}
+                                                                    className="text-[9px] text-slate-500 hover:text-air-400 transition-colors px-1.5 py-0.5 rounded hover:bg-white/5"
+                                                                    title="Open in Store"
+                                                                >
+                                                                    Open
+                                                                </button>
+                                                            </div>
+                                                            {/* C2.2: Meta line (namespace • tag • source) */}
+                                                            {metaLine && (
+                                                                <div className="text-[9px] text-slate-500 mb-1 italic">{metaLine}</div>
+                                                            )}
+                                                            <div className="text-slate-300 line-clamp-2">{item.preview}</div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                        
+                                        {/* Docs items */}
+                                        {hasDocs && (
+                                            <div>
+                                                <div className="text-[10px] font-semibold text-slate-400 mb-1">Docs</div>
+                                                {msg.context_used.docs!.map((doc, idx) => (
+                                                    <div key={idx} className="text-[10px] text-slate-400 bg-white/5 px-2 py-1.5 rounded mb-1 border border-white/5">
+                                                        <div className="font-medium text-slate-300 mb-1">{doc.title || doc.source}</div>
+                                                        <div className="text-slate-400 line-clamp-2">{doc.preview}</div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
                             </div>
-                        ))}
-                    </div>
+                        );
+                    })()
                 )}
                 
                 {isAssistant && !displayContent && isThinking ? (
@@ -1303,6 +1974,61 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
                     </div>
                 ) : (
                     displayContent
+                )}
+
+                {/* B2.5: User message actions (Save button) */}
+                {msg.role === 'user' && (
+                    <div className="mt-3 pt-2 border-t border-white/10 flex items-center gap-2 opacity-60 hover:opacity-100 transition-opacity">
+                        <button 
+                            onClick={() => handleSaveMemory(msg)}
+                            className={`p-1.5 rounded-lg transition-all ${
+                                savedMessageIds.has(msg.id) 
+                                ? 'bg-air-500/10 text-air-500' 
+                                : 'hover:bg-white/10 text-slate-400 hover:text-air-400'
+                            }`}
+                            title="Save to Memory Bank"
+                        >
+                            <Star className={`w-3.5 h-3.5 ${savedMessageIds.has(msg.id) ? 'fill-air-500' : ''}`} />
+                        </button>
+                        <button 
+                            onClick={() => handleCopy(msg.content, msg.id)}
+                            className="p-1.5 hover:bg-white/10 rounded-lg text-slate-400 hover:text-white transition-colors"
+                            title="Copy to Clipboard"
+                        >
+                            {copiedId === msg.id ? <ClipboardCheck className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                        </button>
+                    </div>
+                )}
+
+                {/* C2: Suggested to save pill (GoogleUI design, persistence-aware) */}
+                {(() => {
+                  if (msg.role !== 'assistant' || isThinking || !sessionId) return false;
+                  const suggestKey = `${sessionId}:${msg.id}`;
+                  const cacheEntry = suggestedCache[suggestKey];
+                  const handled = handledSuggestions[suggestKey];
+                  return cacheEntry?.suggest === true && !handled;
+                })() && (
+                    <div className="mt-3 pt-2 border-t border-white/5">
+                        <div className="flex items-center gap-2 px-3 py-2 glass-card bg-amber-500/10 border border-amber-500/30 rounded-lg">
+                            <span className="text-xs text-amber-400 font-medium flex-1">💡 Suggested to save</span>
+                            <button
+                                onClick={() => {
+                                  const suggestKey = sessionId ? `${sessionId}:${msg.id}` : null;
+                                  const cacheEntry = suggestKey ? suggestedCache[suggestKey] : null;
+                                  handleSuggestionSave(msg, cacheEntry?.proposed_tag || 'manual');
+                                }}
+                                className="px-3 py-1 text-xs font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-lg transition-colors shadow-sm"
+                            >
+                                Save
+                            </button>
+                            <button
+                                onClick={() => handleDismissSuggestion(msg.id)}
+                                className="px-3 py-1 text-xs font-medium text-slate-400 hover:text-slate-200 rounded-lg hover:bg-white/10 transition-colors"
+                            >
+                                Dismiss
+                            </button>
+                        </div>
+                    </div>
                 )}
 
                 {/* AI Actions Footer */}
@@ -1513,6 +2239,60 @@ const Chat: React.FC<ChatProps> = ({ sessionId, initialQuery, clearInitialQuery,
             </span>
         </div>
       </div>
+
+      {/* B2.5: Save confirmation modal */}
+      {isSaveModalOpen && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setIsSaveModalOpen(false)}>
+          <div className="glass-card p-6 rounded-2xl max-w-md w-full mx-4 border border-white/10 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-white mb-4">Save to Memory Bank?</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-slate-300 mb-2">Note</label>
+                <textarea
+                  value={saveText}
+                  onChange={(e) => setSaveText(e.target.value)}
+                  className="w-full glass-input p-3 rounded-lg text-white bg-white/5 border border-white/10 focus:border-air-500/50 focus:outline-none resize-none"
+                  rows={4}
+                  placeholder="Note text..."
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-slate-300 mb-2">Tag (optional)</label>
+                <input
+                  type="text"
+                  value={saveTag}
+                  onChange={(e) => setSaveTag(e.target.value)}
+                  className="w-full glass-input p-3 rounded-lg text-white bg-white/5 border border-white/10 focus:border-air-500/50 focus:outline-none"
+                  placeholder="manual"
+                />
+              </div>
+              <div className="text-xs text-slate-400">Type: note (fixed)</div>
+              <div className="flex gap-3 justify-end pt-2">
+                <button
+                  onClick={() => setIsSaveModalOpen(false)}
+                  className="px-4 py-2 rounded-lg text-sm text-slate-300 hover:text-white hover:bg-white/10 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleConfirmSave}
+                  disabled={!saveText || saveText.trim().length < 5}
+                  className="px-4 py-2 rounded-lg text-sm font-medium text-white bg-air-600 hover:bg-air-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* B2.5: Save toast notification */}
+      {saveToast && (
+        <div className="fixed bottom-4 right-4 glass-card px-4 py-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-400 z-50 animate-fade-in">
+          {saveToast}
+        </div>
+      )}
     </div>
   );
 };

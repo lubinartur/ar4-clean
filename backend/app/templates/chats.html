@@ -1,0 +1,699 @@
+{% extends "base.html" %}
+{% block title %}Chats · AIr4{% endblock %}
+
+{% block content %}
+<style>
+  .chats-layout {
+    display: flex;
+    height: calc(100vh - 60px);
+    gap: 1px;
+    background: var(--bg-secondary);
+  }
+  
+  .chats-sidebar {
+    width: 300px;
+    background: var(--bg-primary);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  
+  .chats-sidebar-header {
+    padding: 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  
+  .chats-sidebar-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  
+  .chats-new-btn {
+    padding: 6px 12px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+    transition: opacity 0.2s;
+  }
+  
+  .chats-new-btn:hover {
+    opacity: 0.9;
+  }
+  
+  .chats-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+  }
+  
+  .chat-item-wrapper {
+    position: relative;
+    margin-bottom: 4px;
+    border-radius: 8px;
+    transition: background 0.2s;
+  }
+  
+  .chat-item-wrapper:hover {
+    background: var(--bg-secondary);
+  }
+  
+  .chat-item-wrapper.active {
+    background: var(--bg-secondary);
+    border-left: 3px solid var(--accent);
+  }
+  
+  .chat-item {
+    padding: 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.2s;
+    text-decoration: none;
+    display: block;
+    color: inherit;
+    padding-right: 80px;
+  }
+  
+  .chat-item-actions {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    gap: 4px;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+  
+  .chat-item-wrapper:hover .chat-item-actions {
+    opacity: 1;
+  }
+  
+  .chat-item-action {
+    padding: 4px 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    color: var(--text-secondary);
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+  
+  .chat-item-action:hover {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border-color: var(--accent);
+  }
+  
+  .chat-item-rename-input {
+    padding: 8px;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 500;
+    width: 100%;
+    font-family: inherit;
+  }
+  
+  .chat-item-rename-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  
+  .chat-item-title {
+    font-weight: 500;
+    font-size: 14px;
+    margin-bottom: 4px;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  
+  .chat-item-preview {
+    font-size: 12px;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-bottom: 4px;
+  }
+  
+  .chat-item-date {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  
+  .chats-main {
+    flex: 1;
+    background: var(--bg-primary);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  
+  .chats-main-header {
+    padding: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  
+  .chats-main-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  
+  .chats-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  
+  .message {
+    display: flex;
+    gap: 12px;
+    max-width: 80%;
+  }
+  
+  .message.user {
+    align-self: flex-end;
+    flex-direction: row-reverse;
+  }
+  
+  .message.assistant {
+    align-self: flex-start;
+  }
+  
+  .message-content {
+    padding: 12px 16px;
+    border-radius: 12px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  
+  .message.user .message-content {
+    background: var(--accent);
+    color: white;
+  }
+  
+  .message-role {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+  }
+  
+  .chats-composer {
+    padding: 16px;
+    border-top: 1px solid var(--border);
+  }
+  
+  .chats-composer-form {
+    display: flex;
+    gap: 8px;
+  }
+  
+  .chats-composer-input {
+    flex: 1;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 14px;
+    resize: none;
+    min-height: 44px;
+    max-height: 120px;
+  }
+  
+  .chats-composer-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  
+  .chats-composer-submit {
+    padding: 12px 24px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: opacity 0.2s;
+  }
+  
+  .chats-composer-submit:hover {
+    opacity: 0.9;
+  }
+  
+  .chats-composer-submit:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  
+  .chats-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-secondary);
+    font-size: 14px;
+  }
+  
+  .chats-not-found {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    gap: 16px;
+    color: var(--text-secondary);
+  }
+  
+  .chats-not-found-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+</style>
+
+<div class="chats-layout">
+  <!-- Sidebar -->
+  <div class="chats-sidebar">
+    <div class="chats-sidebar-header">
+      <div class="chats-sidebar-title">Chats</div>
+      <a href="/ui/chats" class="chats-new-btn">+ New</a>
+    </div>
+    <div class="chats-list">
+      {% for conv in conversations %}
+      <div class="chat-item-wrapper {% if current_cid == conv.id %}active{% endif %}" data-conv-id="{{ conv.id }}">
+        <a href="/ui/chats?cid={{ conv.id }}" class="chat-item">
+          <div class="chat-item-title" data-conv-id="{{ conv.id }}">{{ conv.title or "New chat" }}</div>
+          {% if conv.last_message_preview %}
+          <div class="chat-item-preview">{{ conv.last_message_preview }}</div>
+          {% endif %}
+          {% if conv.last_message_at %}
+          <div class="chat-item-date">{{ conv.last_message_at[:10] }}</div>
+          {% endif %}
+        </a>
+        <div class="chat-item-actions">
+          <button type="button" class="chat-item-action" onclick="event.stopPropagation(); event.preventDefault(); handleRename('{{ conv.id }}'); return false;">Rename</button>
+          <button type="button" class="chat-item-action" onclick="event.stopPropagation(); event.preventDefault(); handleDelete('{{ conv.id }}'); return false;">Delete</button>
+        </div>
+      </div>
+      {% endfor %}
+      {% if not conversations %}
+      <div style="padding: 16px; color: var(--text-muted); font-size: 12px; text-align: center;">
+        No chats yet. Start a conversation!
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  
+  <!-- Main area -->
+  <div class="chats-main">
+    {% if current_cid and not current_conv %}
+    <!-- Chat not found -->
+    <div class="chats-not-found">
+      <div class="chats-not-found-title">Chat not found</div>
+      <div>The conversation you're looking for doesn't exist or has been deleted.</div>
+      <a href="/ui/chats" style="padding: 8px 16px; background: var(--accent); color: white; border-radius: 6px; text-decoration: none;">
+        Back to chats
+      </a>
+    </div>
+    {% elif current_conv %}
+    <!-- Chat view -->
+    <div class="chats-main-header">
+      <div class="chats-main-title">{{ current_conv.title or "New chat" }}</div>
+    </div>
+    <div class="chats-messages" id="messages">
+      {% for msg in messages %}
+      <div class="message {{ msg.role }}">
+        <div>
+          <div class="message-role">{{ msg.role }}</div>
+          <div class="message-content">{{ msg.content }}</div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="chats-composer">
+      <form id="chat-form">
+        <input type="hidden" name="conversation_id" id="conversation-id-field" value="{{ current_cid or '' }}">
+        <div class="chats-composer-form">
+          <textarea 
+            name="q" 
+            id="chat-input" 
+            class="chats-composer-input" 
+            placeholder="Type your message..." 
+            rows="1"
+            required></textarea>
+          <button type="submit" class="chats-composer-submit">Send</button>
+        </div>
+      </form>
+    </div>
+    {% else %}
+    <!-- Empty state -->
+    <div class="chats-empty">
+      <div style="text-align: center;">
+        <div style="font-size: 48px; margin-bottom: 16px;">💬</div>
+        <div style="font-size: 16px; font-weight: 500; margin-bottom: 8px; color: var(--text-primary);">Select a chat</div>
+        <div style="margin-bottom: 16px;">Choose a conversation from the sidebar or start a new one</div>
+        <form id="new-chat-form" style="max-width: 400px; margin: 0 auto;">
+          <div class="chats-composer-form">
+            <textarea 
+              name="q" 
+              id="new-chat-input" 
+              class="chats-composer-input" 
+              placeholder="Start a new conversation..." 
+              rows="2"
+              required></textarea>
+            <button type="submit" class="chats-composer-submit">Send</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<script>
+(function() {
+  const form = document.getElementById('chat-form');
+  const input = document.getElementById('chat-input');
+  const messages = document.getElementById('messages');
+  const newChatForm = document.getElementById('new-chat-form');
+  const newChatInput = document.getElementById('new-chat-input');
+  
+  // Handle new chat form (empty state)
+  if (newChatForm && newChatInput) {
+    newChatForm.addEventListener('submit', async function(e) {
+      e.preventDefault();
+      const text = newChatInput.value.trim();
+      if (!text) return;
+      
+      // Disable form
+      const submitBtn = newChatForm.querySelector('button[type="submit"]');
+      submitBtn.disabled = true;
+      
+      try {
+        const response = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ q: text })
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        
+        // Redirect to new conversation
+        if (data.conversation_id) {
+          window.location.href = `/ui/chats?cid=${data.conversation_id}`;
+        } else {
+          // Fallback: reload page
+          window.location.reload();
+        }
+      } catch (error) {
+        alert(`Error: ${error.message}`);
+        submitBtn.disabled = false;
+      }
+    });
+  }
+  
+  // Handle existing chat form
+  if (form && input) {
+    // Auto-resize textarea
+    input.addEventListener('input', function() {
+      this.style.height = 'auto';
+      this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+    });
+    
+    // Handle Enter key
+    input.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        form.dispatchEvent(new Event('submit'));
+      }
+    });
+    
+    // Custom form submission to handle response
+    form.addEventListener('submit', async function(e) {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      
+      const conversationId = document.getElementById('conversation-id-field').value;
+      
+      // Add user message immediately
+      const userMsg = document.createElement('div');
+      userMsg.className = 'message user';
+      userMsg.innerHTML = `
+        <div>
+          <div class="message-role">user</div>
+          <div class="message-content">${escapeHtml(text)}</div>
+        </div>
+      `;
+      messages.appendChild(userMsg);
+      
+      // Clear input
+      input.value = '';
+      input.style.height = 'auto';
+      
+      // Scroll to bottom
+      messages.scrollTop = messages.scrollHeight;
+      
+      // Disable form during request
+      const submitBtn = form.querySelector('button[type="submit"]');
+      submitBtn.disabled = true;
+      
+      // Send request
+      try {
+        const requestBody = { q: text };
+        if (conversationId) {
+          requestBody.conversation_id = conversationId;
+        }
+        
+        const response = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody)
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        
+        // Add assistant message
+        const assistantMsg = document.createElement('div');
+        assistantMsg.className = 'message assistant';
+        assistantMsg.innerHTML = `
+          <div>
+            <div class="message-role">assistant</div>
+            <div class="message-content">${escapeHtml(data.reply || '(empty)')}</div>
+          </div>
+        `;
+        messages.appendChild(assistantMsg);
+        
+        // Handle new conversation_id (redirect if needed)
+        if (data.conversation_id && !conversationId) {
+          // New conversation created - redirect to URL with cid
+          window.location.href = `/ui/chats?cid=${data.conversation_id}`;
+          return;
+        }
+        
+        // Update hidden field if conversation_id changed
+        const hiddenField = document.getElementById('conversation-id-field');
+        if (hiddenField && data.conversation_id) {
+          hiddenField.value = data.conversation_id;
+        }
+        
+        // Scroll to bottom
+        messages.scrollTop = messages.scrollHeight;
+        
+        // Reload page to refresh sidebar and messages
+        setTimeout(() => {
+          window.location.reload();
+        }, 500);
+      } catch (error) {
+        const errorMsg = document.createElement('div');
+        errorMsg.className = 'message assistant';
+        errorMsg.innerHTML = `
+          <div>
+            <div class="message-role">assistant</div>
+            <div class="message-content" style="color: var(--error);">⚠️ Error: ${escapeHtml(error.message)}</div>
+          </div>
+        `;
+        messages.appendChild(errorMsg);
+        messages.scrollTop = messages.scrollHeight;
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+  }
+  
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+  
+  // Scroll to bottom on load
+  if (messages) {
+    messages.scrollTop = messages.scrollHeight;
+  }
+  
+  // Handle rename
+  window.handleRename = function(convId) {
+    const wrapper = document.querySelector(`.chat-item-wrapper[data-conv-id="${convId}"]`);
+    const titleElement = wrapper.querySelector('.chat-item-title');
+    const originalTitle = titleElement.textContent;
+    
+    // Replace title with input
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'chat-item-rename-input';
+    input.value = originalTitle;
+    input.style.width = '100%';
+    input.style.marginBottom = '4px';
+    
+    // Save handler
+    const save = async () => {
+      const newTitle = input.value.trim();
+      if (!newTitle) {
+        alert('Title cannot be empty');
+        input.focus();
+        return;
+      }
+      
+      if (newTitle === originalTitle) {
+        // No change, restore
+        titleElement.textContent = originalTitle;
+        input.replaceWith(titleElement);
+        return;
+      }
+      
+      try {
+        const response = await fetch(`/conversations/${convId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: newTitle })
+        });
+        
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+          throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        
+        // Update title in UI
+        titleElement.textContent = data.title;
+        input.replaceWith(titleElement);
+        
+        // Update current conversation title if it's the active one
+        const mainTitle = document.querySelector('.chats-main-title');
+        if (mainTitle && window.location.search.includes(`cid=${convId}`)) {
+          mainTitle.textContent = data.title;
+        }
+        
+        // Reload page to refresh sidebar
+        setTimeout(() => {
+          window.location.reload();
+        }, 300);
+      } catch (error) {
+        alert(`Error renaming chat: ${error.message}`);
+        input.focus();
+      }
+    };
+    
+    // Cancel handler
+    const cancel = () => {
+      input.replaceWith(titleElement);
+    };
+    
+    // Event handlers
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        save();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        cancel();
+      }
+    });
+    
+    input.addEventListener('blur', () => {
+      // Small delay to allow click events to fire first
+      setTimeout(() => {
+        if (document.activeElement !== input) {
+          cancel();
+        }
+      }, 200);
+    });
+    
+    // Replace and focus
+    titleElement.replaceWith(input);
+    input.focus();
+    input.select();
+  };
+  
+  // Handle delete
+  window.handleDelete = function(convId) {
+    if (!confirm('Are you sure you want to delete this chat?')) {
+      return;
+    }
+    
+    const currentCid = new URLSearchParams(window.location.search).get('cid');
+    const isCurrentChat = currentCid === convId;
+    
+    fetch(`/conversations/${convId}`, {
+      method: 'DELETE'
+    })
+    .then(response => {
+      if (!response.ok) {
+        if (response.status === 404) {
+          // Chat already deleted, just reload
+          window.location.href = '/ui/chats';
+          return;
+        }
+        return response.json().then(errorData => {
+          throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+        });
+      }
+      
+      // Success
+      if (isCurrentChat) {
+        // Redirect to chats list if deleting current chat
+        window.location.href = '/ui/chats';
+      } else {
+        // Just reload to refresh sidebar
+        window.location.reload();
+      }
+    })
+    .catch(error => {
+      alert(`Error deleting chat: ${error.message}`);
+    });
+  };
+})();
+</script>
+{% endblock %}
